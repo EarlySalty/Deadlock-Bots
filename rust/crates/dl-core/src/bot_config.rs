@@ -12,6 +12,14 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+pub const CONCIERGE_TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u64> = 1..=110;
+pub const TEMPVOICE_GRACE_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
+    1..=crate::runtime_config::DAY_SECONDS;
+pub const LLM_MAX_OUTPUT_TOKENS_RANGE: std::ops::RangeInclusive<u32> = 1..=32_768;
+pub const LLM_TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=2.0;
+pub const LLM_REQUEST_TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u64> =
+    CONCIERGE_TIMEOUT_SECONDS_RANGE;
+
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
@@ -387,12 +395,12 @@ impl BotConfig {
                 "storage.legacy_snapshot_path muss ein lokaler Dateipfad sein",
             ));
         }
-        if self.concierge.timeout_seconds == 0 || self.concierge.timeout_seconds > 110 {
+        if !CONCIERGE_TIMEOUT_SECONDS_RANGE.contains(&self.concierge.timeout_seconds) {
             return Err(invalid(
                 "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
             ));
         }
-        if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
+        if !TEMPVOICE_GRACE_SECONDS_RANGE.contains(&self.tempvoice.empty_lane_grace_seconds) {
             return Err(invalid(
                 "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
             ));
@@ -410,13 +418,13 @@ impl BotConfig {
         for (use_case, cfg) in &self.llm.use_cases {
             if cfg
                 .max_output_tokens
-                .is_some_and(|value| !(1..=32_768).contains(&value))
-                || cfg
-                    .temperature
-                    .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+                .is_some_and(|value| !LLM_MAX_OUTPUT_TOKENS_RANGE.contains(&value))
+                || cfg.temperature.is_some_and(|value| {
+                    !value.is_finite() || !LLM_TEMPERATURE_RANGE.contains(&value)
+                })
                 || cfg
                     .request_timeout_seconds
-                    .is_some_and(|value| !(1..=110).contains(&value))
+                    .is_some_and(|value| !LLM_REQUEST_TIMEOUT_SECONDS_RANGE.contains(&value))
                 || cfg
                     .reasoning_effort
                     .as_deref()

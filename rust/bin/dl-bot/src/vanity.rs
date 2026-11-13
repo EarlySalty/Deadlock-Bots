@@ -41,10 +41,11 @@ pub fn spawn_vanity_snapshots(
     pool: PgPool,
     token: String,
     dispatcher: &dl_discord::Dispatcher,
-) -> tokio::task::JoinHandle<()> {
+    limits: dl_bridges::http::HttpLimits,
+) -> Result<tokio::task::JoinHandle<()>, dl_bridges::http::HttpSetupError> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
-    tokio::spawn(async move {
+    let client = dl_bridges::http::client(limits)?;
+    Ok(tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -71,17 +72,18 @@ pub fn spawn_vanity_snapshots(
                 }
             }
         }
-    })
+    }))
 }
 
 pub fn spawn_member_directory_sweep(
     pool: PgPool,
     token: String,
     dispatcher: &dl_discord::Dispatcher,
-) -> tokio::task::JoinHandle<()> {
+    limits: dl_bridges::http::HttpLimits,
+) -> Result<tokio::task::JoinHandle<()>, dl_bridges::http::HttpSetupError> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
-    tokio::spawn(async move {
+    let client = dl_bridges::http::client(limits)?;
+    Ok(tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let start = tokio::time::Instant::now() + MEMBER_DIRECTORY_INTERVAL;
         let mut interval = tokio::time::interval_at(start, MEMBER_DIRECTORY_INTERVAL);
@@ -106,7 +108,7 @@ pub fn spawn_member_directory_sweep(
                 }
             }
         }
-    })
+    }))
 }
 
 async fn poll_one(

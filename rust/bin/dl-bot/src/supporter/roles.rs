@@ -31,7 +31,7 @@ pub fn plan_roles(members: &[MemberSnapshot], active: &HashSet<u64>, max_revokes
         .collect();
     grants.sort_unstable();
     revokes.sort_unstable();
-    let cap = usize::try_from(max_revokes).unwrap_or(usize::MAX);
+    let cap = usize::try_from(max_revokes).unwrap_or(0);
     let revokes_held = revokes.len().saturating_sub(cap);
     revokes.truncate(cap);
     RolePlan {

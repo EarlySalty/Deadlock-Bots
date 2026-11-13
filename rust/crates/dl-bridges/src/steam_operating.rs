@@ -136,18 +136,11 @@ impl super::steam::SteamBotClient {
             .filter(|value| !value.is_empty())
             .ok_or(Error::Unavailable)?;
         let url = format!("{}/internal/config", self.base_url);
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Error::Unavailable)?;
         let mut request = match save {
-            Some(body) => http.patch(url).json(body),
-            None => http.get(url),
+            Some(body) => self.http.patch(url).json(body),
+            None => self.http.get(url),
         };
-        request = request
-            .header("x-internal-token", token)
-            .timeout(std::time::Duration::from_secs(10));
+        request = request.header("x-internal-token", token);
         let response = request.send().await.map_err(|_| Error::Unavailable)?;
         match response.status().as_u16() {
             200 => {}
@@ -227,7 +220,7 @@ mod tests {
                 .await
                 .expect("isolierte Testdaten gültig");
         });
-        let client = crate::steam::SteamBotClient::new(
+        let client = crate::steam::tests::test_client(
             format!("http://{address}"),
             Some("synthetic-token".into()),
         );
@@ -273,7 +266,7 @@ mod tests {
                 .await
                 .expect("isolierte Testdaten gültig");
         });
-        let client = crate::steam::SteamBotClient::new(
+        let client = crate::steam::tests::test_client(
             format!("http://{address}"),
             Some("synthetic-token".into()),
         );

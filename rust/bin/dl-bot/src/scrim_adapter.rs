@@ -34,7 +34,6 @@ const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
 const SCRIMREQ_PREFIX: &str = "scrimreq:v1:";
 pub const SCRIMREPL_PREFIX: &str = "scrimrepl:v1:";
 const RUNTIME_CACHE_TTL: Duration = Duration::from_secs(2);
-const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 const RELAY_LEASE_OWNER: &str = "dlbots:scrim_adapter";
 const RELAY_EVENT_SOURCE: &str = "dl_bots";
 const RELAY_COMMAND_SCOPE: &str = "scrim_relay";
@@ -370,7 +369,11 @@ impl RelayClientError {
 impl fmt::Display for RelayClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingToken => write!(f, "TURNIER_INTERNAL_API_TOKEN fehlt"),
+            Self::MissingToken => write!(
+                f,
+                "Interner Token für die Turnier-API fehlt ({})",
+                dl_core::internal_tokens::key_names(dl_core::internal_tokens::TURNIER_API_RECEIVER)
+            ),
             Self::Transport(error) => write!(f, "Turnier-Scrim-Relay nicht erreichbar: {error}"),
             Self::Http { status, message } => {
                 write!(f, "Turnier-Scrim-Relay HTTP {}: {message}", status.as_u16())
@@ -531,40 +534,38 @@ fn actor_display_header_value(value: &str) -> Result<String, String> {
 pub struct TurnierScrimClient {
     http: reqwest::Client,
     base_url: String,
-    token: String,
+    token: Option<String>,
 }
 
 impl TurnierScrimClient {
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(RELAY_TIMEOUT)
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .expect("statischer Turnier-Scrim-HTTP-Client"),
-            base_url: lookup("TURNIER_INTERNAL_API_BASE_URL")
+    pub fn from_lookup(
+        lookup: impl Fn(&str) -> Option<String>,
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Self, dl_bridges::http::HttpSetupError> {
+        Ok(Self {
+            http: dl_bridges::http::internal_client(limits)?,
+            base_url: dl_core::internal_tokens::present(&lookup, "TURNIER_INTERNAL_API_BASE_URL")
                 .unwrap_or_else(|| "http://127.0.0.1:8900".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            token: lookup("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default(),
-        }
+            token: dl_core::internal_tokens::turnier_api_token(&lookup),
+        })
     }
 
     async fn relay(
         &self,
         request: &MatchRequestResponseRequest,
     ) -> Result<ActionReceipt, RelayClientError> {
-        if self.token.trim().is_empty() {
+        let Some(token) = self.token.as_deref() else {
             return Err(RelayClientError::MissingToken);
-        }
+        };
         let response = self
             .http
             .post(format!(
                 "{}/internal/turnier/v1/scrims/interactions/match-request-response",
                 self.base_url
             ))
-            .header(INTERNAL_TOKEN_HEADER, &self.token)
+            .header(INTERNAL_TOKEN_HEADER, token)
             .header("X-Request-Id", &request.event)
             .header("Idempotency-Key", &request.idempotency)
             .json(request)
@@ -602,16 +603,16 @@ impl TurnierScrimClient {
         &self,
         request: &ReplacementRequestRelayRequest,
     ) -> Result<ActionReceipt, RelayClientError> {
-        if self.token.trim().is_empty() {
+        let Some(token) = self.token.as_deref() else {
             return Err(RelayClientError::MissingToken);
-        }
+        };
         let response = self
             .http
             .patch(format!(
                 "{}/internal/turnier/v1/scrims/replacement-requests/{}",
                 self.base_url, request.replacement_request
             ))
-            .header(INTERNAL_TOKEN_HEADER, &self.token)
+            .header(INTERNAL_TOKEN_HEADER, token)
             .header("X-Request-Id", &request.event)
             .header("Idempotency-Key", &request.idempotency)
             .header("X-Actor-Discord-Id", &request.actor)
@@ -704,11 +705,12 @@ impl RelayInteractionHandler {
 pub fn relay_handler(
     pool: PgPool,
     lookup: impl Fn(&str) -> Option<String>,
-) -> Arc<dyn InteractionHandler> {
-    Arc::new(RelayInteractionHandler::new(
-        TurnierScrimClient::from_lookup(lookup),
+    limits: dl_bridges::http::HttpLimits,
+) -> Result<Arc<dyn InteractionHandler>, dl_bridges::http::HttpSetupError> {
+    Ok(Arc::new(RelayInteractionHandler::new(
+        TurnierScrimClient::from_lookup(lookup, limits)?,
         pool,
-    )) as Arc<dyn InteractionHandler>
+    )) as Arc<dyn InteractionHandler>)
 }
 
 enum RelayCommandState {
@@ -1872,6 +1874,8 @@ async fn correct_lagebild(
 
 #[cfg(test)]
 mod tests {
+    const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
+
     use super::*;
     use serde_json::json;
     use sqlx::Row;
@@ -2544,7 +2548,7 @@ mod tests {
                 .build()
                 .expect("client"),
             base_url: format!("http://{address}"),
-            token: "relay-token".to_string(),
+            token: Some("relay-token".to_string()),
         };
         let request = match_request_response_request(BridgeInteraction {
             custom_id: "scrimreq:v1:none:31:2".to_string(),
@@ -2610,7 +2614,7 @@ mod tests {
                 .build()
                 .expect("client"),
             base_url: format!("http://{address}"),
-            token: "relay-token".to_string(),
+            token: Some("relay-token".to_string()),
         };
         let request = replacement_request_relay_request(BridgeInteraction {
             custom_id: "scrimrepl:v1:77:decline".to_string(),
@@ -2709,7 +2713,7 @@ mod tests {
                     .no_proxy()
                     .build()?,
                 base_url: format!("http://{address}"),
-                token: "relay-token".to_string(),
+                token: Some("relay-token".to_string()),
             },
             db.pool().clone(),
         );
@@ -2956,7 +2960,7 @@ mod tests {
                     .no_proxy()
                     .build()?,
                 base_url: format!("http://{address}"),
-                token: "relay-token".to_string(),
+                token: Some("relay-token".to_string()),
             },
             db.pool().clone(),
         );
@@ -3234,7 +3238,7 @@ mod tests {
                     .no_proxy()
                     .build()?,
                 base_url: format!("http://{address}"),
-                token: "relay-token".to_string(),
+                token: Some("relay-token".to_string()),
             },
             db.pool().clone(),
         );
@@ -3264,7 +3268,7 @@ mod tests {
                     .no_proxy()
                     .build()?,
                 base_url: "http://127.0.0.1:9".to_string(),
-                token: "relay-token".to_string(),
+                token: Some("relay-token".to_string()),
             },
             db.pool().clone(),
         );
@@ -3336,7 +3340,7 @@ mod tests {
                 .no_proxy()
                 .build()?,
             base_url: format!("http://{address}"),
-            token: "relay-token".to_string(),
+            token: Some("relay-token".to_string()),
         })
     }
 

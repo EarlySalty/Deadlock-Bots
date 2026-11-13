@@ -112,26 +112,23 @@ pub trait CoachingWebsiteSyncClient: Send + Sync {
 }
 
 impl WebsiteClient {
-    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
-        let get = |key: &str| {
-            lookup(key)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let token = dl_core::internal_tokens::first_token(
-            get,
+    pub fn from_env(
+        lookup: impl Fn(&str) -> Option<String>,
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Option<Arc<Self>>, dl_bridges::http::HttpSetupError> {
+        let Some(token) = dl_core::internal_tokens::first_token(
+            &lookup,
             dl_core::internal_tokens::WEBSITE_API_RECEIVER,
-        )?;
-        let base_url = get("WEBSITE_API_BASE")
+        ) else {
+            return Ok(None);
+        };
+        let base_url = dl_core::internal_tokens::present(&lookup, "WEBSITE_API_BASE")
             .unwrap_or_else(|| "https://deutsche-deadlock-community.de/api".to_string());
-        Some(Arc::new(Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+        Ok(Some(Arc::new(Self {
+            http: dl_bridges::http::client(limits)?,
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-        }))
+        })))
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {

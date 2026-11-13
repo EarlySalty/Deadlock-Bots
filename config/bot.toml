@@ -37,9 +37,6 @@ concierge_enabled = true
 concierge_proactive = true
 concierge_pate_panel_channel_id = 1562083323507900517
 concierge_pate_help_channel_id = 1426220702054355077
-supporter_request_timeout_ms = 12000
-supporter_funding_goal_cents = 25000
-supporter_tiers_eur = [5, 10, 20, 50]
 
 [storage]
 # Bisheriger Config::db_path-Vertrag. Kein Postgres-Zugang.

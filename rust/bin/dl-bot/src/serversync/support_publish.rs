@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use dl_core::runtime_config::{
-    SUPPORTER_MIN_CENTS, SUPPORTER_TIP_VALID_DAYS, SUPPORTER_TWITCH_CHANNELS,
-};
+use dl_core::runtime_config::SUPPORTER_TWITCH_CHANNELS;
 
 pub const SUPPORT_CHANNEL_ID: u64 = 1_483_136_301_271_355_532;
 pub const SUPPORT_CHANNEL_NAME: &str = "server-support";
@@ -71,7 +69,7 @@ const CUSTOM_ID_MAX_CHARS: usize = 100;
 pub const SUPPORT_INTRO: &str = "\
 # Server unterstützen\n\
 \n\
-Hier steht, wie du den Server und die Projekte unterstützen kannst und was du dafür bekommst. Egal welchen Weg du wählst, du bekommst dieselbe Rolle und dieselben Vorteile.";
+Hier steht, wie du den Server und die Projekte unterstützen kannst. Jeder Weg zählt gleich.";
 pub const SUPPORT_PERKS: &str = "\
 ## Was du jetzt bekommst\n\
 \n\
@@ -112,11 +110,9 @@ pub const SUPPORT_PAY: &str = "\
 \n\
 **Monatlich über Stripe.** {stufen} im Monat.{rolle} Kündigen kannst du jederzeit selbst über den Button unten.\n\
 \n\
-**Einmalig.** Du wählst den Betrag selbst, ab {mindestbetrag}. Dafür bekommst du die Vorteile für {tage} Tage.\n\
+**Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.{rolle}\n\
 \n\
 **Server-Boost.** Zählt vorerst als Unterstützung.{rolle}";
-pub const SUPPORT_PLUS: &str = "\
-**Steam Plus.** Plus beim Steam Bot kostet {plus_preis} im Monat und zählt auch als Unterstützung.{rolle}";
 pub const SUPPORT_TWITCH: &str = "\
 **Twitch-Sub.** Ein Abo bei {kanaele} zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
 pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst ❤️";
@@ -136,7 +132,6 @@ pub struct SupportFunding {
 #[serde(deny_unknown_fields)]
 pub struct SupportPanelOptions {
     pub tiers_eur: Vec<u64>,
-    pub plus_monthly_cents: Option<i64>,
     pub twitch: bool,
     pub role_grant: bool,
 }
@@ -146,8 +141,8 @@ impl SupportPanelOptions {
         serde_json::to_string(self).map_err(|error| error.to_string())
     }
 
-    pub fn from_kv(raw: &str) -> Option<Self> {
-        serde_json::from_str(raw).ok()
+    pub fn from_kv(raw: &str) -> Result<Self, String> {
+        serde_json::from_str(raw).map_err(|error| error.to_string())
     }
 }
 
@@ -190,11 +185,18 @@ impl SupportFunding {
         format!("{}:{}", self.raised_cents, self.goal_cents)
     }
 
-    pub fn from_kv(raw: &str) -> Option<Self> {
-        let (raised, goal) = raw.split_once(':')?;
-        Some(Self {
-            raised_cents: raised.trim().parse().ok()?,
-            goal_cents: goal.trim().parse().ok()?,
+    pub fn from_kv(raw: &str) -> Result<Self, String> {
+        let (raised, goal) = raw
+            .split_once(':')
+            .ok_or_else(|| format!("kein Trennzeichen in `{raw}`"))?;
+        let cents = |part: &str| {
+            part.trim()
+                .parse::<i64>()
+                .map_err(|error| format!("`{part}` ist kein Centbetrag: {error}"))
+        };
+        Ok(Self {
+            raised_cents: cents(raised)?,
+            goal_cents: cents(goal)?,
         })
     }
 }
@@ -289,7 +291,6 @@ struct ResolvedSupportTexts {
     free: String,
     funding: String,
     pay: String,
-    plus: String,
     twitch: String,
     thanks: String,
 }
@@ -339,6 +340,7 @@ struct SupportBodyTextsToml {
 impl SupportBodyTextsToml {
     fn has_legacy_fields(&self) -> bool {
         [
+            &self.plus,
             &self.title,
             &self.boost,
             &self.donation,
@@ -700,7 +702,6 @@ impl ResolvedSupportConfig {
                 free: SUPPORT_FREE.to_string(),
                 funding: SUPPORT_FUNDING.to_string(),
                 pay: SUPPORT_PAY.to_string(),
-                plus: SUPPORT_PLUS.to_string(),
                 twitch: SUPPORT_TWITCH.to_string(),
                 thanks: SUPPORT_THANKS.to_string(),
             },
@@ -726,7 +727,6 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.texts.free, file.texts.free);
         apply_optional(&mut self.texts.funding, file.texts.funding);
         apply_optional(&mut self.texts.pay, file.texts.pay);
-        apply_optional(&mut self.texts.plus, file.texts.plus);
         apply_optional(&mut self.texts.twitch, file.texts.twitch);
         apply_optional(&mut self.texts.thanks, file.texts.thanks);
         apply_optional(&mut self.buttons.join, file.buttons.join);
@@ -735,7 +735,7 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.buttons.twitch, file.buttons.twitch);
         if legacy {
             warnings.push(
-                "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
+                "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Steam Plus, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
                     .to_string(),
             );
         }
@@ -743,39 +743,73 @@ impl ResolvedSupportConfig {
     }
 }
 
+const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "prozent", "stand", "ziel"];
+const PAY_PLACEHOLDERS: &[&str] = &["stufen", "rolle"];
+const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
+
 fn placeholder_warnings(
     texts: &ResolvedSupportTexts,
     options: &SupportPanelOptions,
     warnings: &mut Vec<String>,
 ) {
-    let mut checks: Vec<(&str, &str, &[&str])> = vec![
+    let twitch_required: &[&str] = if options.twitch {
+        TWITCH_PLACEHOLDERS
+    } else {
+        &[]
+    };
+    let checks: [(&str, &str, &[&str], &[&str]); 9] = [
+        (&texts.intro, "intro", &[], &[]),
+        (&texts.perks, "perks", &[], &[]),
+        (&texts.steam, "steam", &[], &[]),
+        (&texts.planned, "planned", &[], &[]),
+        (&texts.free, "free", &[], &[]),
         (
             &texts.funding,
             "funding",
-            &["{balken}", "{prozent}", "{stand}", "{ziel}"],
+            FUNDING_PLACEHOLDERS,
+            FUNDING_PLACEHOLDERS,
         ),
+        (&texts.pay, "pay", PAY_PLACEHOLDERS, PAY_PLACEHOLDERS),
         (
-            &texts.pay,
-            "pay",
-            &["{stufen}", "{mindestbetrag}", "{tage}", "{rolle}"],
+            &texts.twitch,
+            "twitch",
+            twitch_required,
+            TWITCH_PLACEHOLDERS,
         ),
+        (&texts.thanks, "thanks", &[], &[]),
     ];
-    if options.plus_monthly_cents.is_some() {
-        checks.push((&texts.plus, "plus", &["{plus_preis}", "{rolle}"]));
-    }
-    if options.twitch {
-        checks.push((&texts.twitch, "twitch", &["{kanaele}"]));
-    }
-    for (text, field, placeholders) in checks {
-        for placeholder in placeholders
-            .iter()
-            .filter(|placeholder| !text.contains(**placeholder))
-        {
+    for (text, field, required, allowed) in checks {
+        let found = placeholder_names(text);
+        for missing in required.iter().filter(|name| !found.contains(name)) {
             warnings.push(format!(
-                "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {placeholder}; der Wert fehlt dann im Panel."
+                "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {{{missing}}}; der Wert fehlt dann im Panel."
+            ));
+        }
+        for unknown in found.iter().filter(|name| !allowed.contains(name)) {
+            warnings.push(format!(
+                "Support-Textdatei: [texts].{field} enthält den unbekannten Platzhalter {{{unknown}}}; er erscheint dann wörtlich im Panel."
             ));
         }
     }
+}
+
+fn placeholder_names(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let name = &after[..end];
+        if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_') {
+            names.push(name);
+            rest = &after[end + 1..];
+        } else {
+            rest = after;
+        }
+    }
+    names
 }
 
 fn apply_optional(target: &mut String, value: Option<String>) {
@@ -793,7 +827,7 @@ fn support_messages(
 ) -> Vec<SupportBuiltMessage> {
     let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, warnings);
     let messages = vec![
-        main_message(banner, config),
+        main_message(banner, config, options),
         message_from_container(
             SUPPORT_COMPONENT_ID_BENEFITS_CONTAINER,
             None,
@@ -812,6 +846,7 @@ fn support_messages(
 fn main_message(
     banner: Option<SupportBannerOutput>,
     config: &ResolvedSupportConfig,
+    options: &SupportPanelOptions,
 ) -> SupportBuiltMessage {
     let mut children = Vec::new();
     let mut attachments = Vec::new();
@@ -826,9 +861,14 @@ fn main_message(
             relative_path: banner.relative_path.clone(),
         });
     }
+    let perks = if options.role_grant {
+        config.texts.perks.as_str()
+    } else {
+        ""
+    };
     children.extend(section_children(&[
         (SUPPORT_COMPONENT_ID_MAIN_TEXT, &config.texts.intro),
-        (SUPPORT_COMPONENT_ID_PERKS, &config.texts.perks),
+        (SUPPORT_COMPONENT_ID_PERKS, perks),
         (SUPPORT_COMPONENT_ID_STEAM, &config.texts.steam),
     ]));
     message_from_container(
@@ -848,17 +888,7 @@ fn render_pay_text(texts: &ResolvedSupportTexts, options: &SupportPanelOptions) 
     let mut parts = vec![texts
         .pay
         .replace("{stufen}", &format_tier_list(&options.tiers_eur))
-        .replace("{mindestbetrag}", &format_euro(SUPPORTER_MIN_CENTS))
-        .replace("{tage}", &SUPPORTER_TIP_VALID_DAYS.to_string())
         .replace("{rolle}", role)];
-    if let Some(cents) = options.plus_monthly_cents {
-        parts.push(
-            texts
-                .plus
-                .replace("{plus_preis}", &format_euro(cents))
-                .replace("{rolle}", role),
-        );
-    }
     if options.twitch {
         parts.push(texts.twitch.replace("{kanaele}", &twitch_channel_list()));
     }
@@ -1262,7 +1292,6 @@ mod tests {
     fn options() -> SupportPanelOptions {
         SupportPanelOptions {
             tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
-            plus_monthly_cents: None,
             twitch: false,
             role_grant: true,
         }
@@ -1366,6 +1395,20 @@ enabled = false
         assert!(!rendered.contains("Warum ich Unterstützung brauche"));
         assert!(!rendered.contains("KI-Abos"));
         assert!(!rendered.contains("Ko-fi"));
+        let labels: Vec<String> = output
+            .messages
+            .iter()
+            .flat_map(|message| buttons(&message.payload))
+            .filter_map(|button| button["label"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                SUPPORT_BECOME_BUTTON_LABEL.to_string(),
+                SUPPORT_TIP_BUTTON_LABEL.to_string(),
+                SUPPORT_MANAGE_BUTTON_LABEL.to_string()
+            ]
+        );
         assert!(output
             .warnings
             .iter()
@@ -1442,11 +1485,10 @@ enabled = false
             pay_text[1],
             SUPPORT_PAY
                 .replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
-                .replace("{mindestbetrag}", "5 €")
-                .replace("{tage}", "31")
                 .replace("{rolle}", SUPPORT_ROLE_NOTE)
         );
         assert!(!pay_text[1].contains("Steam Plus"));
+        assert!(!pay_text[1].contains("Tage"));
         assert!(!pay_text[1].contains("Twitch"));
         assert_eq!(pay_text[2], SUPPORT_THANKS);
         let pay_buttons = buttons(pay);
@@ -1497,10 +1539,9 @@ enabled = false
     }
 
     #[test]
-    fn plus_und_twitch_erscheinen_nur_wenn_eingerichtet() {
+    fn twitch_erscheint_nur_wenn_eingerichtet() {
         let temp = tempfile::tempdir().expect("tempdir");
         let full = SupportPanelOptions {
-            plus_monthly_cents: Some(300),
             twitch: true,
             ..options()
         };
@@ -1514,7 +1555,6 @@ enabled = false
         );
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
-        assert!(pay_text[1].contains("**Steam Plus.** Plus beim Steam Bot kostet 3 € im Monat"));
         assert!(pay_text[1].ends_with(
             "Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
         ));
@@ -1580,8 +1620,10 @@ enabled = false
     #[test]
     fn funding_kv_rundreise() {
         let value = funding(1234);
-        assert_eq!(SupportFunding::from_kv(&value.to_kv()), Some(value));
-        assert_eq!(SupportFunding::from_kv("kaputt"), None);
+        assert_eq!(SupportFunding::from_kv(&value.to_kv()), Ok(value));
+        for broken in ["kaputt", "12:x", "x:12", ""] {
+            assert!(SupportFunding::from_kv(broken).is_err(), "{broken}");
+        }
     }
 
     #[test]
@@ -1728,15 +1770,35 @@ enabled = false
     }
 
     #[test]
-    fn repo_support_texts_stimmen_mit_den_defaults_ueberein() {
+    fn repo_support_textdatei_ueberschreibt_nichts() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let mut warnings = Vec::new();
-        let config = load_support_runtime_config(&repo, &mut warnings).expect("repo config");
-        assert!(
-            warnings.is_empty(),
-            "Repo-Textdatei soll ohne Warnung laden: {warnings:?}"
+        let raw = fs::read_to_string(repo.join(SUPPORT_TEXTS_FILE)).expect("repo textdatei");
+        let file = toml::from_str::<SupportTextsToml>(&raw).expect("repo textdatei parst");
+        assert!(!file.texts.has_legacy_fields());
+        assert_eq!(
+            [
+                &file.texts.intro,
+                &file.texts.perks,
+                &file.texts.steam,
+                &file.texts.planned,
+                &file.texts.free,
+                &file.texts.funding,
+                &file.texts.pay,
+                &file.texts.twitch,
+                &file.texts.thanks,
+                &file.buttons.join,
+                &file.buttons.tip,
+                &file.buttons.manage,
+                &file.buttons.twitch,
+            ]
+            .iter()
+            .filter(|field| field.is_some())
+            .count(),
+            0
         );
-        assert_eq!(config, ResolvedSupportConfig::from_defaults());
+        let mut warnings = Vec::new();
+        load_support_runtime_config(&repo, &mut warnings).expect("repo config");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -1774,28 +1836,42 @@ enabled = false
 
     #[test]
     fn rollenzusage_haengt_am_vergabeschalter() {
-        let with_plus = SupportPanelOptions {
-            plus_monthly_cents: Some(300),
+        let granted = pay_text_for(&options());
+        assert_eq!(granted.matches(SUPPORT_ROLE_NOTE.trim()).count(), 3);
+        let manual_options = SupportPanelOptions {
+            role_grant: false,
             ..options()
         };
-        let granted = pay_text_for(&with_plus);
-        assert_eq!(granted.matches(SUPPORT_ROLE_NOTE.trim()).count(), 3);
-        let manual = pay_text_for(&SupportPanelOptions {
-            role_grant: false,
-            ..with_plus
-        });
+        let manual = pay_text_for(&manual_options);
         assert!(!manual.contains("Rolle"), "{manual}");
         assert!(!manual.contains('{'), "{manual}");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rendered = |options: &SupportPanelOptions| {
+            build_support_publish_output(temp.path(), &stored(&[], None), funding(0), options, true)
+                .expect("output")
+                .messages
+                .iter()
+                .flat_map(|message| text_contents(&message.payload))
+                .collect::<Vec<_>>()
+        };
+        assert!(rendered(&options()).contains(&SUPPORT_PERKS.to_string()));
+        let manual_texts = rendered(&manual_options);
+        assert!(!manual_texts.contains(&SUPPORT_PERKS.to_string()));
+        assert!(
+            manual_texts.iter().all(|text| !text.contains("Rolle")),
+            "{manual_texts:?}"
+        );
     }
 
     #[test]
-    fn mindestbetrag_und_laufzeit_kommen_aus_dl_core() {
+    fn einmalig_nennt_keine_zahlen_die_der_steam_bot_festlegt() {
         let text = pay_text_for(&options());
-        assert!(text.contains(&format!(
-            "ab {}. Dafür bekommst du die Vorteile für {} Tage.",
-            format_euro(SUPPORTER_MIN_CENTS),
-            SUPPORTER_TIP_VALID_DAYS
-        )));
+        let once = text
+            .split("\n\n")
+            .find(|part| part.starts_with("**Einmalig.**"))
+            .expect("Einmalig-Absatz");
+        assert!(!once.chars().any(|ch| ch.is_ascii_digit()), "{once}");
+        assert!(once.contains("Zahlungsseite"), "{once}");
         assert!(!text.contains('{'), "{text}");
     }
 
@@ -1806,35 +1882,57 @@ enabled = false
         placeholder_warnings(&texts, &options(), &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         texts.funding = "{stand}".to_string();
-        texts.plus = "Plus".to_string();
         placeholder_warnings(&texts, &options(), &mut warnings);
         assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(warnings
             .iter()
             .all(|warning| warning.contains("[texts].funding")));
         warnings.clear();
-        let with_plus = SupportPanelOptions {
-            plus_monthly_cents: Some(300),
+        texts = ResolvedSupportConfig::from_defaults().texts;
+        texts.pay = format!("{} ab {{mindestbetrag}} für {{tage}} Tage", texts.pay);
+        texts.thanks = "Danke {name}".to_string();
+        texts.twitch = "Twitch".to_string();
+        placeholder_warnings(&texts, &options(), &mut warnings);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        for (field, name) in [
+            ("pay", "{mindestbetrag}"),
+            ("pay", "{tage}"),
+            ("thanks", "{name}"),
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.contains(&format!(
+                    "[texts].{field} enthält den unbekannten Platzhalter {name}"
+                ))),
+                "{field} {name}: {warnings:?}"
+            );
+        }
+        warnings.clear();
+        let with_twitch = SupportPanelOptions {
+            twitch: true,
             ..options()
         };
-        placeholder_warnings(&texts, &with_plus, &mut warnings);
-        assert_eq!(
+        placeholder_warnings(&texts, &with_twitch, &mut warnings);
+        assert!(
             warnings
                 .iter()
-                .filter(|warning| warning.contains("[texts].plus"))
-                .count(),
-            2
+                .any(|warning| warning
+                    .contains("[texts].twitch enthält keinen Platzhalter {kanaele}"))
         );
+        assert_eq!(placeholder_names("{a} {B} {} {x_y} {"), vec!["a", "x_y"]);
     }
 
     #[test]
     fn panel_optionen_rundreise() {
         let value = SupportPanelOptions {
-            plus_monthly_cents: Some(300),
+            twitch: true,
             ..options()
         };
         let raw = value.to_kv().expect("kv");
-        assert_eq!(SupportPanelOptions::from_kv(&raw), Some(value));
-        assert_eq!(SupportPanelOptions::from_kv("kaputt"), None);
+        assert_eq!(SupportPanelOptions::from_kv(&raw), Ok(value));
+        assert!(SupportPanelOptions::from_kv("kaputt").is_err());
+        assert!(SupportPanelOptions::from_kv(
+            r#"{"tiers_eur":[5],"plus_monthly_cents":300,"twitch":false,"role_grant":true}"#
+        )
+        .is_err());
     }
 }

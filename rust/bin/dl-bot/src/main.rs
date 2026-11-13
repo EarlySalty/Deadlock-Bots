@@ -36,6 +36,8 @@ use anyhow::Context;
 use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
+const SERVERSYNC_TOKEN_OVERRIDE: &str = "SERVERSYNC_INTERNAL_TOKEN";
+
 fn env(name: &str) -> Option<String> {
     operating_value(name)
         .map(|v| v.trim().to_string())
@@ -608,12 +610,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
+    let http_limits = dl_bridges::http::HttpLimits::from_bridges(&operating.runtime.bridges);
+    let supporter_config = supporter::SupporterConfig::new(
+        &operating.runtime.community,
+        &operating.services.steam_api_url,
+        env,
+    );
+    supporter_config.log_effective();
+    let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config, http_limits)
+        .context("HTTP-Client für die Unterstützer-Knöpfe")?;
     let serversync_concrete = serversync::ServerSyncService::new(
         central_pool.clone(),
         adapter.clone(),
         discord_token.clone(),
         serversync::GUILD_ID,
-    );
+        http_limits,
+        supporter_links.clone(),
+    )
+    .context("HTTP-Client für Server-Sync")?;
     let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_role_port: Arc<dyn dl_community::reaction_roles::ReactionRolePort> =
@@ -634,14 +648,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // ueber das Compliance-Gate statt am Gate vorbei.
     let turnier_model = model_from_lookup(env, "TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
     let turnier_generator = chat_text_generator(dl_ai::LlmUseCase::TurnierVorschlag, false);
-    let turnier_proposals = Arc::new(turnierglue::TurnierProposalService::from_env(
-        adapter.clone(),
-        turnier_generator,
-        turnier_model,
-        operating_value,
-    ));
+    let turnier_proposals = Arc::new(
+        turnierglue::TurnierProposalService::from_env(
+            adapter.clone(),
+            turnier_generator,
+            turnier_model,
+            operating_value,
+            http_limits,
+        )
+        .context("HTTP-Client für die Turnier-API")?,
+    );
     turnierglue::register(&mut router, turnier_proposals.clone());
-    let steam_client = dl_bridges::steam::SteamBotClient::from_env(operating_value);
+    let steam_client =
+        dl_bridges::steam::SteamBotClient::from_env(operating_value, &operating.runtime.bridges)
+            .context("HTTP-Client für den Steam Bot")?;
     dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), central_pool.clone());
     router.on_command(
         "changelog post",
@@ -653,21 +673,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
-    let supporter_config = supporter::SupporterConfig::new(
-        &operating.runtime.community,
-        &operating.services.steam_api_url,
-        env,
-    );
-    supporter_config.log_effective();
-    let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config);
-    supporter::register(
-        &mut router,
-        supporter_links.clone(),
-        &supporter_config.panel_options(),
-    );
-    serversync_concrete
-        .set_supporter_funding(supporter_links)
-        .await;
+    supporter::register(&mut router, supporter_links, &supporter_config);
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
@@ -675,11 +681,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             env,
             dl_core::internal_tokens::DASHBOARD_INTERNAL_RECEIVER,
         ),
-    );
+        http_limits,
+    )
+    .context("HTTP-Client für die Twitch-Verknüpfung")?;
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
         scrim_adapter::ScrimRuntimeGate::with_default_ttl(central_pool.clone());
-    let scrim_relay_handler = scrim_adapter::relay_handler(central_pool.clone(), operating_value);
+    let scrim_relay_handler =
+        scrim_adapter::relay_handler(central_pool.clone(), operating_value, http_limits)
+            .context("HTTP-Client für das Turnier-Scrim-Relay")?;
     tracing::info!("Scrim-Ownership wird ueber scrim.runtime_control entschieden");
     scrimglue::register(
         &mut router,
@@ -784,7 +794,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::VoiceNudgeGlue {
             inner: dl_voice::glue::NudgeGlue {
                 adapter: adapter.clone(),
-                steam: dl_bridges::steam::SteamBotClient::from_env(operating_value),
+                steam: steam_client.clone(),
                 log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
             },
             concierge_store: concierge_memory_store.clone(),
@@ -1155,7 +1165,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
     // Der Website-Client wird weiter für CoachingSync (Roster/Termin-DMs)
     // geteilt. None = kein interner Token → Sync inaktiv.
-    let coaching_website = dl_community::coaching::WebsiteClient::from_env(operating_value);
+    let coaching_website =
+        dl_community::coaching::WebsiteClient::from_env(operating_value, http_limits)
+            .context("HTTP-Client für die Coaching-Website")?;
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         central_pool.clone(),
         Arc::new(modglue::CoachingReqGlue {
@@ -1286,10 +1298,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::retention::register(&mut router, central_pool.clone(), retention_port.clone());
 
     // Alt-Buttons bleiben klickbar (kein Rollen-Grant). Steam-Login bleibt.
-    onboardglue::register(
-        &mut router,
-        dl_bridges::steam::SteamBotClient::from_env(operating_value),
-    );
+    onboardglue::register(&mut router, steam_client.clone());
 
     // Moderation (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated.
     // Text-Analyze laeuft ueber Fireworks, Bild-Analyze und Verify ueber OpenAI nano.
@@ -1406,9 +1415,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     };
 
     // Master-Broker :8770 — Token-Kette wie das Original
-    let broker_token =
-        dl_core::internal_tokens::first_token(env, dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
-        .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let broker_token = dl_core::internal_tokens::first_token(
+        env,
+        dl_core::internal_tokens::MASTER_BROKER_RECEIVER,
+    )
+    .with_context(|| {
+        format!(
+            "Broker-Token fehlt ({})",
+            dl_core::internal_tokens::key_names(dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
+        )
+    })?;
     let twitch_invites = twitch_invites::TwitchInvites::new(
         central_pool.clone(),
         adapter.clone(),
@@ -1485,12 +1501,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
     // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(|| {
-        dl_core::internal_tokens::first_token(env, dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
-    });
+    let serversync_token = dl_core::internal_tokens::present(&env, SERVERSYNC_TOKEN_OVERRIDE)
+        .or_else(|| {
+            dl_core::internal_tokens::first_token(
+                env,
+                dl_core::internal_tokens::MASTER_BROKER_RECEIVER,
+            )
+        });
     if serversync_token.is_none() {
         tracing::warn!(
-            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
+            keys = %format!(
+                "{SERVERSYNC_TOKEN_OVERRIDE}/{}",
+                dl_core::internal_tokens::key_names(dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
+            ),
+            "Kein interner Token, die Server-Sync-HTTP-Routen antworten mit 403"
         );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);
@@ -1508,13 +1532,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
     let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
     let mcp_state = Arc::new(
-        mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
-            .context("MCP-Connector-State")?
-            .with_public_source(adapter.clone(), central_pool.clone(), our_guild_id)
-            .with_public_access(
-                dl_core::runtime_config::secret_value("DISCORD_PUBLIC_FACTS_TOKEN"),
-                tempvoice.clone(),
-            )?,
+        mcp::McpState::from_config(
+            discord_token.clone(),
+            mcp_token,
+            &operating.runtime.start,
+            http_limits,
+        )
+        .context("MCP-Connector-State")?
+        .with_public_source(adapter.clone(), central_pool.clone(), our_guild_id)
+        .with_public_access(
+            dl_core::runtime_config::secret_value("DISCORD_PUBLIC_FACTS_TOKEN"),
+            tempvoice.clone(),
+        )?,
     );
     let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
@@ -2014,12 +2043,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             central_pool.clone(),
             discord_token.clone(),
             &dispatcher,
-        );
+            http_limits,
+        )
+        .context("HTTP-Client für Vanity-Schnappschüsse")?;
         let _member_directory_sweep = vanity::spawn_member_directory_sweep(
             central_pool.clone(),
             discord_token.clone(),
             &dispatcher,
-        );
+            http_limits,
+        )
+        .context("HTTP-Client für das Mitgliederverzeichnis")?;
         let mut panel_cache_ready = dispatcher.subscribe_gateway();
         let tempvoice_interface_ready = tempvoice_interface.clone();
         tokio::spawn(async move {

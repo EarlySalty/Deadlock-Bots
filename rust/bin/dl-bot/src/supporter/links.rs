@@ -5,15 +5,14 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 
-use dl_core::runtime_config::{
-    SUPPORTER_MIN_CENTS, SUPPORTER_TIP_VALID_DAYS, SUPPORTER_TWITCH_CHANNELS,
-};
+use dl_bridges::http::{internal_client, HttpLimits, HttpSetupError};
+use dl_core::runtime_config::SUPPORTER_TWITCH_CHANNELS;
 
 use super::{FundingSource, SupporterConfig};
 use crate::serversync::support_publish::{
-    format_euro, format_whole_euro, join_alternatives, tier_button_id, SupportFunding,
-    SupportPanelOptions, SUPPORT_BUTTON_BECOME, SUPPORT_BUTTON_MANAGE, SUPPORT_BUTTON_TIP,
-    SUPPORT_BUTTON_TWITCH, SUPPORT_TIER_BUTTON_PREFIX,
+    format_whole_euro, join_alternatives, tier_button_id, SupportFunding, SupportPanelOptions,
+    SUPPORT_BUTTON_BECOME, SUPPORT_BUTTON_MANAGE, SUPPORT_BUTTON_TIP, SUPPORT_BUTTON_TWITCH,
+    SUPPORT_TIER_BUTTON_PREFIX,
 };
 
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
@@ -25,8 +24,6 @@ const TWITCH_CONNECT_PATH: &str = "/internal/supporter/twitch-connect-link";
 const PUBLIC_ORIGIN: &str = "https://deutsche-deadlock-community.de/";
 const STRIPE_HOST_SUFFIX: &str = ".stripe.com";
 const LINK_URL_MAX_LEN: usize = 512;
-const MISSING_TIMEOUT: &str = "supporter_request_timeout_ms fehlt";
-const MISSING_CLIENT: &str = "HTTP-Client für die Unterstützer-Knöpfe ließ sich nicht erstellen";
 const MISSING_STEAM_TOKEN: &str = "interner Token für den Steam Bot fehlt";
 const MISSING_TWITCH_TOKEN: &str = "interner Token für das Twitch-Dashboard fehlt";
 
@@ -36,10 +33,11 @@ pub const REPLY_UNAVAILABLE: &str =
     "Das ist gerade noch nicht freigeschaltet. Schau bitte später noch mal vorbei.";
 pub const REPLY_BECOME: &str = "Such dir aus, wie viel du im Monat geben möchtest. Danach bekommst du deinen persönlichen Zahlungslink.";
 pub const REPLY_TIER: &str = "Hier geht es zur Zahlung. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.";
-const REPLY_ROLE_NOTE: &str = "\n-# Die Rolle kommt automatisch ein paar Minuten nach der Zahlung.";
 pub const REPLY_TIER_GONE: &str =
     "Diesen Betrag gibt es so nicht mehr. Wähl bitte im Panel neu aus, wie viel du geben möchtest.";
-pub const REPLY_ALREADY_SUBSCRIBED: &str = "Du hast schon ein laufendes Abo. Ändern oder kündigen kannst du es über den Verwalten-Button im Panel.";
+pub const REPLY_ALREADY_SUBSCRIBED: &str =
+    "Du hast schon ein laufendes Abo. Ändern oder kündigen kannst du es über das Panel.";
+pub const REPLY_TIP: &str = "Hier wählst du deinen Betrag selbst, den Mindestbetrag zeigt dir die Zahlungsseite. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.";
 pub const REPLY_MANAGE: &str = "Hier kannst du dein Abo ändern oder kündigen.";
 pub const REPLY_NO_SUBSCRIPTION: &str =
     "Zu deinem Discord-Account gibt es gerade kein laufendes Abo.";
@@ -48,11 +46,39 @@ const LABEL_PAY: &str = "Weiter zur Zahlung";
 const LABEL_MANAGE: &str = "Abo öffnen";
 const LABEL_TWITCH: &str = "Weiter zu Twitch";
 
-pub fn reply_tip() -> String {
-    format!(
-        "Hier wählst du deinen Betrag selbst, ab {}. Dafür bekommst du die Vorteile für {SUPPORTER_TIP_VALID_DAYS} Tage. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.",
-        format_euro(SUPPORTER_MIN_CENTS)
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoleNote {
+    grant: bool,
+    interval: Duration,
+}
+
+impl RoleNote {
+    fn append(self, text: &str) -> String {
+        if self.grant {
+            format!(
+                "{text}\n-# Die Rolle kommt nach der Zahlung beim nächsten Abgleich, der {} läuft.",
+                cadence(self.interval)
+            )
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+fn cadence(interval: Duration) -> String {
+    let seconds = interval.as_secs().max(1);
+    let (count, one, many) = if seconds % 3600 == 0 {
+        (seconds / 3600, "Stunde", "Stunden")
+    } else if seconds % 60 == 0 {
+        (seconds / 60, "Minute", "Minuten")
+    } else {
+        (seconds, "Sekunde", "Sekunden")
+    };
+    if count == 1 {
+        format!("jede {one}")
+    } else {
+        format!("alle {count} {many}")
+    }
 }
 
 pub fn reply_twitch() -> String {
@@ -66,14 +92,6 @@ pub fn reply_twitch() -> String {
                 .collect()
         )
     )
-}
-
-fn reply_tier(role_grant: bool) -> String {
-    if role_grant {
-        format!("{REPLY_TIER}{REPLY_ROLE_NOTE}")
-    } else {
-        REPLY_TIER.to_string()
-    }
 }
 
 fn tier_label(eur: u64) -> String {
@@ -115,7 +133,7 @@ pub trait SupporterLinks: Send + Sync {
 }
 
 pub struct HttpSupporterLinks {
-    http: Result<reqwest::Client, &'static str>,
+    http: reqwest::Client,
     steam_base: String,
     steam_token: Option<String>,
     twitch_base: Option<String>,
@@ -125,9 +143,9 @@ pub struct HttpSupporterLinks {
 }
 
 impl HttpSupporterLinks {
-    pub fn new(config: &SupporterConfig) -> Arc<Self> {
+    pub fn new(config: &SupporterConfig, limits: HttpLimits) -> Result<Arc<Self>, HttpSetupError> {
         let links = Self {
-            http: http_client(config.request_timeout),
+            http: internal_client(limits)?,
             steam_base: config.steam_api_base.trim_end_matches('/').to_string(),
             steam_token: config.steam_token.clone(),
             twitch_base: config
@@ -139,7 +157,7 @@ impl HttpSupporterLinks {
             panel: config.panel_options(),
         };
         links.log_setup();
-        Arc::new(links)
+        Ok(Arc::new(links))
     }
 
     fn log_setup(&self) {
@@ -149,13 +167,7 @@ impl HttpSupporterLinks {
             twitch_button = self.panel.twitch,
             "Server-Unterstützer: Knöpfe eingerichtet"
         );
-        let steam_missing = self
-            .http
-            .as_ref()
-            .err()
-            .copied()
-            .or(self.steam_token.is_none().then_some(MISSING_STEAM_TOKEN));
-        if let Some(missing) = steam_missing {
+        if let Some(missing) = FundingSource::missing_config(self) {
             tracing::warn!(
                 missing,
                 "Server-Unterstützer: Abo, Einmalig und Verwalten antworten „noch nicht freigeschaltet“, das Monatsziel wird nicht abgeglichen"
@@ -169,12 +181,6 @@ impl HttpSupporterLinks {
         }
     }
 
-    fn client(&self) -> Result<&reqwest::Client, LinkError> {
-        self.http
-            .as_ref()
-            .map_err(|missing| LinkError::NotConfigured(missing))
-    }
-
     async fn post(
         &self,
         base: &str,
@@ -183,7 +189,7 @@ impl HttpSupporterLinks {
         body: Value,
     ) -> Result<(StatusCode, Value), LinkError> {
         let response = self
-            .client()?
+            .http
             .post(format!("{base}{path}"))
             .header(INTERNAL_TOKEN_HEADER, token)
             .json(&body)
@@ -212,19 +218,6 @@ impl HttpSupporterLinks {
 
 fn required<'a>(value: Option<&'a str>, missing: &'static str) -> Result<&'a str, LinkError> {
     value.ok_or(LinkError::NotConfigured(missing))
-}
-
-fn http_client(timeout: Option<Duration>) -> Result<reqwest::Client, &'static str> {
-    let limit = timeout.ok_or(MISSING_TIMEOUT)?;
-    reqwest::Client::builder()
-        .timeout(limit)
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .map_err(|error| {
-            tracing::warn!(%error, "Server-Unterstützer: HTTP-Client nicht erstellt");
-            MISSING_CLIENT
-        })
 }
 
 #[async_trait::async_trait]
@@ -270,8 +263,7 @@ impl FundingSource for HttpSupporterLinks {
         let token = required(self.steam_token.as_deref(), MISSING_STEAM_TOKEN)
             .map_err(|error| error.to_string())?;
         let response = self
-            .client()
-            .map_err(|error| error.to_string())?
+            .http
             .get(format!("{}{FUNDING_PATH}", self.steam_base))
             .header(INTERNAL_TOKEN_HEADER, token)
             .send()
@@ -289,6 +281,7 @@ impl FundingSource for HttpSupporterLinks {
                         .map(str::to_string)
                 })
                 .unwrap_or_default();
+            log_token_rejection(FUNDING_PATH, status, &code);
             return Err(format!("{FUNDING_PATH} antwortet {status} {code}"));
         }
         let body = response
@@ -299,9 +292,6 @@ impl FundingSource for HttpSupporterLinks {
     }
 
     fn missing_config(&self) -> Option<&'static str> {
-        if let Err(missing) = &self.http {
-            return Some(missing);
-        }
         self.steam_token.is_none().then_some(MISSING_STEAM_TOKEN)
     }
 
@@ -354,16 +344,7 @@ fn link_outcome(
             );
             return Ok(LinkOutcome::Unavailable);
         }
-        (StatusCode::UNAUTHORIZED, _)
-        | (StatusCode::SERVICE_UNAVAILABLE, "auth_not_configured") => {
-            tracing::error!(
-                path,
-                %status,
-                code,
-                "Unterstützer-Link: interner Token wird nicht angenommen"
-            );
-        }
-        _ => {}
+        _ => log_token_rejection(path, status, code),
     }
     if !status.is_success() {
         return Err(LinkError::Failed(format!(
@@ -376,6 +357,19 @@ fn link_outcome(
         .filter(|url| accept(url))
         .map(|url| LinkOutcome::Url(url.to_string()))
         .ok_or_else(|| LinkError::Failed(format!("{path} liefert keinen gültigen Link")))
+}
+
+fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
+    if status == StatusCode::UNAUTHORIZED
+        || (status == StatusCode::SERVICE_UNAVAILABLE && code == "auth_not_configured")
+    {
+        tracing::error!(
+            path,
+            %status,
+            code,
+            "Server-Unterstützer: interner Token wird nicht angenommen"
+        );
+    }
 }
 
 fn url_host(url: &str) -> Option<&str> {
@@ -424,7 +418,7 @@ struct SupportButtonHandler {
     links: Arc<dyn SupporterLinks>,
     button: SupportButton,
     tiers_eur: Arc<[u64]>,
-    role_grant: bool,
+    role_note: RoleNote,
 }
 
 #[async_trait::async_trait]
@@ -439,13 +433,15 @@ impl dl_discord::InteractionHandler for SupportButtonHandler {
                     user_id,
                     &interaction.custom_id,
                     &self.tiers_eur,
-                    self.role_grant,
+                    self.role_note,
                 )
                 .await
             }
-            SupportButton::Tip => {
-                single_reply(self.links.tip(user_id).await, &reply_tip(), LABEL_TIP)
-            }
+            SupportButton::Tip => single_reply(
+                self.links.tip(user_id).await,
+                &self.role_note.append(REPLY_TIP),
+                LABEL_TIP,
+            ),
             SupportButton::Manage => {
                 single_reply(self.links.portal(user_id).await, REPLY_MANAGE, LABEL_MANAGE)
             }
@@ -509,7 +505,7 @@ async fn tier_reply(
     user_id: u64,
     custom_id: &str,
     tiers_eur: &[u64],
-    role_grant: bool,
+    role_note: RoleNote,
 ) -> Result<dl_discord::BridgeReply, LinkError> {
     let Some(eur) = tier_from_custom_id(custom_id, tiers_eur) else {
         tracing::warn!(
@@ -522,7 +518,7 @@ async fn tier_reply(
     let label = format!("{LABEL_PAY} ({})", tier_label(eur));
     single_reply(
         links.checkout(user_id, eur).await,
-        &reply_tier(role_grant),
+        &role_note.append(REPLY_TIER),
         &label,
     )
 }
@@ -558,15 +554,19 @@ fn button_reply(text: &str, buttons: Vec<Value>) -> dl_discord::BridgeReply {
 pub fn register(
     router: &mut dl_discord::InteractionRouter,
     links: Arc<dyn SupporterLinks>,
-    options: &SupportPanelOptions,
+    config: &SupporterConfig,
 ) {
-    let tiers_eur: Arc<[u64]> = Arc::from(options.tiers_eur.as_slice());
+    let tiers_eur: Arc<[u64]> = Arc::from(config.tiers_eur.as_slice());
+    let role_note = RoleNote {
+        grant: config.role_grant_apply,
+        interval: config.interval,
+    };
     let handler = |button| {
         Arc::new(SupportButtonHandler {
             links: links.clone(),
             button,
             tiers_eur: tiers_eur.clone(),
-            role_grant: options.role_grant,
+            role_note,
         })
     };
     for (custom_id, button) in [
@@ -618,6 +618,7 @@ mod tests {
     }
 
     const TIERS: [u64; 5] = [5, 10, 20, 50, 1000];
+    const TEST_INTERVAL: Duration = Duration::from_secs(300);
 
     fn failure() -> LinkError {
         LinkError::Failed("down".to_string())
@@ -647,7 +648,10 @@ mod tests {
             links,
             button,
             tiers_eur: Arc::from(&TIERS[..]),
-            role_grant,
+            role_note: RoleNote {
+                grant: role_grant,
+                interval: TEST_INTERVAL,
+            },
         };
         handler
             .handle(dl_discord::BridgeInteraction {
@@ -705,8 +709,12 @@ mod tests {
     async fn stufenklick_holt_genau_einen_link() {
         let links = Arc::new(fixed(stripe, Err(failure())));
         let reply = click(links.clone(), SupportButton::Tier, "support:tier:50").await;
-        assert_eq!(reply.content, Some(reply_tier(true)));
-        assert!(reply_tier(true).contains("Rolle"));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(
+                "Hier geht es zur Zahlung. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.\n-# Die Rolle kommt nach der Zahlung beim nächsten Abgleich, der alle 5 Minuten läuft."
+            )
+        );
         let manual =
             click_with_grant(links.clone(), SupportButton::Tier, "support:tier:50", false).await;
         assert_eq!(manual.content.as_deref(), Some(REPLY_TIER));
@@ -785,20 +793,33 @@ mod tests {
         SupporterConfig::new(&community, "http://127.0.0.1:8783", lookup)
     }
 
+    fn test_links(config: &SupporterConfig) -> Arc<HttpSupporterLinks> {
+        HttpSupporterLinks::new(
+            config,
+            HttpLimits::from_bridges(&dl_core::runtime_config::BridgeOptions::default()),
+        )
+        .expect("Testclient")
+    }
+
     #[tokio::test]
     async fn fehlende_einrichtung_bleibt_ohne_anfrage_und_ohne_falschen_host() {
-        let config = config_from(Default::default(), |key| {
-            (key == "TWITCH_INTERNAL_API_TOKEN").then(|| "token".to_string())
-        });
-        assert_eq!(config.request_timeout, None);
+        let config = config_from(Default::default(), |_| None);
+        assert_eq!(config.steam_token, None);
         assert_eq!(config.twitch_api_base, None);
         assert!(!config.panel_options().twitch);
-        let links = HttpSupporterLinks::new(&config);
-        assert_eq!(
+        let links = test_links(&config);
+        for outcome in [
             links.checkout(42, 5).await,
-            Err(LinkError::NotConfigured(MISSING_TIMEOUT))
-        );
-        assert_eq!(links.missing_config(), Some(MISSING_TIMEOUT));
+            links.tip(42).await,
+            links.portal(42).await,
+        ] {
+            assert_eq!(outcome, Err(LinkError::NotConfigured(MISSING_STEAM_TOKEN)));
+        }
+        assert_eq!(links.missing_config(), Some(MISSING_STEAM_TOKEN));
+        assert!(links
+            .funding()
+            .await
+            .is_err_and(|error| error.contains(MISSING_STEAM_TOKEN)));
         assert_eq!(links.twitch_connect(42).await, Ok(LinkOutcome::Unavailable));
         for (button, custom_id) in [
             (SupportButton::Tier, "support:tier:5"),
@@ -806,7 +827,7 @@ mod tests {
             (SupportButton::Manage, SUPPORT_BUTTON_MANAGE),
             (SupportButton::Twitch, SUPPORT_BUTTON_TWITCH),
         ] {
-            let reply = click(HttpSupporterLinks::new(&config), button, custom_id).await;
+            let reply = click(test_links(&config), button, custom_id).await;
             assert_eq!(
                 reply.content.as_deref(),
                 Some(REPLY_UNAVAILABLE),
@@ -827,13 +848,11 @@ mod tests {
             defaults.tiers_eur,
             dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR
         );
-        assert_eq!(defaults.plus_monthly_cents, None);
         assert!(!defaults.panel_options().role_grant);
         let set = config_from(
             dl_core::runtime_config::CommunityOptions {
                 supporter_funding_goal_cents: Some(30_000),
                 supporter_tiers_eur: Some(vec![5, 15]),
-                supporter_plus_monthly_cents: Some(300),
                 supporter_twitch_api_base: Some("http://127.0.0.1:8769".to_string()),
                 supporter_role_grant_apply: Some(true),
                 ..Default::default()
@@ -844,7 +863,6 @@ mod tests {
             set.panel_options(),
             SupportPanelOptions {
                 tiers_eur: vec![5, 15],
-                plus_monthly_cents: Some(300),
                 twitch: true,
                 role_grant: true,
             }
@@ -883,12 +901,30 @@ mod tests {
 
     #[test]
     fn antworttexte_nennen_werte_aus_dem_code_und_keine_panel_knoepfe() {
-        assert!(reply_tip().contains(&format!(
-            "ab {}. Dafür bekommst du die Vorteile für {SUPPORTER_TIP_VALID_DAYS} Tage.",
-            format_euro(SUPPORTER_MIN_CENTS)
+        assert!(!REPLY_TIP.chars().any(|ch| ch.is_ascii_digit()));
+        let alternatives: Vec<String> = SUPPORTER_TWITCH_CHANNELS
+            .iter()
+            .map(|channel| channel.to_string())
+            .chain(std::iter::once("einem passenden Streamer".to_string()))
+            .collect();
+        assert!(reply_twitch().contains(&format!(
+            "bei {} abonniert",
+            join_alternatives(alternatives)
         )));
-        assert!(reply_twitch()
-            .contains("bei earlysalty, dach_lock oder einem passenden Streamer abonniert"));
+        for (interval, expected) in [
+            (60, "jede Minute"),
+            (300, "alle 5 Minuten"),
+            (3600, "jede Stunde"),
+            (7200, "alle 2 Stunden"),
+            (90, "alle 90 Sekunden"),
+        ] {
+            assert_eq!(cadence(Duration::from_secs(interval)), expected);
+        }
+        let off = RoleNote {
+            grant: false,
+            interval: TEST_INTERVAL,
+        };
+        assert_eq!(off.append(REPLY_TIP), REPLY_TIP);
         for text in [REPLY_TIER_GONE, REPLY_ALREADY_SUBSCRIBED] {
             for label in [
                 crate::serversync::support_publish::SUPPORT_BECOME_BUTTON_LABEL,

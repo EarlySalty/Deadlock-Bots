@@ -23,7 +23,22 @@ pub const WEBSITE_API_RECEIVER: &[&str] = &[
     "COACHING_BOT_TOKEN",
 ];
 
-pub const DASHBOARD_TWITCH_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
+pub const TURNIER_API_RECEIVER: &[&str] = &[
+    "TURNIER_INTERNAL_API_TOKEN",
+    "MASTER_BROKER_TOKEN",
+    "MAIN_BOT_INTERNAL_TOKEN",
+    "TWITCH_INTERNAL_API_TOKEN",
+];
+
+pub const TWITCH_DASHBOARD_RECEIVER: &[&str] = &["TWITCH_INTERNAL_API_TOKEN"];
+
+pub fn turnier_api_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    first_token(lookup, TURNIER_API_RECEIVER)
+}
+
+pub fn key_names(keys: &[&str]) -> String {
+    keys.join("/")
+}
 
 pub fn first_token(lookup: impl Fn(&str) -> Option<String>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| present(&lookup, key))
@@ -39,7 +54,7 @@ pub fn all_tokens(lookup: impl Fn(&str) -> Option<String>, keys: &[&str]) -> Vec
     out
 }
 
-fn present(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+pub fn present(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
     lookup(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

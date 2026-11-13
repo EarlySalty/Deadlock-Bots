@@ -123,13 +123,13 @@ impl TwitchApiClient {
     ) -> Result<Arc<Self>, TwitchBridgeError> {
         let base_url = normalize_internal_api_base_url(&base_url.into(), allow_non_loopback)
             .map_err(TwitchBridgeError::Api)?;
+        let http = crate::http::internal_client(crate::http::HttpLimits {
+            connect: timeout,
+            request: timeout,
+        })
+        .map_err(|err| TwitchBridgeError::Api(err.to_string()))?;
         Ok(Arc::new(Self {
-            http: reqwest::Client::builder()
-                .timeout(timeout)
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
+            http,
             base_url,
             token: token.into(),
         }))

@@ -89,6 +89,37 @@ pub struct Config {
     secret_path: String,
     /// Öffentlicher Hostname zur Zuordnung der Meldung, kein DNS-Zugriff.
     host_label: String,
+    #[serde(default)]
+    connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    request_timeout_ms: Option<u64>,
+}
+
+impl Config {
+    fn connect_timeout_millis(&self) -> u64 {
+        self.connect_timeout_ms
+            .unwrap_or(dl_core::runtime_config::HTTP_DEFAULT_CONNECT_TIMEOUT_MS)
+    }
+
+    fn request_timeout_millis(&self) -> u64 {
+        self.request_timeout_ms
+            .unwrap_or(dl_core::runtime_config::HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+    }
+
+    pub fn connect_limit(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.connect_timeout_millis())
+    }
+
+    pub fn request_limit(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.request_timeout_millis())
+    }
+
+    fn limits_valid(&self) -> bool {
+        let range = dl_core::runtime_config::HTTP_TIMEOUT_MS_RANGE;
+        range.contains(&self.connect_timeout_millis())
+            && range.contains(&self.request_timeout_millis())
+            && self.connect_timeout_millis() <= self.request_timeout_millis()
+    }
 }
 
 fn config(path: &Path) -> Result<Config> {
@@ -134,6 +165,7 @@ fn config(path: &Path) -> Result<Config> {
         || config.project_id.is_empty()
         || config.environment.is_empty()
         || !config.secret_path.starts_with('/')
+        || !config.limits_valid()
         || config.host_label.is_empty()
         || config.host_label.len() > 64
         || !config
@@ -380,6 +412,48 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limits(connect: Option<u64>, request: Option<u64>) -> Config {
+        Config {
+            broker_origin: "http://127.0.0.1:8770".into(),
+            channel_id: 1,
+            state_directory: "/unused".into(),
+            legacy_state_directory: None,
+            infisical_socket: "/unused".into(),
+            project_id: "p".into(),
+            environment: "e".into(),
+            secret_path: "/".into(),
+            host_label: "h".into(),
+            connect_timeout_ms: connect,
+            request_timeout_ms: request,
+        }
+    }
+
+    #[test]
+    fn zeitlimits_kommen_aus_der_konfiguration_mit_grenzen() {
+        let defaults = limits(None, None);
+        assert!(defaults.limits_valid());
+        assert_eq!(
+            defaults.request_limit(),
+            std::time::Duration::from_millis(
+                dl_core::runtime_config::HTTP_DEFAULT_REQUEST_TIMEOUT_MS
+            )
+        );
+        let set = limits(Some(7), Some(11));
+        assert!(set.limits_valid());
+        assert_eq!(set.connect_limit(), std::time::Duration::from_millis(7));
+        for (connect, request) in [
+            (Some(0), None),
+            (None, Some(0)),
+            (Some(12), Some(11)),
+            (None, Some(120_001)),
+        ] {
+            assert!(
+                !limits(connect, request).limits_valid(),
+                "{connect:?} {request:?}"
+            );
+        }
+    }
 
     #[test]
     fn devfeed_mode_is_confined_to_existing_feed_and_botlogs() {

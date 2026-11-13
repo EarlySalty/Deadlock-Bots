@@ -6,6 +6,7 @@
 //! - `twitch` (folgt in Phase 3b): live_bridge + streamer_link_matcher.
 
 pub mod glue;
+pub mod http;
 pub mod matcher;
 pub mod steam;
 pub mod steam_operating;

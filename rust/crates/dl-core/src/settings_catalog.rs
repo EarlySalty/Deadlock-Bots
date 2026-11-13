@@ -140,42 +140,8 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 _ => panic!("nicht klassifizierter Ganzzahltyp"),
             };
             let path = replace(columns[0]);
-            if path.starts_with("llm.use_cases.") {
-                if path.ends_with(".max_output_tokens") {
-                    bounds = Some((1, 32_768));
-                }
-                if path.ends_with(".temperature") {
-                    bounds = Some((0, 2));
-                }
-                if path.ends_with(".request_timeout_seconds") {
-                    bounds = Some((1, 110));
-                }
-            }
-            match path.as_str() {
-                "concierge.timeout_seconds" => bounds = Some((1, 110)),
-                "runtime.community.supporter_role_sync_max_revokes" => {
-                    bounds = Some(u64_bounds(
-                        &crate::runtime_config::SUPPORTER_MAX_REVOKES_RANGE,
-                    ))
-                }
-                "runtime.community.supporter_sync_interval_seconds" => {
-                    bounds = Some(u64_bounds(
-                        &crate::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
-                    ))
-                }
-                "runtime.community.supporter_funding_goal_cents" => {
-                    let range = crate::runtime_config::SUPPORTER_FUNDING_GOAL_CENTS_RANGE;
-                    bounds = Some((*range.start(), *range.end()))
-                }
-                "runtime.community.supporter_plus_monthly_cents" => {
-                    let range = crate::runtime_config::SUPPORTER_PLUS_MONTHLY_CENTS_RANGE;
-                    bounds = Some((*range.start(), *range.end()))
-                }
-                "tempvoice.empty_lane_grace_seconds" => bounds = Some((1, 86_400)),
-                "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),
-                "runtime.bridges.matcher_scan_interval_hours" => bounds = Some((1, 8760)),
-                "runtime.ai.brain_max_question_len" => bounds = Some((1, 65_536)),
-                _ => {}
+            if let Some(range) = catalog_bounds(&path) {
+                bounds = Some(range);
             }
             result.push(Field {
                 path,
@@ -219,8 +185,92 @@ fn integer_to_wire(value: &Value) -> Value {
         Value::String(value.to_string())
     }
 }
-fn u64_bounds(range: &std::ops::RangeInclusive<u64>) -> (i64, i64) {
-    (*range.start() as i64, *range.end() as i64)
+fn wide<T>(value: T) -> i64
+where
+    i64: TryFrom<T>,
+{
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn range_bounds<T: Copy>(range: &std::ops::RangeInclusive<T>) -> (i64, i64)
+where
+    i64: TryFrom<T>,
+{
+    (wide(*range.start()), wide(*range.end()))
+}
+
+fn float_bounds(range: &std::ops::RangeInclusive<f64>) -> (i64, i64) {
+    (range.start().floor() as i64, range.end().ceil() as i64)
+}
+
+pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
+    use crate::bot_config as bot;
+    use crate::runtime_config as runtime;
+    if path.starts_with("llm.use_cases.") {
+        if path.ends_with(".max_output_tokens") {
+            return Some(range_bounds(&bot::LLM_MAX_OUTPUT_TOKENS_RANGE));
+        }
+        if path.ends_with(".temperature") {
+            return Some(float_bounds(&bot::LLM_TEMPERATURE_RANGE));
+        }
+        if path.ends_with(".request_timeout_seconds") {
+            return Some(range_bounds(&bot::LLM_REQUEST_TIMEOUT_SECONDS_RANGE));
+        }
+    }
+    Some(match path {
+        "concierge.timeout_seconds" => range_bounds(&bot::CONCIERGE_TIMEOUT_SECONDS_RANGE),
+        "tempvoice.empty_lane_grace_seconds" => range_bounds(&bot::TEMPVOICE_GRACE_SECONDS_RANGE),
+        "runtime.community.supporter_role_sync_max_revokes" => {
+            range_bounds(&runtime::SUPPORTER_MAX_REVOKES_RANGE)
+        }
+        "runtime.community.supporter_sync_interval_seconds" => {
+            range_bounds(&runtime::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE)
+        }
+        "runtime.community.supporter_funding_goal_cents" => {
+            range_bounds(&runtime::SUPPORTER_FUNDING_GOAL_CENTS_RANGE)
+        }
+        "runtime.community.supporter_tiers_eur" => (
+            wide(runtime::SUPPORTER_TIER_MIN_EUR),
+            wide(runtime::SUPPORTER_TIER_MAX_EUR),
+        ),
+        "runtime.bridges.http_connect_timeout_ms" | "runtime.bridges.http_request_timeout_ms" => {
+            range_bounds(&runtime::HTTP_TIMEOUT_MS_RANGE)
+        }
+        "runtime.bridges.steam_rank_timeout_ms"
+        | "runtime.bridges.steam_rankcheck_timeout_ms"
+        | "runtime.bridges.steam_sync_timeout_ms" => {
+            range_bounds(&runtime::STEAM_FORWARD_TIMEOUT_MS_RANGE)
+        }
+        "runtime.bridges.steam_invite_timeout_ms" => {
+            range_bounds(&runtime::STEAM_INVITE_TIMEOUT_MS_RANGE)
+        }
+        "runtime.moderation.analyze_flag_threshold"
+        | "runtime.moderation.auto_verify_threshold"
+        | "runtime.moderation.propose_verify_threshold" => {
+            float_bounds(&runtime::MODERATION_THRESHOLD_RANGE)
+        }
+        "runtime.bridges.matcher_fuzzy_floor" => float_bounds(&runtime::MATCHER_FUZZY_FLOOR_RANGE),
+        "runtime.bridges.matcher_auto_threshold" | "runtime.bridges.matcher_review_threshold" => {
+            range_bounds(&runtime::MATCHER_THRESHOLD_RANGE)
+        }
+        "runtime.bridges.matcher_max_ai_per_scan" => {
+            range_bounds(&runtime::MATCHER_MAX_AI_PER_SCAN_RANGE)
+        }
+        "runtime.bridges.matcher_scan_interval_hours" => {
+            range_bounds(&runtime::MATCHER_SCAN_INTERVAL_HOURS_RANGE)
+        }
+        "runtime.ai.brain_max_question_len" => range_bounds(&runtime::BRAIN_MAX_QUESTION_LEN_RANGE),
+        "runtime.ai.brain_image_max_count" => range_bounds(&runtime::BRAIN_IMAGE_COUNT_RANGE),
+        "runtime.ai.brain_image_max_download_bytes" => {
+            range_bounds(&runtime::BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE)
+        }
+        "runtime.ai.brain_image_max_edge" => range_bounds(&runtime::BRAIN_IMAGE_EDGE_RANGE),
+        "runtime.ai.brain_image_jpeg_quality" => {
+            range_bounds(&runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE)
+        }
+        "runtime.ai.brain_image_followup_seconds" => range_bounds(&runtime::DURATION_SECONDS_RANGE),
+        _ => return None,
+    })
 }
 
 pub fn build(value: &Value, fields: Vec<Field>) -> Catalog {
@@ -591,5 +641,52 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
         )
         .is_err());
         assert!(toml_value(&json!(u64::MAX)).is_err());
+    }
+
+    fn numbers(text: &str) -> Vec<i64> {
+        text.split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse().ok())
+            .collect()
+    }
+
+    fn claimed_range(field: &Field) -> Option<(i64, i64)> {
+        if let Some(rest) = field.help.split("Erlaubt sind ").nth(1) {
+            let claim = rest.split('.').next().unwrap_or_default();
+            let found = numbers(claim);
+            return Some((*found.first()?, *found.get(1)?));
+        }
+        let open = field.label.rfind('(')?;
+        let claim = &field.label[open..];
+        let found = numbers(claim);
+        if claim.contains("höchstens") {
+            return Some((field.min.as_deref()?.parse().ok()?, *found.first()?));
+        }
+        if claim.contains(" bis ") || claim.contains('–') {
+            return Some((*found.first()?, *found.get(1)?));
+        }
+        None
+    }
+
+    #[test]
+    fn genannte_grenzen_in_label_und_hilfe_sind_die_durchgesetzten() {
+        let fields = fields(crate::admin_settings::SPEC, &[1]);
+        let mut checked = 0;
+        for field in &fields {
+            let Some((min, max)) = claimed_range(field) else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                (field.min.as_deref(), field.max.as_deref()),
+                (
+                    Some(min.to_string().as_str()),
+                    Some(max.to_string().as_str())
+                ),
+                "{}",
+                field.path
+            );
+        }
+        assert!(checked >= 8, "{checked}");
     }
 }

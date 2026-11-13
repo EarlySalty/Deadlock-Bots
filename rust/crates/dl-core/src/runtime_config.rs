@@ -11,17 +11,44 @@ use std::{
 pub const STRIPE_MIN_CHARGE_EUR_CENTS: i64 = 50;
 pub const STRIPE_MAX_UNIT_AMOUNT_CENTS: i64 = 99_999_999;
 pub const SUPPORTER_MIN_CENTS: i64 = 500;
-pub const SUPPORTER_TIP_VALID_DAYS: i32 = 31;
 pub const SUPPORTER_TWITCH_CHANNELS: &[&str] = &["earlysalty", "dach_lock"];
 pub const SUPPORTER_TIER_MIN_EUR: u64 = SUPPORTER_MIN_CENTS as u64 / 100;
 pub const SUPPORTER_TIER_MAX_EUR: u64 = STRIPE_MAX_UNIT_AMOUNT_CENTS as u64 / 100;
 pub const SUPPORTER_MAX_TIERS: usize = 5;
-pub const SUPPORTER_REQUEST_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=60_000;
-pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
+pub const SUPPORTER_CUTOVER_GRACE_DAYS: i32 = 31;
+pub const MINUTE_SECONDS: u64 = 60;
+pub const DAY_SECONDS: u64 = 86_400;
+pub const YEAR_SECONDS: u64 = 365 * DAY_SECONDS;
+pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = MINUTE_SECONDS..=DAY_SECONDS;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
-pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> = 100..=10_000_000;
-pub const SUPPORTER_PLUS_MONTHLY_CENTS_RANGE: RangeInclusive<i64> =
-    STRIPE_MIN_CHARGE_EUR_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
+pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> =
+    SUPPORTER_MIN_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
+pub const HTTP_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=120_000;
+pub const HTTP_DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
+pub const STEAM_BOT_STRIPE_TIMEOUT_MS: u64 = 10_000;
+pub const HTTP_DEFAULT_REQUEST_TIMEOUT_MS: u64 =
+    STEAM_BOT_STRIPE_TIMEOUT_MS + HTTP_DEFAULT_CONNECT_TIMEOUT_MS;
+pub const MODERATION_THRESHOLD_RANGE: RangeInclusive<f64> = 0.0..=1.0;
+pub const MATCHER_FUZZY_FLOOR_RANGE: RangeInclusive<f64> = 0.0..=1.0;
+pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
+pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1_000;
+pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=8_760;
+pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
+pub const BRAIN_IMAGE_COUNT_RANGE: RangeInclusive<usize> = 1..=4;
+pub const BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE: RangeInclusive<u64> = 1..=512 * 1024 * 1024;
+pub const BRAIN_IMAGE_EDGE_RANGE: RangeInclusive<u64> = 384..=12_000;
+pub const BRAIN_IMAGE_JPEG_QUALITY_RANGE: RangeInclusive<u64> = 40..=95;
+pub const DISCORD_INTERACTION_TOKEN_MS: u64 = 15 * MINUTE_SECONDS * 1_000;
+pub const STEAM_FORWARD_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=DISCORD_INTERACTION_TOKEN_MS;
+pub const STEAM_INVITE_TASK_WAIT_MS: u64 = 45_000;
+pub const STEAM_INVITE_WORST_CASE_MS: u64 = 2 * STEAM_INVITE_TASK_WAIT_MS;
+pub const STEAM_INVITE_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
+    STEAM_INVITE_WORST_CASE_MS + 1..=DISCORD_INTERACTION_TOKEN_MS;
+pub const STEAM_RANK_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+pub const STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub const STEAM_SYNC_DEFAULT_TIMEOUT_MS: u64 = 180_000;
+pub const STEAM_INVITE_DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub const DURATION_SECONDS_RANGE: RangeInclusive<u64> = 0..=YEAR_SECONDS;
 pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
 pub const SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 300;
 pub const SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS: i64 = 25_000;
@@ -69,10 +96,10 @@ impl<T: LookupValue> LookupValue for Vec<T> {
 }
 
 macro_rules! section {
-    ($name:ident { $($field:ident : $ty:ty => $($key:literal)|+),* $(,)? }) => {
+    ($name:ident { $($field:ident : $ty:ty => $($key:literal)|+),* $(,)? } $(internal { $($inner:ident : $inner_ty:ty),* $(,)? })?) => {
         #[derive(Clone, Default, Deserialize, Serialize)]
         #[serde(default, deny_unknown_fields)]
-        pub struct $name { $(pub $field: Option<$ty>,)* }
+        pub struct $name { $(pub $field: Option<$ty>,)* $($(pub $inner: Option<$inner_ty>,)*)? }
         impl $name { fn lookup(&self, key: &str) -> Option<String> { match key { $($($key)|+ => self.$field.as_ref().map(LookupValue::lookup_value),)* _ => None } } }
     };
 }
@@ -121,6 +148,13 @@ section!(BridgeOptions {
     matcher_scan_interval_hours: u64 => "STREAMER_LINK_SCAN_INTERVAL_HOURS",
     matcher_state_path: PathBuf => "STREAMER_LINK_STATE_PATH",
     matcher_ai_provider: String => "STREAMER_LINK_AI_PROVIDER",
+} internal {
+    http_connect_timeout_ms: u64,
+    http_request_timeout_ms: u64,
+    steam_rank_timeout_ms: u64,
+    steam_rankcheck_timeout_ms: u64,
+    steam_sync_timeout_ms: u64,
+    steam_invite_timeout_ms: u64,
 });
 
 section!(DashboardOptions {
@@ -189,15 +223,14 @@ section!(CommunityOptions {
     recording_state_dir: PathBuf => "SCRIM_RECORD_STATE_DIR",
     recording_rclone_path: PathBuf => "SCRIM_RECORD_RCLONE_PATH",
     recording_archive_base: String => "SCRIM_RECORD_ARCHIVE_BASE",
-    supporter_role_grant_apply: bool => "DL_SUPPORTER_ROLE_GRANT_APPLY",
-    supporter_role_sync_apply: bool => "DL_SUPPORTER_ROLE_SYNC_APPLY",
-    supporter_role_sync_max_revokes: u64 => "DL_SUPPORTER_ROLE_SYNC_MAX_REVOKES",
-    supporter_sync_interval_seconds: u64 => "DL_SUPPORTER_SYNC_INTERVAL_SECONDS",
-    supporter_funding_goal_cents: i64 => "DL_SUPPORTER_FUNDING_GOAL_CENTS",
-    supporter_twitch_api_base: String => "DL_SUPPORTER_TWITCH_API_BASE",
-    supporter_request_timeout_ms: u64 => "DL_SUPPORTER_REQUEST_TIMEOUT_MS",
-    supporter_tiers_eur: Vec<u64> => "DL_SUPPORTER_TIERS_EUR",
-    supporter_plus_monthly_cents: i64 => "DL_SUPPORTER_PLUS_MONTHLY_CENTS",
+} internal {
+    supporter_role_grant_apply: bool,
+    supporter_role_sync_apply: bool,
+    supporter_role_sync_max_revokes: u64,
+    supporter_sync_interval_seconds: u64,
+    supporter_funding_goal_cents: i64,
+    supporter_twitch_api_base: String,
+    supporter_tiers_eur: Vec<u64>,
 });
 
 section!(ModerationOptions {
@@ -297,11 +330,12 @@ impl RuntimeConfig {
             self.ai.transparency_error_repeat_seconds,
             self.ai.transparency_error_followup_seconds,
             self.ai.brain_cooldown_seconds,
+            self.ai.brain_image_followup_seconds,
         ]
         .into_iter()
         .flatten()
         {
-            if seconds > 31_536_000 {
+            if !DURATION_SECONDS_RANGE.contains(&seconds) {
                 return Err(invalid());
             }
         }
@@ -311,18 +345,65 @@ impl RuntimeConfig {
         if self
             .ai
             .brain_max_question_len
-            .is_some_and(|length| length == 0 || length > 65_536)
+            .is_some_and(|length| !BRAIN_MAX_QUESTION_LEN_RANGE.contains(&length))
+            || self
+                .ai
+                .brain_image_max_count
+                .is_some_and(|count| !BRAIN_IMAGE_COUNT_RANGE.contains(&count))
+            || self
+                .ai
+                .brain_image_max_download_bytes
+                .is_some_and(|bytes| !BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE.contains(&bytes))
+            || self
+                .ai
+                .brain_image_max_edge
+                .is_some_and(|edge| !BRAIN_IMAGE_EDGE_RANGE.contains(&edge))
+            || self
+                .ai
+                .brain_image_jpeg_quality
+                .is_some_and(|quality| !BRAIN_IMAGE_JPEG_QUALITY_RANGE.contains(&quality))
+            || self
+                .bridges
+                .matcher_max_ai_per_scan
+                .is_some_and(|count| !MATCHER_MAX_AI_PER_SCAN_RANGE.contains(&count))
+            || self
+                .bridges
+                .matcher_scan_interval_hours
+                .is_some_and(|hours| !MATCHER_SCAN_INTERVAL_HOURS_RANGE.contains(&hours))
         {
             return Err(invalid());
         }
         if self
             .ai
             .brain_api_timeout_ms
-            .is_some_and(|ms| ms == 0 || ms > 120_000)
+            .is_some_and(|ms| !HTTP_TIMEOUT_MS_RANGE.contains(&ms))
+            || [
+                self.bridges.http_connect_timeout_ms,
+                self.bridges.http_request_timeout_ms,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|ms| !HTTP_TIMEOUT_MS_RANGE.contains(&ms))
             || self
-                .community
-                .supporter_request_timeout_ms
-                .is_some_and(|ms| !SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.contains(&ms))
+                .bridges
+                .http_connect_timeout_ms
+                .unwrap_or(HTTP_DEFAULT_CONNECT_TIMEOUT_MS)
+                > self
+                    .bridges
+                    .http_request_timeout_ms
+                    .unwrap_or(HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+            || [
+                self.bridges.steam_rank_timeout_ms,
+                self.bridges.steam_rankcheck_timeout_ms,
+                self.bridges.steam_sync_timeout_ms,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|ms| !STEAM_FORWARD_TIMEOUT_MS_RANGE.contains(&ms))
+            || self
+                .bridges
+                .steam_invite_timeout_ms
+                .is_some_and(|ms| !STEAM_INVITE_TIMEOUT_MS_RANGE.contains(&ms))
             || self
                 .community
                 .supporter_sync_interval_seconds
@@ -340,10 +421,6 @@ impl RuntimeConfig {
                 .supporter_tiers_eur
                 .as_deref()
                 .is_some_and(|tiers| !supporter_tiers_valid(tiers))
-            || self
-                .community
-                .supporter_plus_monthly_cents
-                .is_some_and(|cents| !SUPPORTER_PLUS_MONTHLY_CENTS_RANGE.contains(&cents))
             || (self.ai.brain_command_enabled == Some(true)
                 && self
                     .ai
@@ -465,7 +542,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            if !threshold.is_finite() || !MODERATION_THRESHOLD_RANGE.contains(&threshold) {
                 return Err(invalid());
             }
         }
@@ -488,10 +565,9 @@ impl RuntimeConfig {
             .bridges
             .twitch_timeout_seconds
             .is_some_and(|value| !value.is_finite() || !(0.5..=3600.0).contains(&value))
-            || self
-                .bridges
-                .matcher_fuzzy_floor
-                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+            || self.bridges.matcher_fuzzy_floor.is_some_and(|value| {
+                !value.is_finite() || !MATCHER_FUZZY_FLOOR_RANGE.contains(&value)
+            })
         {
             return Err(invalid());
         }
@@ -502,7 +578,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !(0..=100).contains(&threshold) {
+            if !MATCHER_THRESHOLD_RANGE.contains(&threshold) {
                 return Err(invalid());
             }
         }
@@ -901,54 +977,210 @@ mod supporter_bound_tests {
         BotConfig::parse(&format!("schema_version=1\n[runtime.community]\n{line}\n")).is_ok()
     }
 
+    fn parse_in(section: &str, line: &str) -> bool {
+        BotConfig::parse(&format!("schema_version=1\n[runtime.{section}]\n{line}\n")).is_ok()
+    }
+
     #[test]
     fn unterstuetzer_werte_haben_ober_und_untergrenzen() {
-        for accepted in [
-            "supporter_request_timeout_ms=8000",
-            "supporter_sync_interval_seconds=300",
-            "supporter_role_sync_max_revokes=0",
-            "supporter_role_sync_max_revokes=100",
-            "supporter_funding_goal_cents=25000",
-            "supporter_twitch_api_base='http://127.0.0.1:8765'",
-            "supporter_tiers_eur=[5, 10, 20, 50]",
-            "supporter_tiers_eur=[5, 10, 20, 50, 100]",
-            "supporter_plus_monthly_cents=300",
-            "supporter_plus_monthly_cents=50",
-            "supporter_plus_monthly_cents=99999999",
-            "supporter_tiers_eur=[5, 999999]",
-        ] {
-            assert!(parse(accepted), "{accepted}");
+        use super::*;
+        let accepted = [
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start()
+            ),
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end()
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.start()
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.end()
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start()
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end()
+            ),
+            "supporter_twitch_api_base='http://127.0.0.1:8765'".to_owned(),
+            format!("supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}]"),
+            format!("supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}, {SUPPORTER_TIER_MAX_EUR}]"),
+            "supporter_tiers_eur=[5, 10, 20, 50, 100]".to_owned(),
+        ];
+        for line in &accepted {
+            assert!(parse(line), "{line}");
         }
-        for rejected in [
-            "supporter_request_timeout_ms=0",
-            "supporter_request_timeout_ms=60001",
-            "supporter_sync_interval_seconds=59",
-            "supporter_sync_interval_seconds=86401",
-            "supporter_role_sync_max_revokes=101",
-            "supporter_funding_goal_cents=0",
-            "supporter_funding_goal_cents=10000001",
-            "supporter_steam_api_base='http://127.0.0.1:8783'",
-            "supporter_twitch_api_base='http://127.0.0.1:8769/x'",
-            "supporter_twitch_api_base=''",
-            "supporter_tiers_eur=[]",
-            "supporter_tiers_eur=[4, 10]",
-            "supporter_tiers_eur=[10, 5]",
-            "supporter_tiers_eur=[5, 5]",
-            "supporter_tiers_eur=[0]",
-            "supporter_tiers_eur=[5, 10, 20, 50, 100, 200]",
-            "supporter_tiers_eur=[5, 4294967296]",
-            "supporter_plus_monthly_cents=0",
-            "supporter_plus_monthly_cents=49",
-            "supporter_plus_monthly_cents=-300",
-            "supporter_plus_monthly_cents=100000000",
-            "supporter_tiers_eur=[5, 1000000]",
-        ] {
-            assert!(!parse(rejected), "{rejected}");
+        let rejected = [
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() - 1
+            ),
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end() + 1
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.end() + 1
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start() - 1
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end() + 1
+            ),
+            "supporter_request_timeout_ms=8000".to_owned(),
+            "supporter_plus_monthly_cents=300".to_owned(),
+            "supporter_steam_api_base='http://127.0.0.1:8783'".to_owned(),
+            "supporter_twitch_api_base='http://127.0.0.1:8769/x'".to_owned(),
+            "supporter_twitch_api_base=''".to_owned(),
+            "supporter_tiers_eur=[]".to_owned(),
+            format!("supporter_tiers_eur=[{}]", SUPPORTER_TIER_MIN_EUR - 1),
+            format!(
+                "supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}, {}]",
+                SUPPORTER_TIER_MAX_EUR + 1
+            ),
+            "supporter_tiers_eur=[10, 5]".to_owned(),
+            "supporter_tiers_eur=[5, 5]".to_owned(),
+            "supporter_tiers_eur=[5, 10, 20, 50, 100, 200]".to_owned(),
+            "supporter_tiers_eur=[5, 4294967296]".to_owned(),
+        ];
+        for line in &rejected {
+            assert!(!parse(line), "{line}");
         }
     }
 
+    #[test]
+    fn http_zeitlimits_haben_grenzen_und_verbindung_bleibt_unter_anfrage() {
+        use super::*;
+        let (min, max) = (*HTTP_TIMEOUT_MS_RANGE.start(), *HTTP_TIMEOUT_MS_RANGE.end());
+        for line in [
+            format!("http_connect_timeout_ms={min}"),
+            format!("http_request_timeout_ms={max}"),
+            format!("http_connect_timeout_ms={min}\nhttp_request_timeout_ms={min}"),
+        ] {
+            assert!(parse_in("bridges", &line), "{line}");
+        }
+        for line in [
+            format!("http_connect_timeout_ms={}", min - 1),
+            format!("http_request_timeout_ms={}", max + 1),
+            format!(
+                "http_connect_timeout_ms={max}\nhttp_request_timeout_ms={}",
+                max - 1
+            ),
+            format!(
+                "http_connect_timeout_ms={}",
+                HTTP_DEFAULT_REQUEST_TIMEOUT_MS + 1
+            ),
+        ] {
+            assert!(!parse_in("bridges", &line), "{line}");
+        }
+        assert!(HTTP_TIMEOUT_MS_RANGE.contains(&HTTP_DEFAULT_CONNECT_TIMEOUT_MS));
+        assert!(HTTP_TIMEOUT_MS_RANGE.contains(&HTTP_DEFAULT_REQUEST_TIMEOUT_MS));
+        assert!(HTTP_DEFAULT_REQUEST_TIMEOUT_MS > STEAM_BOT_STRIPE_TIMEOUT_MS);
+        assert!(!parse_in(
+            "ai",
+            &format!("brain_api_timeout_ms={}", max + 1)
+        ));
+        assert!(parse_in("ai", &format!("brain_api_timeout_ms={max}")));
+    }
+
+    #[test]
+    fn brain_und_zuordnung_haben_grenzen_mit_beiden_kanten() {
+        use super::*;
+        fn edges<T: std::fmt::Display + Copy>(
+            section: &str,
+            key: &str,
+            range: &std::ops::RangeInclusive<T>,
+            below: Option<T>,
+            above: T,
+        ) {
+            assert!(
+                parse_in(section, &format!("{key}={}", range.start())),
+                "{key}"
+            );
+            assert!(
+                parse_in(section, &format!("{key}={}", range.end())),
+                "{key}"
+            );
+            if let Some(below) = below {
+                assert!(!parse_in(section, &format!("{key}={below}")), "{key}");
+            }
+            assert!(!parse_in(section, &format!("{key}={above}")), "{key}");
+        }
+        edges(
+            "ai",
+            "brain_max_question_len",
+            &BRAIN_MAX_QUESTION_LEN_RANGE,
+            Some(0),
+            65_537,
+        );
+        edges(
+            "ai",
+            "brain_image_max_count",
+            &BRAIN_IMAGE_COUNT_RANGE,
+            Some(0),
+            5,
+        );
+        edges(
+            "ai",
+            "brain_image_max_download_bytes",
+            &BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE,
+            Some(0),
+            BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE.end() + 1,
+        );
+        edges(
+            "ai",
+            "brain_image_max_edge",
+            &BRAIN_IMAGE_EDGE_RANGE,
+            Some(383),
+            12_001,
+        );
+        edges(
+            "ai",
+            "brain_image_jpeg_quality",
+            &BRAIN_IMAGE_JPEG_QUALITY_RANGE,
+            Some(39),
+            96,
+        );
+        edges(
+            "ai",
+            "brain_image_followup_seconds",
+            &DURATION_SECONDS_RANGE,
+            None,
+            YEAR_SECONDS + 1,
+        );
+        edges(
+            "bridges",
+            "matcher_max_ai_per_scan",
+            &MATCHER_MAX_AI_PER_SCAN_RANGE,
+            None,
+            1_001,
+        );
+        edges(
+            "bridges",
+            "matcher_scan_interval_hours",
+            &MATCHER_SCAN_INTERVAL_HOURS_RANGE,
+            Some(0),
+            8_761,
+        );
+    }
+
     fn catalog_help(key: &str) -> String {
-        let prefix = format!("runtime.community.{key}\t");
+        let prefix = if key.contains('.') {
+            format!("runtime.{key}\t")
+        } else {
+            format!("runtime.community.{key}\t")
+        };
         crate::admin_settings::SPEC
             .lines()
             .find(|line| line.starts_with(&prefix))
@@ -988,5 +1220,71 @@ mod supporter_bound_tests {
         assert!(SUPPORTER_MAX_REVOKES_RANGE.contains(&SUPPORTER_DEFAULT_MAX_REVOKES));
         assert!(SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE
             .contains(&SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS));
+        assert!(catalog_help("bridges.http_connect_timeout_ms")
+            .starts_with(&format!("Standard ist {HTTP_DEFAULT_CONNECT_TIMEOUT_MS}.")));
+        assert!(catalog_help("bridges.http_request_timeout_ms")
+            .starts_with(&format!("Standard ist {HTTP_DEFAULT_REQUEST_TIMEOUT_MS}.")));
+        for (key, default) in [
+            ("steam_rank_timeout_ms", STEAM_RANK_DEFAULT_TIMEOUT_MS),
+            (
+                "steam_rankcheck_timeout_ms",
+                STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS,
+            ),
+            ("steam_sync_timeout_ms", STEAM_SYNC_DEFAULT_TIMEOUT_MS),
+            ("steam_invite_timeout_ms", STEAM_INVITE_DEFAULT_TIMEOUT_MS),
+        ] {
+            assert!(
+                catalog_help(&format!("bridges.{key}"))
+                    .starts_with(&format!("Standard ist {default}.")),
+                "{key}"
+            );
+        }
+        assert!(catalog_help("bridges.steam_invite_timeout_ms")
+            .contains(&format!("je bis zu {STEAM_INVITE_TASK_WAIT_MS}")));
+    }
+
+    #[test]
+    fn steam_wartezeiten_haben_grenzen_und_invite_bleibt_ueber_dem_steam_worst_case() {
+        use super::*;
+        for default in [
+            STEAM_RANK_DEFAULT_TIMEOUT_MS,
+            STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS,
+            STEAM_SYNC_DEFAULT_TIMEOUT_MS,
+        ] {
+            assert!(STEAM_FORWARD_TIMEOUT_MS_RANGE.contains(&default));
+        }
+        assert!(STEAM_INVITE_TIMEOUT_MS_RANGE.contains(&STEAM_INVITE_DEFAULT_TIMEOUT_MS));
+        assert!(*STEAM_INVITE_TIMEOUT_MS_RANGE.start() > STEAM_INVITE_WORST_CASE_MS);
+        let (min, max) = (
+            *STEAM_FORWARD_TIMEOUT_MS_RANGE.start(),
+            *STEAM_FORWARD_TIMEOUT_MS_RANGE.end(),
+        );
+        let invite = STEAM_INVITE_TIMEOUT_MS_RANGE;
+        for key in [
+            "steam_rank_timeout_ms",
+            "steam_rankcheck_timeout_ms",
+            "steam_sync_timeout_ms",
+        ] {
+            assert!(parse_in("bridges", &format!("{key}={min}")), "{key}");
+            assert!(parse_in("bridges", &format!("{key}={max}")), "{key}");
+            assert!(!parse_in("bridges", &format!("{key}={}", min - 1)), "{key}");
+            assert!(!parse_in("bridges", &format!("{key}={}", max + 1)), "{key}");
+        }
+        assert!(parse_in(
+            "bridges",
+            &format!("steam_invite_timeout_ms={}", invite.start())
+        ));
+        assert!(parse_in(
+            "bridges",
+            &format!("steam_invite_timeout_ms={}", invite.end())
+        ));
+        assert!(!parse_in(
+            "bridges",
+            &format!("steam_invite_timeout_ms={STEAM_INVITE_WORST_CASE_MS}")
+        ));
+        assert!(!parse_in(
+            "bridges",
+            &format!("steam_invite_timeout_ms={}", invite.end() + 1)
+        ));
     }
 }

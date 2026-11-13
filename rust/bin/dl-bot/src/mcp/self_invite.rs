@@ -616,6 +616,9 @@ mod tests {
             "fixture-bot".into(),
             Some("fixture-internal".into()),
             &config,
+            dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
         )
         .expect("State")
         .with_public_source(
@@ -634,7 +637,10 @@ mod tests {
                 .await
                 .expect("MCP");
         });
-        let client = reqwest::Client::new();
+        let client = dl_bridges::http::client(dl_bridges::http::HttpLimits::from_bridges(
+            &dl_core::runtime_config::BridgeOptions::default(),
+        ))
+        .expect("Testclient");
         for (token, route, user, request, args, expected) in [
             (
                 "falsch",

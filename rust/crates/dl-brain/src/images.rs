@@ -16,6 +16,10 @@ pub const IMAGE_ONLY_QUESTION: &str = "Was sagst du zu meinem Bild?";
 const MAX_DECODE_EDGE: u32 = 12_000;
 const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 const MIN_EDGE: u32 = 384;
+pub const IMAGE_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=MAX_QUERY_IMAGES;
+pub const IMAGE_DOWNLOAD_BYTES_RANGE: std::ops::RangeInclusive<u64> = 1..=MAX_DECODE_ALLOC;
+pub const IMAGE_EDGE_RANGE: std::ops::RangeInclusive<u32> = MIN_EDGE..=MAX_DECODE_EDGE;
+pub const IMAGE_JPEG_QUALITY_RANGE: std::ops::RangeInclusive<u8> = 40..=95;
 const MAX_REMEMBERED: usize = 512;
 const MAX_REMEMBERED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -90,10 +94,20 @@ impl Default for ImageLimits {
 impl ImageLimits {
     fn bounded(self) -> Self {
         Self {
-            max_images: self.max_images.clamp(1, MAX_QUERY_IMAGES),
-            max_download_bytes: self.max_download_bytes.max(1),
-            max_edge: self.max_edge.max(MIN_EDGE),
-            jpeg_quality: self.jpeg_quality.clamp(40, 95),
+            max_images: self
+                .max_images
+                .clamp(*IMAGE_COUNT_RANGE.start(), *IMAGE_COUNT_RANGE.end()),
+            max_download_bytes: self.max_download_bytes.clamp(
+                *IMAGE_DOWNLOAD_BYTES_RANGE.start(),
+                *IMAGE_DOWNLOAD_BYTES_RANGE.end(),
+            ),
+            max_edge: self
+                .max_edge
+                .clamp(*IMAGE_EDGE_RANGE.start(), *IMAGE_EDGE_RANGE.end()),
+            jpeg_quality: self.jpeg_quality.clamp(
+                *IMAGE_JPEG_QUALITY_RANGE.start(),
+                *IMAGE_JPEG_QUALITY_RANGE.end(),
+            ),
             followup_ttl: self.followup_ttl,
         }
     }

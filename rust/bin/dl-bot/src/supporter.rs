@@ -9,10 +9,11 @@ use std::time::Duration;
 use serenity::model::id::{GuildId, RoleId, UserId};
 use sqlx::PgPool;
 
-use dl_core::internal_tokens::{first_token, DASHBOARD_TWITCH_RECEIVER, STEAM_BOT_RECEIVER};
+use dl_core::internal_tokens::{first_token, STEAM_BOT_RECEIVER, TWITCH_DASHBOARD_RECEIVER};
 use dl_core::runtime_config::{
-    CommunityOptions, SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS, SUPPORTER_DEFAULT_MAX_REVOKES,
-    SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS, SUPPORTER_DEFAULT_TIERS_EUR, SUPPORTER_TIP_VALID_DAYS,
+    CommunityOptions, SUPPORTER_CUTOVER_GRACE_DAYS, SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+    SUPPORTER_DEFAULT_MAX_REVOKES, SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
+    SUPPORTER_DEFAULT_TIERS_EUR,
 };
 
 use crate::serversync::support_publish::{SupportFunding, SupportPanelOptions};
@@ -29,14 +30,12 @@ pub struct SupporterConfig {
     pub role_sync_apply: bool,
     pub max_revokes: u64,
     pub interval: Duration,
-    pub request_timeout: Option<Duration>,
     pub goal_cents: i64,
     pub steam_api_base: String,
     pub steam_token: Option<String>,
     pub twitch_api_base: Option<String>,
     pub twitch_token: Option<String>,
     pub tiers_eur: Vec<u64>,
-    pub plus_monthly_cents: Option<i64>,
 }
 
 impl fmt::Debug for SupporterConfig {
@@ -46,14 +45,12 @@ impl fmt::Debug for SupporterConfig {
             .field("role_sync_apply", &self.role_sync_apply)
             .field("max_revokes", &self.max_revokes)
             .field("interval", &self.interval)
-            .field("request_timeout", &self.request_timeout)
             .field("goal_cents", &self.goal_cents)
             .field("steam_api_base", &self.steam_api_base)
             .field("steam_token_set", &self.steam_token.is_some())
             .field("twitch_api_base", &self.twitch_api_base)
             .field("twitch_token_set", &self.twitch_token.is_some())
             .field("tiers_eur", &self.tiers_eur)
-            .field("plus_monthly_cents", &self.plus_monthly_cents)
             .finish()
     }
 }
@@ -75,28 +72,23 @@ impl SupporterConfig {
                     .supporter_sync_interval_seconds
                     .unwrap_or(SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS),
             ),
-            request_timeout: community
-                .supporter_request_timeout_ms
-                .map(Duration::from_millis),
             goal_cents: community
                 .supporter_funding_goal_cents
                 .unwrap_or(SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS),
             steam_api_base: steam_api_base.to_string(),
             steam_token: first_token(&lookup, STEAM_BOT_RECEIVER),
             twitch_api_base: community.supporter_twitch_api_base.clone(),
-            twitch_token: first_token(&lookup, DASHBOARD_TWITCH_RECEIVER),
+            twitch_token: first_token(&lookup, TWITCH_DASHBOARD_RECEIVER),
             tiers_eur: community
                 .supporter_tiers_eur
                 .clone()
                 .unwrap_or_else(|| SUPPORTER_DEFAULT_TIERS_EUR.to_vec()),
-            plus_monthly_cents: community.supporter_plus_monthly_cents,
         }
     }
 
     pub fn panel_options(&self) -> SupportPanelOptions {
         SupportPanelOptions {
             tiers_eur: self.tiers_eur.clone(),
-            plus_monthly_cents: self.plus_monthly_cents,
             twitch: self.twitch_api_base.is_some() && self.twitch_token.is_some(),
             role_grant: self.role_grant_apply,
         }
@@ -106,7 +98,6 @@ impl SupporterConfig {
         tracing::info!(
             goal_cents = self.goal_cents,
             tiers_eur = ?self.tiers_eur,
-            plus_monthly_cents = ?self.plus_monthly_cents,
             twitch = self.panel_options().twitch,
             role_grant_apply = self.role_grant_apply,
             "Server-Unterstützer: Panel-Werte"
@@ -129,7 +120,7 @@ pub trait FundingSource: Send + Sync {
 enum RefreshState {
     Fine,
     Skipped(&'static str),
-    Failed,
+    Failed(String),
 }
 
 pub struct SupporterSync {
@@ -166,29 +157,45 @@ impl SupporterSync {
                 interval_seconds = self.config.interval.as_secs(),
                 "Server-Unterstützer: Abgleich gestartet"
             );
-            let mut table_missing_logged = false;
-            let mut refresh_state = RefreshState::Fine;
-            let mut ticker = tokio::time::interval(self.config.interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                match self.tick().await {
-                    Ok(()) => table_missing_logged = false,
-                    Err(store::StoreError::Missing) => {
-                        if !table_missing_logged {
-                            tracing::warn!(
-                                "Server-Unterstützer: core.supporter_sources fehlt, Abgleich pausiert bis zur Migration"
-                            );
-                            table_missing_logged = true;
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Server-Unterstützer: Abgleich übersprungen");
+            tokio::join!(self.role_loop(), self.funding_loop());
+        })
+    }
+
+    fn ticker(&self) -> tokio::time::Interval {
+        let mut ticker = tokio::time::interval(self.config.interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker
+    }
+
+    async fn role_loop(&self) {
+        let mut table_missing_logged = false;
+        let mut ticker = self.ticker();
+        loop {
+            ticker.tick().await;
+            match self.tick().await {
+                Ok(()) => table_missing_logged = false,
+                Err(store::StoreError::Missing) => {
+                    if !table_missing_logged {
+                        tracing::warn!(
+                            "Server-Unterstützer: core.supporter_sources fehlt, Abgleich pausiert bis zur Migration"
+                        );
+                        table_missing_logged = true;
                     }
                 }
-                refresh_state = self.refresh_funding(refresh_state).await;
+                Err(error) => {
+                    tracing::warn!(%error, "Server-Unterstützer: Abgleich übersprungen");
+                }
             }
-        })
+        }
+    }
+
+    async fn funding_loop(&self) {
+        let mut refresh_state = RefreshState::Fine;
+        let mut ticker = self.ticker();
+        loop {
+            ticker.tick().await;
+            refresh_state = self.refresh_funding(refresh_state).await;
+        }
     }
 
     async fn tick(&self) -> Result<(), store::StoreError> {
@@ -212,7 +219,7 @@ impl SupporterSync {
             let imported = store::import_manual(&self.pool, &holders).await?;
             tracing::info!(
                 imported,
-                valid_days = SUPPORTER_TIP_VALID_DAYS,
+                grace_days = SUPPORTER_CUTOVER_GRACE_DAYS,
                 "Server-Unterstützer: bisherige Rolleninhaber übernommen"
             );
             import_done = true;
@@ -278,7 +285,7 @@ impl SupporterSync {
         let next = match &outcome {
             Ok(FundingRefresh::Skipped(reason)) => RefreshState::Skipped(reason),
             Ok(_) => RefreshState::Fine,
-            Err(_) => RefreshState::Failed,
+            Err(error) => RefreshState::Failed(error.to_string()),
         };
         let changed = next != previous;
         match outcome {
@@ -305,7 +312,7 @@ impl SupporterSync {
 pub fn register(
     router: &mut dl_discord::InteractionRouter,
     links: Arc<dyn links::SupporterLinks>,
-    options: &SupportPanelOptions,
+    config: &SupporterConfig,
 ) {
-    links::register(router, links, options);
+    links::register(router, links, config);
 }

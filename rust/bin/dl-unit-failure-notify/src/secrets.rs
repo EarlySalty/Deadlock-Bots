@@ -61,7 +61,7 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
         .context("Infisical-Credential ist ungültig.")?;
     let client = uplink_infisical_transport::client_builder(&config.infisical_socket, 0)
         .map_err(|_| anyhow::anyhow!("Geschützte Infisical-Gegenstelle ist nicht verfügbar."))?
-        .timeout(Duration::from_secs(15))
+        .timeout(config.request_limit())
         .build()
         .map_err(|_| anyhow::anyhow!("Infisical-Verbindung konnte nicht vorbereitet werden."))?;
     let mut response = client
@@ -130,8 +130,8 @@ pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str)
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(20))
+        .connect_timeout(config.connect_limit())
+        .timeout(config.request_limit())
         .build()
         .map_err(|_| anyhow::anyhow!("Broker-Verbindung konnte nicht vorbereitet werden."))?;
     let response = client
@@ -237,6 +237,8 @@ mod tests {
             environment: "test".into(),
             secret_path: "/".into(),
             host_label: "test".into(),
+            connect_timeout_ms: None,
+            request_timeout_ms: None,
         };
         let pending = crate::state::Pending {
             key: "stable-test-key".into(),

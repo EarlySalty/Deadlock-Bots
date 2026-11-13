@@ -7,7 +7,6 @@
 //! speichert nichts und sieht kein Token.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -15,8 +14,6 @@ use super::rang_guide_publish::TWITCH_LINK_OPEN_CUSTOM_ID;
 
 const INITIATE_PATH: &str = "/internal/v1/discord/twitch-link/initiate";
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
-/// Discord erwartet die Interaction-Antwort binnen 3 Sekunden.
-const REQUEST_TIMEOUT: Duration = Duration::from_millis(2_500);
 
 pub const TWITCH_LINK_INTRO: &str = "Hier verknüpfst du dein Twitch-Konto mit dem Server. Discord fragt dich gleich, ob wir sehen dürfen, welche Konten du mit Discord verbunden hast. Wir merken uns davon nur dein Twitch-Konto, damit dich der Bot in Partner-Streams erkennt.\n-# Der Link ist ein paar Stunden gültig.";
 pub const TWITCH_LINK_FAILED: &str =
@@ -37,17 +34,18 @@ pub struct DashboardTwitchLinkClient {
 }
 
 impl DashboardTwitchLinkClient {
-    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
-                .build()
-                .unwrap_or_default(),
+    pub fn new(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Self, dl_bridges::http::HttpSetupError> {
+        Ok(Self {
+            http: dl_bridges::http::internal_client(limits)?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token: token
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),
-        }
+        })
     }
 }
 
@@ -267,7 +265,14 @@ mod tests {
 
     #[tokio::test]
     async fn client_ohne_token_fragt_nicht_an() {
-        let client = DashboardTwitchLinkClient::new("http://127.0.0.1:9", None);
+        let client = DashboardTwitchLinkClient::new(
+            "http://127.0.0.1:9",
+            None,
+            dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
+        )
+        .expect("Testclient");
         assert!(client.authorize_url().await.is_err());
     }
 }

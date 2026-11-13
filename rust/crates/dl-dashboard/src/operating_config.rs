@@ -57,6 +57,8 @@ pub async fn ui(State(app): State<DashboardApp>, headers: HeaderMap) -> Response
     )
 }
 
+const HEALTH_BODY_MAX_BYTES: usize = 4096;
+
 async fn active_bot_fingerprint() -> Option<(String, u64)> {
     let url = format!(
         "{}/internal/master/v1/health",
@@ -66,16 +68,28 @@ async fn active_bot_fingerprint() -> Option<(String, u64)> {
         dl_core::runtime_config::secret_value,
         dl_core::internal_tokens::MASTER_BROKER_RECEIVER,
     )?;
-    fetch_bot_fingerprint(&url, &token).await
+    let limits = match dl_bridges::http::HttpLimits::current() {
+        Ok(limits) => limits,
+        Err(error) => {
+            tracing::warn!(%error, "Bot-Abgleich: HTTP-Zeitlimits nicht lesbar");
+            return None;
+        }
+    };
+    fetch_bot_fingerprint(&url, &token, limits).await
 }
 
-async fn fetch_bot_fingerprint(url: &str, token: &str) -> Option<(String, u64)> {
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .ok()?;
+async fn fetch_bot_fingerprint(
+    url: &str,
+    token: &str,
+    limits: dl_bridges::http::HttpLimits,
+) -> Option<(String, u64)> {
+    let http = match dl_bridges::http::internal_client(limits) {
+        Ok(http) => http,
+        Err(error) => {
+            tracing::warn!(%error, "Bot-Abgleich: HTTP-Client nicht erstellt");
+            return None;
+        }
+    };
     let mut response = http
         .get(url)
         .header("X-Internal-Token", token)
@@ -87,7 +101,7 @@ async fn fetch_bot_fingerprint(url: &str, token: &str) -> Option<(String, u64)> 
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
-        if bytes.len() + chunk.len() > 4096 {
+        if bytes.len() + chunk.len() > HEALTH_BODY_MAX_BYTES {
             return None;
         }
         bytes.extend_from_slice(&chunk);
@@ -231,7 +245,20 @@ async fn steam_request(save: Option<dl_bridges::steam_operating::WriteRequest>) 
         dl_core::runtime_config::secret_value,
         dl_core::internal_tokens::STEAM_BOT_RECEIVER,
     );
-    let client = dl_bridges::steam::SteamBotClient::new(&config.services.steam_api_url, token);
+    let client = match dl_bridges::steam::SteamBotClient::new(
+        &config.services.steam_api_url,
+        token,
+        &config.runtime.bridges,
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%error, "Steam-Verbindung: HTTP-Client nicht erstellt");
+            return no_store(err_text(
+                503,
+                "Die Steam-Verbindung ist nicht eingerichtet.",
+            ));
+        }
+    };
     match client.operating_config_write(save.as_ref()).await {
         Ok(value) => no_store(Json(value).into_response()),
         Err(error) => {
@@ -291,6 +318,12 @@ pub async fn steam_save(
 #[cfg(test)]
 mod active_tests {
     use super::{fetch_bot_fingerprint, ConfigWrite};
+
+    fn test_limits() -> dl_bridges::http::HttpLimits {
+        dl_bridges::http::HttpLimits::from_bridges(
+            &dl_core::runtime_config::BridgeOptions::default(),
+        )
+    }
     use axum::{http::HeaderMap, routing::get, Json, Router};
     use serde_json::json;
 
@@ -357,14 +390,16 @@ mod active_tests {
             });
             let url = format!("http://{address}/internal/master/v1/health");
             assert_eq!(
-                fetch_bot_fingerprint(&url, "synthetic-token").await,
+                fetch_bot_fingerprint(&url, "synthetic-token", test_limits()).await,
                 expected
             );
             server.abort();
             let _ = server.await;
-            assert!(fetch_bot_fingerprint(&url, "synthetic-token")
-                .await
-                .is_none());
+            assert!(
+                fetch_bot_fingerprint(&url, "synthetic-token", test_limits())
+                    .await
+                    .is_none()
+            );
         }
     }
 }

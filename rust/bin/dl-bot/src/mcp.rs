@@ -38,6 +38,7 @@ const SUPPORTED_PROTOCOLS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"]
 
 pub struct McpState {
     http: reqwest::Client,
+    http_limits: dl_bridges::http::HttpLimits,
     bot_token: String,
     discord_api: String,
     auth_token: String,
@@ -55,17 +56,16 @@ impl McpState {
         bot_token: String,
         auth_token: Option<String>,
         config: &StartOptions,
+        http_limits: dl_bridges::http::HttpLimits,
     ) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .context("MCP: reqwest-Client")?;
+        let http = dl_bridges::http::client(http_limits).context("MCP: HTTP-Client")?;
         let auth_token = auth_token
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .context("MCP: interner Auth-Token aus Infisical fehlt")?;
         Ok(Self {
             http,
+            http_limits,
             bot_token,
             discord_api: DISCORD_API.into(),
             auth_token,
@@ -613,8 +613,16 @@ async fn discord_call(
             if attempt > 8 {
                 bail!("Rate-Limit: zu viele Versuche ({url})");
             }
+            let wait = Duration::from_secs_f64(retry.max(0.0));
+            if wait > st.http_limits.request {
+                bail!(
+                    "Rate-Limit: Discord verlangt {:.1} s Pause, mehr als das Zeitlimit von {} ms ({method} {path})",
+                    retry,
+                    st.http_limits.request.as_millis()
+                );
+            }
             tracing::warn!(path, retry, attempt, "MCP: Discord 429, warte");
-            tokio::time::sleep(Duration::from_millis((retry * 1000.0) as u64 + 100)).await;
+            tokio::time::sleep(wait).await;
             continue;
         }
         if status.is_server_error() && attempt <= 3 {
@@ -622,7 +630,10 @@ async fn discord_call(
             tokio::time::sleep(Duration::from_millis(800 * u64::from(attempt))).await;
             continue;
         }
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp
+            .text()
+            .await
+            .with_context(|| format!("Discord {status}: Antwort unlesbar ({method} {path})"))?;
         if !status.is_success() {
             bail!(
                 "Discord {status}: {} ({method} {path})",
@@ -1439,7 +1450,10 @@ mod tests {
                 .await
                 .expect("Testserver");
         });
-        let client = reqwest::Client::new();
+        let client = dl_bridges::http::client(dl_bridges::http::HttpLimits::from_bridges(
+            &dl_core::runtime_config::BridgeOptions::default(),
+        ))
+        .expect("Testclient");
         for (user, tool, status, send_count) in [
             ("44", "send_message", 403, 0),
             ("44", "read_messages", 200, 0),
@@ -1705,6 +1719,9 @@ mod tests {
             "bot-token".into(),
             token.map(str::to_owned),
             &StartOptions::default(),
+            dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
         )
     }
 
@@ -1723,8 +1740,15 @@ mod tests {
             mcp_export_dir: Some(PathBuf::from("data/test-exports")),
             ..Default::default()
         };
-        let state = McpState::from_config("bot-token".into(), Some(" expected ".into()), &config)
-            .expect("gültiger Test-State");
+        let state = McpState::from_config(
+            "bot-token".into(),
+            Some(" expected ".into()),
+            &config,
+            dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
+        )
+        .expect("gültiger Test-State");
         assert_eq!(state.auth_token, "expected");
         assert_eq!(state.default_guild.as_deref(), Some("12345"));
         assert_eq!(state.export_dir, PathBuf::from("data/test-exports"));

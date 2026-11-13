@@ -8,6 +8,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http::{internal_client, HttpLimits, HttpSetupError};
+use dl_core::runtime_config::{
+    BridgeOptions, STEAM_INVITE_DEFAULT_TIMEOUT_MS, STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS,
+    STEAM_RANK_DEFAULT_TIMEOUT_MS, STEAM_SYNC_DEFAULT_TIMEOUT_MS,
+};
+
 use dl_central_db::kv;
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
@@ -18,28 +24,6 @@ use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
-const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
-/// Freundschafts-Check, dann der Invite), jeder mit bis zu 45 s Budget.
-/// Der Bridge-Timeout muss echt darüber liegen. Bei den ursprünglichen 30 s
-/// brach die Bridge mitten im Vorgang ab, während der Invite-Task bei Steam
-/// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
-/// und der Poller schickte sie später ein zweites Mal.
-const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
-/// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
-/// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
-/// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
-const STEAM_INVITE_WORST_CASE_SECS: u64 = 45 * 2;
-
-// Der Vertrag gilt zur Compile-Zeit: wer das Bridge-Timeout senkt oder das
-// Steam-Budget hebt, bekommt keinen roten Test, sondern gar kein Binary.
-const _: () = assert!(
-    INVITE_FORWARD_TIMEOUT_SECS > STEAM_INVITE_WORST_CASE_SECS,
-    "Bridge-Timeout für /invite liegt unter dem Steam-Worst-Case: die Bridge \
-     bricht ab, während der Invite-Task bei Steam noch läuft"
-);
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
 pub const PANEL_CUSTOM_IDS: [&str; 8] = [
@@ -75,11 +59,47 @@ pub const BRD09_STEAM_PANEL_POSTED_MSG: &str = "✅ Steam-Panel gepostet.";
 pub const BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC: &str =
     "ID einer bestehenden Message, die editiert werden soll (optional)";
 
-fn component_forward_timeout(custom_id: &str) -> Duration {
+fn component_forward_wait(custom_id: &str) -> ForwardWait {
     if RANKCHECK_IDS.contains(&custom_id) {
-        RANKCHECK_FORWARD_TIMEOUT
+        ForwardWait::Rankcheck
     } else {
-        DEFAULT_TIMEOUT
+        ForwardWait::Request
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardWait {
+    Request,
+    Rank,
+    Rankcheck,
+    Sync,
+    Invite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SteamWaits {
+    pub rank: Duration,
+    pub rankcheck: Duration,
+    pub sync: Duration,
+    pub invite: Duration,
+}
+
+impl SteamWaits {
+    pub fn from_bridges(bridges: &BridgeOptions) -> Self {
+        let millis =
+            |value: Option<u64>, default: u64| Duration::from_millis(value.unwrap_or(default));
+        Self {
+            rank: millis(bridges.steam_rank_timeout_ms, STEAM_RANK_DEFAULT_TIMEOUT_MS),
+            rankcheck: millis(
+                bridges.steam_rankcheck_timeout_ms,
+                STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS,
+            ),
+            sync: millis(bridges.steam_sync_timeout_ms, STEAM_SYNC_DEFAULT_TIMEOUT_MS),
+            invite: millis(
+                bridges.steam_invite_timeout_ms,
+                STEAM_INVITE_DEFAULT_TIMEOUT_MS,
+            ),
+        }
     }
 }
 
@@ -104,31 +124,51 @@ pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Stri
     dl_core::internal_tokens::first_token(lookup, dl_core::internal_tokens::STEAM_BOT_RECEIVER)
 }
 
-fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
-    lookup(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 pub struct SteamBotClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: String,
     pub(crate) token: Option<String>,
+    pub(crate) limits: HttpLimits,
+    pub(crate) waits: SteamWaits,
 }
 
 impl SteamBotClient {
-    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Arc<Self> {
-        let base_url =
-            trimmed(&lookup, "STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
-        Self::new(base_url, token_from_lookup(&lookup))
+    pub fn from_env(
+        lookup: impl Fn(&str) -> Option<String>,
+        bridges: &BridgeOptions,
+    ) -> Result<Arc<Self>, HttpSetupError> {
+        let base_url = dl_core::internal_tokens::present(&lookup, "STEAM_BOT_API_URL")
+            .unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        Self::new(base_url, token_from_lookup(&lookup), bridges)
     }
 
-    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
-        Arc::new(Self {
-            http: reqwest::Client::new(),
+    pub fn new(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        bridges: &BridgeOptions,
+    ) -> Result<Arc<Self>, HttpSetupError> {
+        let limits = HttpLimits::from_bridges(bridges);
+        Ok(Arc::new(Self {
+            http: internal_client(limits)?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
-        })
+            limits,
+            waits: SteamWaits::from_bridges(bridges),
+        }))
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        self.limits.request
+    }
+
+    pub fn wait(&self, wait: ForwardWait) -> Duration {
+        match wait {
+            ForwardWait::Request => self.limits.request,
+            ForwardWait::Rank => self.waits.rank,
+            ForwardWait::Rankcheck => self.waits.rankcheck,
+            ForwardWait::Sync => self.waits.sync,
+            ForwardWait::Invite => self.waits.invite,
+        }
     }
 
     /// `POST {base}/events/discord` — `None` bei Nicht-200/Netzfehler (wie _post_event).
@@ -168,7 +208,9 @@ impl SteamBotClient {
     pub async fn post_voice_return(&self, user_id: u64) {
         let mut data = Map::new();
         data.insert("voice_return".into(), json!({ "user_id": user_id }));
-        let _ = self.post_event("voice_return", data, DEFAULT_TIMEOUT).await;
+        let _ = self
+            .post_event("voice_return", data, self.request_timeout())
+            .await;
     }
 
     fn interaction_payload(interaction: &BridgeInteraction, custom_id: &str) -> Map<String, Value> {
@@ -238,20 +280,16 @@ impl SteamBotClient {
             ("user".into(), json!(target_id)),
         ]);
         let payload = Self::slash_event_payload(bot_id, guild_id, "invite", Some(options));
-        self.post_event(
-            "slash_command",
-            payload,
-            Duration::from_secs(INVITE_FORWARD_TIMEOUT_SECS),
-        )
-        .await
-        .and_then(|value| {
-            value
-                .get("reply_text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
+        self.post_event("slash_command", payload, self.wait(ForwardWait::Invite))
+            .await
+            .and_then(|value| {
+                value
+                    .get("reply_text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
     }
 
     /// Frische Einmal-Login-URL — öffentlicher Helfer (voice_nudge nutzt ihn).
@@ -264,7 +302,7 @@ impl SteamBotClient {
         let mut data = Map::new();
         data.insert("interaction".into(), Value::Object(inner));
         let result = self
-            .post_event("interaction", data, DEFAULT_TIMEOUT)
+            .post_event("interaction", data, self.request_timeout())
             .await?;
         result
             .get("link_button")
@@ -415,7 +453,9 @@ impl InteractionHandler for ForwardComponent {
             };
         }
         let payload = SteamBotClient::interaction_payload(&interaction, &interaction.custom_id);
-        let timeout = component_forward_timeout(&interaction.custom_id);
+        let timeout = self
+            .client
+            .wait(component_forward_wait(&interaction.custom_id));
         let result = self
             .client
             .post_event("interaction", payload, timeout)
@@ -444,7 +484,7 @@ impl InteractionHandler for FriendCodeSubmit {
             SteamBotClient::interaction_payload(&with_value, FRIEND_CODE_SUBMIT_CUSTOM_ID);
         let result = self
             .client
-            .post_event("interaction", payload, DEFAULT_TIMEOUT)
+            .post_event("interaction", payload, self.client.request_timeout())
             .await;
         render(result)
     }
@@ -457,7 +497,7 @@ struct ForwardSlash {
     wire_name: &'static str,
     /// Optionen, die 1:1 aus der Interaction übernommen werden.
     passthrough_options: &'static [&'static str],
-    timeout: Duration,
+    wait: ForwardWait,
 }
 
 #[async_trait::async_trait]
@@ -474,7 +514,7 @@ impl InteractionHandler for ForwardSlash {
         let payload = SteamBotClient::slash_payload(&interaction, self.wire_name, Some(options));
         let result = self
             .client
-            .post_event("slash_command", payload, self.timeout)
+            .post_event("slash_command", payload, self.client.wait(self.wait))
             .await;
         render(result)
     }
@@ -554,7 +594,7 @@ async fn fetch_panel_result(
     };
     let payload = SteamBotClient::slash_payload(&interaction, wire_name, None);
     client
-        .post_event("slash_command", payload, DEFAULT_TIMEOUT)
+        .post_event("slash_command", payload, client.request_timeout())
         .await
 }
 
@@ -577,7 +617,11 @@ impl InteractionHandler for CheckRank {
         let payload = SteamBotClient::slash_payload(&interaction, "checkrank", Some(options));
         let result = self
             .client
-            .post_event("slash_command", payload, Duration::from_secs(120))
+            .post_event(
+                "slash_command",
+                payload,
+                self.client.wait(ForwardWait::Rankcheck),
+            )
             .await;
         render(result)
     }
@@ -722,12 +766,12 @@ fn register_inner(
 
     let spec = |definition: Value| CommandSpec { definition };
     let forward_slash =
-        |wire_name: &'static str, passthrough: &'static [&'static str], secs: u64| {
+        |wire_name: &'static str, passthrough: &'static [&'static str], wait: ForwardWait| {
             Arc::new(ForwardSlash {
                 client: client.clone(),
                 wire_name,
                 passthrough_options: passthrough,
-                timeout: Duration::from_secs(secs),
+                wait,
             })
         };
 
@@ -738,7 +782,7 @@ fn register_inner(
             "name": "account_verknüpfen",
             "description": "Zeigt den Steam-OpenID-Link zur Account-Verknüpfung.",
         })),
-        forward_slash("account_verknüpfen", &[], 15),
+        forward_slash("account_verknüpfen", &[], ForwardWait::Request),
     );
     router.on_command(
         "steam_rank",
@@ -751,7 +795,7 @@ fn register_inner(
                 "required": false,
             }],
         })),
-        forward_slash("steam_rank", &["target"], 60),
+        forward_slash("steam_rank", &["target"], ForwardWait::Rank),
     );
     router.on_command(
         "checkrank",
@@ -794,22 +838,22 @@ fn register_inner(
     router.on_command(
         "steam links",
         spec(steam_group.clone()),
-        forward_slash("steam_links", &[], 15),
+        forward_slash("steam_links", &[], ForwardWait::Request),
     );
     router.on_command(
         "steam whoami",
         spec(steam_group.clone()),
-        forward_slash("steam_whoami", &["steam"], 15),
+        forward_slash("steam_whoami", &["steam"], ForwardWait::Request),
     );
     router.on_command(
         "steam setprimary",
         spec(steam_group.clone()),
-        forward_slash("steam_setprimary", &["steam", "name"], 15),
+        forward_slash("steam_setprimary", &["steam", "name"], ForwardWait::Request),
     );
     router.on_command(
         "steam unlink",
         spec(steam_group),
-        forward_slash("steam_unlink", &["steam"], 15),
+        forward_slash("steam_unlink", &["steam"], ForwardWait::Request),
     );
 
     router.on_command(
@@ -822,7 +866,11 @@ fn register_inner(
                 {"type": 6, "name": "user", "description": "Das Discord-Mitglied, das den Playtest bekommt", "required": true}
             ],
         })),
-        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
+        forward_slash(
+            "invite",
+            &["freundescode", "user"],
+            ForwardWait::Invite,
+        ),
     );
     // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     for (name, description) in [
@@ -847,9 +895,9 @@ fn register_inner(
                 "default_member_permissions": "8",
             })),
             match name {
-                "steam_rank_sync" => forward_slash("steam_rank_sync", &[], 180),
-                "subrank_sync" => forward_slash("subrank_sync", &[], 180),
-                _ => forward_slash("sync_steam_friends", &[], 180),
+                "steam_rank_sync" => forward_slash("steam_rank_sync", &[], ForwardWait::Sync),
+                "subrank_sync" => forward_slash("subrank_sync", &[], ForwardWait::Sync),
+                _ => forward_slash("sync_steam_friends", &[], ForwardWait::Sync),
             },
         );
     }
@@ -943,7 +991,7 @@ pub fn spawn_member_remove_listener(
                     let mut data = Map::new();
                     data.insert("member_remove".into(), Value::Object(inner));
                     let _ = client
-                        .post_event("member_remove", data, DEFAULT_TIMEOUT)
+                        .post_event("member_remove", data, client.request_timeout())
                         .await;
                 }
                 Ok(MemberEvent::Join { .. })
@@ -999,7 +1047,7 @@ pub fn spawn_admin_command_listener(
             data.insert("admin_command".into(), Value::Object(inner));
 
             let result = client
-                .post_event("admin_command", data, DEFAULT_TIMEOUT)
+                .post_event("admin_command", data, client.request_timeout())
                 .await;
             let (content, embeds) = match &result {
                 None => (
@@ -1030,7 +1078,14 @@ pub fn spawn_admin_command_listener(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) fn test_client(
+        base_url: impl Into<String>,
+        token: Option<String>,
+    ) -> Arc<SteamBotClient> {
+        SteamBotClient::new(base_url, token, &BridgeOptions::default()).expect("Testclient")
+    }
+
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Mutex;
@@ -1092,7 +1147,7 @@ mod tests {
     async fn lounge_invite_nutzt_denselben_slash_event_mit_bot_als_admin() {
         let response = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung.";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": response })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         assert_eq!(
             client
                 .invite_from_bot(99, 7, "123456789", 42)
@@ -1118,7 +1173,7 @@ mod tests {
     #[tokio::test]
     async fn lounge_invite_ohne_handler_antwort_ist_ein_fehler() {
         let (url, _, server) = mock_steam_bot(json!({})).await;
-        assert!(SteamBotClient::new(url, None)
+        assert!(test_client(url, None)
             .invite_from_bot(99, 7, "123456789", 42)
             .await
             .is_err());
@@ -1143,7 +1198,7 @@ mod tests {
         let custom_id = "steam_link_panel:unlink";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let reply = router
             .resolve_component(custom_id)
@@ -1164,7 +1219,7 @@ mod tests {
         let custom_id = "steam_link_panel:unlink:confirm";
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let reply = router
             .resolve_component(custom_id)
@@ -1194,7 +1249,7 @@ mod tests {
         }))
         .await;
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new(url, None));
+        register(&mut router, test_client(url, None));
 
         let panel = router
             .resolve_command("steam links")
@@ -1248,7 +1303,7 @@ mod tests {
             }))
             .await;
             let mut router = InteractionRouter::new();
-            register(&mut router, SteamBotClient::new(url, None));
+            register(&mut router, test_client(url, None));
 
             let reply = router
                 .resolve_component(custom_id)
@@ -1273,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn voice_return_wire_format() {
         let (url, received, server) = mock_steam_bot(json!({})).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
 
         client.post_voice_return(42).await;
 
@@ -1297,7 +1352,7 @@ mod tests {
             "buttons": [{ "custom_id": "steam_link_panel:rankcheck", "label": "Weiter", "style": "primary" }],
         }))
         .await;
-        let client = SteamBotClient::new(url, Some("tok".to_string()));
+        let client = test_client(url, Some("tok".to_string()));
         let handler = ForwardComponent {
             client: client.clone(),
         };
@@ -1321,7 +1376,7 @@ mod tests {
     #[tokio::test]
     async fn rankcheck_forward_sendet_display_name_statt_username() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = ForwardComponent { client };
         let reply = handler
             .handle(BridgeInteraction {
@@ -1347,7 +1402,7 @@ mod tests {
     #[tokio::test]
     async fn friend_code_button_oeffnet_modal_lokal() {
         // Kein Server nötig — der Klick darf NICHT geforwarded werden.
-        let client = SteamBotClient::new("http://127.0.0.1:9", None);
+        let client = test_client("http://127.0.0.1:9", None);
         let handler = ForwardComponent { client };
         let reply = handler.handle(interaction("linkpanel_friend_code")).await;
         let modal = reply.modal.expect("modal");
@@ -1358,7 +1413,7 @@ mod tests {
     #[tokio::test]
     async fn modal_submit_forwardet_friend_code() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = FriendCodeSubmit { client };
         let mut itx = interaction(FRIEND_CODE_MODAL_CUSTOM_ID);
         itx.options
@@ -1377,12 +1432,12 @@ mod tests {
     #[tokio::test]
     async fn slash_command_wire_format() {
         let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
-        let client = SteamBotClient::new(url, None);
+        let client = test_client(url, None);
         let handler = ForwardSlash {
             client,
             wire_name: "steam_whoami",
             passthrough_options: &["steam"],
-            timeout: DEFAULT_TIMEOUT,
+            wait: ForwardWait::Request,
         };
         let mut itx = interaction("");
         itx.options.insert("steam".to_string(), json!("gabelogan"));
@@ -1418,7 +1473,7 @@ mod tests {
         .expect("set");
 
         let handler = PublishPanel {
-            client: SteamBotClient::new(url, None),
+            client: test_client(url, None),
             wire_name: "publish_steam_panel",
             panel_buttons: steam_panel_components(),
             confirmation: BRD09_STEAM_PANEL_POSTED_MSG,
@@ -1442,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn steam_bot_nicht_erreichbar() {
-        let client = SteamBotClient::new("http://127.0.0.1:9", None); // tote Adresse
+        let client = test_client("http://127.0.0.1:9", None); // tote Adresse
         let handler = ForwardComponent { client };
         let reply = handler
             .handle(interaction("steam_link_panel:rankcheck"))
@@ -1454,7 +1509,7 @@ mod tests {
     #[test]
     fn router_registrierung_vollstaendig() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
         // Panels + Legacy + Modal
         for id in PANEL_CUSTOM_IDS {
             assert!(router.resolve_component(id).is_some(), "{id}");
@@ -1491,7 +1546,7 @@ mod tests {
     #[test]
     fn plus_panel_buttons_werden_ueber_den_praefix_geroutet() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
 
         for id in [
             "steam_plus:open",
@@ -1520,7 +1575,7 @@ mod tests {
     #[test]
     fn invite_command_ist_fuer_alle_mit_freundescode_und_user_option() {
         let mut router = InteractionRouter::new();
-        register(&mut router, SteamBotClient::new("http://x", None));
+        register(&mut router, test_client("http://x", None));
 
         assert!(router.resolve_command("invite").is_some());
         let definitions = router.command_definitions();
@@ -1559,17 +1614,56 @@ mod tests {
 
     #[test]
     fn rankcheck_buttons_nutzen_langzeit_timeout() {
+        let client = SteamBotClient::new(
+            "http://x",
+            None,
+            &BridgeOptions {
+                http_request_timeout_ms: Some(7),
+                steam_rankcheck_timeout_ms: Some(11),
+                ..BridgeOptions::default()
+            },
+        )
+        .expect("Testclient");
+        for (custom_id, expected) in [
+            ("steam_link_panel:rankcheck", 11),
+            ("linkpanel_rank_check", 11),
+            ("steam_link_panel:open", 7),
+        ] {
+            assert_eq!(
+                client.wait(component_forward_wait(custom_id)),
+                Duration::from_millis(expected),
+                "{custom_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn steam_wartezeiten_kommen_aus_der_konfiguration() {
+        let defaults = SteamWaits::from_bridges(&BridgeOptions::default());
         assert_eq!(
-            component_forward_timeout("steam_link_panel:rankcheck"),
-            Duration::from_secs(120)
+            defaults,
+            SteamWaits {
+                rank: Duration::from_millis(STEAM_RANK_DEFAULT_TIMEOUT_MS),
+                rankcheck: Duration::from_millis(STEAM_RANKCHECK_DEFAULT_TIMEOUT_MS),
+                sync: Duration::from_millis(STEAM_SYNC_DEFAULT_TIMEOUT_MS),
+                invite: Duration::from_millis(STEAM_INVITE_DEFAULT_TIMEOUT_MS),
+            }
         );
+        let configured = SteamWaits::from_bridges(&BridgeOptions {
+            steam_rank_timeout_ms: Some(1),
+            steam_rankcheck_timeout_ms: Some(2),
+            steam_sync_timeout_ms: Some(3),
+            steam_invite_timeout_ms: Some(4),
+            ..BridgeOptions::default()
+        });
         assert_eq!(
-            component_forward_timeout("linkpanel_rank_check"),
-            Duration::from_secs(120)
-        );
-        assert_eq!(
-            component_forward_timeout("steam_link_panel:open"),
-            DEFAULT_TIMEOUT
+            [
+                configured.rank,
+                configured.rankcheck,
+                configured.sync,
+                configured.invite
+            ],
+            [1, 2, 3, 4].map(Duration::from_millis)
         );
     }
 }

@@ -110,7 +110,7 @@ pub async fn import_manual(pool: &PgPool, holders: &[u64]) -> Result<u64, StoreE
          ON CONFLICT (discord_id, source, source_ref) DO NOTHING",
     )
     .bind(&ids)
-    .bind(dl_core::runtime_config::SUPPORTER_TIP_VALID_DAYS)
+    .bind(dl_core::runtime_config::SUPPORTER_CUTOVER_GRACE_DAYS)
     .execute(&mut *tx)
     .await?
     .rows_affected();

@@ -99,7 +99,7 @@ impl DashboardConfig {
         );
         let twitch_tokens = dl_core::internal_tokens::all_tokens(
             get,
-            dl_core::internal_tokens::DASHBOARD_TWITCH_RECEIVER,
+            dl_core::internal_tokens::TWITCH_DASHBOARD_RECEIVER,
         );
 
         let public_base_url = Some(

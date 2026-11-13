@@ -15,7 +15,6 @@ use serenity::all::{
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::timeout;
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const INVITE_CACHE_MAX_ENTRIES: usize = 256;
@@ -24,7 +23,6 @@ const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
     &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
 const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 10;
 const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
-const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
 const BRAIN_USAGE: &str = "🧠 Nutze `/brain frage:<deine Frage>`. Build-Fragen erzeugen einen markierten Review-Build für die In-Game-Prüfung.";
@@ -1896,13 +1894,21 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
         &self,
         image_urls: &[String],
     ) -> Vec<dl_moderation::moderation_system::ModerationEvidenceFile> {
-        let client = reqwest::Client::new();
+        let client = match dl_bridges::http::current_client() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(%error, "Moderation: Beweisbilder nicht gespiegelt");
+                return Vec::new();
+            }
+        };
         let mut files = Vec::new();
         for url in image_urls.iter().take(MODERATION_EVIDENCE_IMAGE_LIMIT) {
-            let Ok(Ok(response)) =
-                timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, client.get(url).send()).await
-            else {
-                continue;
+            let response = match client.get(url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(%error, "Moderation: Beweisbild nicht geladen");
+                    continue;
+                }
             };
             if !response.status().is_success() {
                 continue;
@@ -1919,10 +1925,12 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             {
                 continue;
             }
-            let Ok(Ok(bytes)) =
-                timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, response.bytes()).await
-            else {
-                continue;
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(%error, "Moderation: Beweisbild nicht vollständig geladen");
+                    continue;
+                }
             };
             if bytes.len() > MODERATION_EVIDENCE_IMAGE_MAX_BYTES {
                 continue;
@@ -4532,7 +4540,8 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 .map_err(|err| err.to_string())?;
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = reqwest::Client::new()
+        let response = dl_bridges::http::current_client()
+            .map_err(|err| err.to_string())?
             .post(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages"
             ))
@@ -4542,7 +4551,10 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             .await
             .map_err(|err| err.to_string())?;
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = response
+            .text()
+            .await
+            .map_err(|err| format!("Coaching-Anfrage: Antwort HTTP {status} unlesbar: {err}"))?;
         if !status.is_success() {
             return Err(format!(
                 "Coaching-Anfrage POST fehlgeschlagen: HTTP {}: {}",
@@ -4586,7 +4598,14 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             };
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = match reqwest::Client::new()
+        let client = match dl_bridges::http::current_client() {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, message_id, "Coaching: Edit ohne HTTP-Client");
+                return;
+            }
+        };
+        let response = match client
             .patch(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
             ))
@@ -4603,7 +4622,10 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         };
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|err| format!("Antwort unlesbar: {err}"));
             tracing::warn!(
                 status = status.as_u16(),
                 body = %text.chars().take(300).collect::<String>(),

@@ -68,6 +68,8 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
+const DISCORD_RETRY_AFTER_FALLBACK: Duration = Duration::from_secs(1);
+const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
@@ -915,12 +917,40 @@ pub struct ServerSyncService {
     discord_token: String,
     guild_id: u64,
     http_client: reqwest::Client,
+    http_limits: dl_bridges::http::HttpLimits,
     discord_api_base: String,
     rang_guide_repo_root: PathBuf,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
-    supporter_funding: tokio::sync::RwLock<Option<Arc<dyn crate::supporter::FundingSource>>>,
+    supporter_funding: Arc<dyn crate::supporter::FundingSource>,
     panel_apply_lock: tokio::sync::Mutex<()>,
+    support_panel_busy: std::sync::Mutex<bool>,
+}
+
+struct SupportPanelClaim<'a> {
+    busy: &'a std::sync::Mutex<bool>,
+}
+
+impl<'a> SupportPanelClaim<'a> {
+    fn take(busy: &'a std::sync::Mutex<bool>) -> Option<Self> {
+        let mut held = busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *held {
+            return None;
+        }
+        *held = true;
+        Some(Self { busy })
+    }
+}
+
+impl Drop for SupportPanelClaim<'_> {
+    fn drop(&mut self) {
+        *self
+            .busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -932,17 +962,40 @@ pub enum FundingRefresh {
 
 #[cfg(test)]
 pub(crate) struct FixedFundingSource {
-    pub funding: Result<support_publish::SupportFunding, String>,
-    pub options: support_publish::SupportPanelOptions,
+    funding: std::sync::Mutex<Result<support_publish::SupportFunding, String>>,
+    options: std::sync::Mutex<support_publish::SupportPanelOptions>,
+    goal_cents: i64,
 }
 
 #[cfg(test)]
 impl FixedFundingSource {
     pub fn standard() -> Self {
+        Self::new(
+            Ok(Self::standard_funding()),
+            Self::standard_options(),
+            Self::standard_funding().goal_cents,
+        )
+    }
+
+    pub fn new(
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+        goal_cents: i64,
+    ) -> Self {
         Self {
-            funding: Ok(Self::standard_funding()),
-            options: Self::standard_options(),
+            funding: std::sync::Mutex::new(funding),
+            options: std::sync::Mutex::new(options),
+            goal_cents,
         }
+    }
+
+    pub fn set(
+        &self,
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+    ) {
+        *self.funding.lock().expect("funding") = funding;
+        *self.options.lock().expect("options") = options;
     }
 
     pub fn standard_funding() -> support_publish::SupportFunding {
@@ -955,7 +1008,6 @@ impl FixedFundingSource {
     pub fn standard_options() -> support_publish::SupportPanelOptions {
         support_publish::SupportPanelOptions {
             tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
-            plus_monthly_cents: None,
             twitch: false,
             role_grant: true,
         }
@@ -966,7 +1018,7 @@ impl FixedFundingSource {
 #[async_trait::async_trait]
 impl crate::supporter::FundingSource for FixedFundingSource {
     async fn funding(&self) -> Result<support_publish::SupportFunding, String> {
-        self.funding.clone()
+        self.funding.lock().expect("funding").clone()
     }
 
     fn missing_config(&self) -> Option<&'static str> {
@@ -974,11 +1026,11 @@ impl crate::supporter::FundingSource for FixedFundingSource {
     }
 
     fn goal_cents(&self) -> i64 {
-        Self::standard_funding().goal_cents
+        self.goal_cents
     }
 
     fn panel_options(&self) -> support_publish::SupportPanelOptions {
-        self.options.clone()
+        self.options.lock().expect("options").clone()
     }
 }
 
@@ -1006,20 +1058,24 @@ impl ServerSyncService {
         adapter: Arc<dl_discord::DiscordAdapter>,
         discord_token: String,
         guild_id: u64,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+        http_limits: dl_bridges::http::HttpLimits,
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    ) -> Result<Arc<Self>, dl_bridges::http::HttpSetupError> {
+        Ok(Arc::new(Self {
             pool,
             adapter,
             discord_token,
             guild_id,
-            http_client: reqwest::Client::new(),
+            http_client: dl_bridges::http::client(http_limits)?,
+            http_limits,
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
-            supporter_funding: tokio::sync::RwLock::new(None),
+            supporter_funding,
             panel_apply_lock: tokio::sync::Mutex::new(()),
-        })
+            support_panel_busy: std::sync::Mutex::new(false),
+        }))
     }
 
     #[cfg(test)]
@@ -1028,29 +1084,43 @@ impl ServerSyncService {
         discord_api_base: String,
         rang_guide_repo_root: PathBuf,
     ) -> Arc<Self> {
+        Self::new_for_test_with_funding(
+            pool,
+            discord_api_base,
+            rang_guide_repo_root,
+            Arc::new(FixedFundingSource::standard()),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_funding(
+        pool: PgPool,
+        discord_api_base: String,
+        rang_guide_repo_root: PathBuf,
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    ) -> Arc<Self> {
+        let http_limits = dl_bridges::http::HttpLimits::from_bridges(
+            &dl_core::runtime_config::BridgeOptions::default(),
+        );
         Arc::new(Self {
             pool,
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: reqwest::Client::new(),
+            http_client: dl_bridges::http::client(http_limits).expect("Testclient"),
+            http_limits,
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
-            supporter_funding: tokio::sync::RwLock::new(Some(Arc::new(
-                FixedFundingSource::standard(),
-            ))),
+            supporter_funding,
             panel_apply_lock: tokio::sync::Mutex::new(()),
+            support_panel_busy: std::sync::Mutex::new(false),
         })
     }
 
     pub async fn set_router_interface(&self, interface: Arc<dl_voice::router::RouterInterface>) {
         *self.router_interface.write().await = Some(interface);
-    }
-
-    pub async fn set_supporter_funding(&self, source: Arc<dyn crate::supporter::FundingSource>) {
-        *self.supporter_funding.write().await = Some(source);
     }
 
     pub async fn set_lfg_panel_interface(
@@ -1416,6 +1486,7 @@ impl ServerSyncService {
                 }
             },
             "GET",
+            self.http_limits.request,
         )
         .await
     }
@@ -1440,6 +1511,7 @@ impl ServerSyncService {
                 }
             },
             "POST",
+            self.http_limits.request,
         )
         .await?;
         discord_regelwerk_json_response(response, "POST")
@@ -1459,6 +1531,7 @@ impl ServerSyncService {
                 }
             },
             "DELETE",
+            self.http_limits.request,
         )
         .await?;
         let status = response.status();
@@ -1608,6 +1681,7 @@ impl ServerSyncService {
                 }
             },
             "PATCH",
+            self.http_limits.request,
         )
         .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -2036,6 +2110,7 @@ impl ServerSyncService {
                     }
                 },
                 method,
+                self.http_limits.request,
             )
             .await;
         }
@@ -2057,6 +2132,7 @@ impl ServerSyncService {
                 }
             },
             method,
+            self.http_limits.request,
         )
         .await
     }
@@ -2107,6 +2183,7 @@ impl ServerSyncService {
                     }
                 },
                 method,
+                self.http_limits.request,
             )
             .await;
         }
@@ -2128,6 +2205,7 @@ impl ServerSyncService {
                 }
             },
             method,
+            self.http_limits.request,
         )
         .await
     }
@@ -2214,12 +2292,14 @@ impl ServerSyncService {
             Ok(funding) => return Ok((funding, None)),
             Err(error) => error,
         };
-        let last_live = self
+        let raw = self
             .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
             .await
             .map_err(|kv_error| format!("{error}; letzter Stand nicht lesbar: {kv_error}"))?
-            .and_then(|raw| support_publish::SupportFunding::from_kv(&raw))
             .ok_or_else(|| format!("{error}; es gibt keinen veröffentlichten Stand"))?;
+        let last_live = support_publish::SupportFunding::from_kv(&raw).map_err(|decode_error| {
+            format!("{error}; veröffentlichter Stand unlesbar: {decode_error}")
+        })?;
         let funding = support_publish::SupportFunding {
             raised_cents: last_live.raised_cents,
             goal_cents: source.goal_cents(),
@@ -2233,24 +2313,16 @@ impl ServerSyncService {
         ))
     }
 
-    async fn support_source(&self) -> ServerSyncResult<Arc<dyn crate::supporter::FundingSource>> {
-        self.supporter_funding.read().await.clone().ok_or_else(|| {
-            ServerSyncError::bad_request(
-                "Support: Unterstützer-Quelle ist nicht eingerichtet; Apply blockiert.",
-            )
-        })
-    }
-
     pub async fn support_funding_refresh(&self) -> ServerSyncResult<FundingRefresh> {
-        let Some(source) = self.supporter_funding.read().await.clone() else {
-            return Ok(FundingRefresh::Skipped("keine Quelle"));
-        };
+        let source = self.supporter_funding.clone();
         if let Some(missing) = source.missing_config() {
             return Ok(FundingRefresh::Skipped(missing));
         }
-        let _apply_guard = self.panel_apply_lock.lock().await;
         let funding = source.funding().await.map_err(ServerSyncError::internal)?;
         let options = source.panel_options();
+        let Some(_claim) = SupportPanelClaim::take(&self.support_panel_busy) else {
+            return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        };
         let stored_payload_format = self
             .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
             .await?;
@@ -2263,20 +2335,29 @@ impl ServerSyncService {
         if stored_message_ids.is_empty() {
             return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
         }
-        let Some(live) = self
+        let Some(live_raw) = self
             .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
             .await?
-            .and_then(|raw| support_publish::SupportFunding::from_kv(&raw))
         else {
-            return Ok(FundingRefresh::Skipped("kein veröffentlichter Stand"));
+            return Ok(FundingRefresh::Skipped("kein veröffentlichter Monatsstand"));
         };
-        let Some(published_options) = self
+        let live = support_publish::SupportFunding::from_kv(&live_raw).map_err(|error| {
+            ServerSyncError::internal(format!("veröffentlichter Monatsstand unlesbar: {error}"))
+        })?;
+        let Some(options_raw) = self
             .load_serversync_kv(support_publish::SUPPORT_PANEL_OPTIONS_KEY)
             .await?
-            .and_then(|raw| support_publish::SupportPanelOptions::from_kv(&raw))
         else {
-            return Ok(FundingRefresh::Skipped("kein veröffentlichter Stand"));
+            return Ok(FundingRefresh::Skipped(
+                "keine veröffentlichten Panel-Optionen",
+            ));
         };
+        let published_options = support_publish::SupportPanelOptions::from_kv(&options_raw)
+            .map_err(|error| {
+                ServerSyncError::internal(format!(
+                    "veröffentlichte Panel-Optionen unlesbar: {error}"
+                ))
+            })?;
         if live == funding && published_options == options {
             return Ok(FundingRefresh::Unchanged);
         }
@@ -3212,6 +3293,7 @@ impl ServerSyncService {
                     }
                 },
                 method,
+                self.http_limits.request,
             )
             .await;
         }
@@ -3233,6 +3315,7 @@ impl ServerSyncService {
                 }
             },
             method,
+            self.http_limits.request,
         )
         .await
     }
@@ -4277,8 +4360,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
-        let source = self.support_source().await?;
+        let source = self.supporter_funding.clone();
         let options = source.panel_options();
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
         let (funding, funding_warning) = match self.support_funding_for_apply(source.as_ref()).await
@@ -4298,6 +4380,11 @@ impl ServerSyncOps for ServerSyncService {
                     "Support: Monatsziel unbekannt ({error}); die Vorschau zeigt 0 €, Bestätigen wird abgelehnt."
                 )),
             ),
+        };
+        let Some(_claim) = SupportPanelClaim::take(&self.support_panel_busy) else {
+            return Err(ServerSyncError::bad_request(format!(
+                "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
+            )));
         };
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
@@ -5508,6 +5595,7 @@ impl ServerSyncOps for ServerSyncService {
                 }
             },
             "PUT",
+            self.http_limits.request,
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -5708,6 +5796,7 @@ impl ServerSyncOps for ServerSyncService {
                 }
             },
             "POST",
+            self.http_limits.request,
         )
         .await?;
         let thread: DiscordThread = discord_regelwerk_json_response(response, "POST")?;
@@ -5778,6 +5867,7 @@ impl ServerSyncOps for ServerSyncService {
                 }
             },
             "PATCH",
+            self.http_limits.request,
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -6180,6 +6270,7 @@ impl DiscordRestResponse {
 async fn discord_regelwerk_send_with_retry<S, Fut>(
     mut send: S,
     method: &str,
+    max_wait: Duration,
 ) -> ServerSyncResult<DiscordRestResponse>
 where
     S: FnMut() -> Fut,
@@ -6193,7 +6284,17 @@ where
         if attempt == REGELWERK_DISCORD_MAX_ATTEMPTS {
             return Ok(response);
         }
-        let retry_after = regelwerk_retry_after(&response).unwrap_or(Duration::from_secs(1));
+        let retry_after = regelwerk_retry_after(&response).unwrap_or(DISCORD_RETRY_AFTER_FALLBACK);
+        if retry_after > max_wait {
+            tracing::warn!(
+                method,
+                attempt,
+                retry_after_ms = retry_after.as_millis(),
+                max_wait_ms = max_wait.as_millis(),
+                "Discord REST rate-limited länger als das Zeitlimit; kein weiterer Versuch"
+            );
+            return Ok(response);
+        }
         tracing::warn!(
             method,
             attempt,
@@ -7951,12 +8052,13 @@ pub fn register_twitch_link_components(
     router: &mut dl_discord::InteractionRouter,
     dashboard_base: String,
     token: Option<String>,
-) -> twitch_link::ConciergeTwitchLink {
+    limits: dl_bridges::http::HttpLimits,
+) -> Result<twitch_link::ConciergeTwitchLink, dl_bridges::http::HttpSetupError> {
     let source: Arc<dyn twitch_link::TwitchLinkUrlSource> = Arc::new(
-        twitch_link::DashboardTwitchLinkClient::new(dashboard_base, token),
+        twitch_link::DashboardTwitchLinkClient::new(dashboard_base, token, limits)?,
     );
     twitch_link::register(router, source.clone());
-    twitch_link::ConciergeTwitchLink::new(source)
+    Ok(twitch_link::ConciergeTwitchLink::new(source))
 }
 
 struct ServerSyncCommand {
@@ -10842,6 +10944,34 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_json_key_absent_recursive(&actual["config"], "name");
     }
 
+    const REGELWERK_TEST_MAX_WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn discord_retry_wartet_nie_laenger_als_das_zeitlimit() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_sender = Arc::clone(&attempts);
+        let started = std::time::Instant::now();
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts_for_call = Arc::clone(&attempts_for_sender);
+                async move {
+                    *attempts_for_call.lock().expect("attempts") += 1;
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        json!({"retry_after": 3600.0}).to_string(),
+                    ))
+                }
+            },
+            "PATCH",
+            Duration::from_millis(50),
+        )
+        .await
+        .expect("antwort");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
     #[tokio::test]
     async fn regelwerk_discord_retry_retryt_429_mit_retry_after_body() {
         let attempts = Arc::new(Mutex::new(0usize));
@@ -10866,6 +10996,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 }
             },
             "GET",
+            REGELWERK_TEST_MAX_WAIT,
         )
         .await
         .expect("retry succeeds");
@@ -11714,10 +11845,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let _held = service.panel_apply_lock.lock().await;
         let wait = std::time::Duration::from_secs(1);
 
-        let (regelwerk_publish, regelwerk, support, faq, welcome, rang_guide, router) = tokio::join!(
+        let (regelwerk_publish, regelwerk, faq, welcome, rang_guide, router) = tokio::join!(
             tokio::time::timeout(wait, service.regelwerk_publish(false)),
             tokio::time::timeout(wait, service.regelwerk_apply(false)),
-            tokio::time::timeout(wait, service.support_apply(false)),
             tokio::time::timeout(wait, service.faq_apply(false)),
             tokio::time::timeout(wait, service.welcome_apply(false)),
             tokio::time::timeout(wait, service.rang_guide_apply(false)),
@@ -11726,11 +11856,41 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
         assert!(regelwerk_publish.is_err(), "regelwerk_publish");
         assert!(regelwerk.is_err(), "regelwerk_apply");
-        assert!(support.is_err(), "support_apply");
         assert!(faq.is_err(), "faq_apply");
         assert!(welcome.is_err(), "welcome_apply");
         assert!(rang_guide.is_err(), "rang_guide_apply");
         assert!(router.is_err(), "router_apply");
+    }
+
+    #[tokio::test]
+    async fn support_panel_wartet_nie_auf_eine_sperre_und_meldet_belegt() {
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let _other_panels = service.panel_apply_lock.lock().await;
+        let claim = SupportPanelClaim::take(&service.support_panel_busy).expect("frei");
+        let wait = std::time::Duration::from_secs(1);
+
+        let refresh = tokio::time::timeout(wait, service.support_funding_refresh())
+            .await
+            .expect("wartet nicht")
+            .expect("refresh");
+        assert_eq!(refresh, FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        let apply = tokio::time::timeout(wait, service.support_apply(false))
+            .await
+            .expect("wartet nicht");
+        assert!(apply
+            .expect_err("belegt")
+            .to_string()
+            .contains(SUPPORT_PANEL_BUSY));
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+
+        drop(claim);
+        assert!(SupportPanelClaim::take(&service.support_panel_busy).is_some());
     }
 
     #[test]
@@ -12493,17 +12653,18 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ],
         )
         .await;
-        let service = ServerSyncService::new_for_test(
+        let source = Arc::new(FixedFundingSource::standard());
+        let service = ServerSyncService::new_for_test_with_funding(
             db.pool().clone(),
             fake.base_url.clone(),
             repo.path().to_path_buf(),
+            source.clone(),
         );
 
-        let unknown = FixedFundingSource {
-            funding: Err("Steam Bot nicht erreichbar".to_string()),
-            options: FixedFundingSource::standard_options(),
-        };
-        service.set_supporter_funding(Arc::new(unknown)).await;
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+        );
         let blocked = service.support_apply(true).await;
         assert!(blocked.is_err());
         assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
@@ -12513,9 +12674,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .iter()
             .any(|warning| warning.contains("Steam Bot nicht erreichbar")));
 
-        service
-            .set_supporter_funding(Arc::new(FixedFundingSource::standard()))
-            .await;
+        source.set(
+            Ok(FixedFundingSource::standard_funding()),
+            FixedFundingSource::standard_options(),
+        );
         let published = service.support_apply(true).await.expect("apply");
         assert_eq!(published.posted_message_ids, vec![9801, 9802, 9803]);
         let stored_hash = get_serversync_kv(db.pool(), support_publish::SUPPORT_PAYLOAD_HASH_KEY)
@@ -12537,12 +12699,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             raised_cents: 5_000,
             goal_cents: FixedFundingSource::standard_funding().goal_cents,
         };
-        service
-            .set_supporter_funding(Arc::new(FixedFundingSource {
-                funding: Ok(raised),
-                options: FixedFundingSource::standard_options(),
-            }))
-            .await;
+        source.set(Ok(raised), FixedFundingSource::standard_options());
         let refreshed = service.support_funding_refresh().await.expect("refresh");
         assert!(matches!(refreshed, FundingRefresh::Updated));
         assert_eq!(
@@ -12565,12 +12722,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
         let mut changed_tiers = FixedFundingSource::standard_options();
         changed_tiers.tiers_eur = vec![5, 15];
-        service
-            .set_supporter_funding(Arc::new(FixedFundingSource {
-                funding: Ok(raised),
-                options: changed_tiers.clone(),
-            }))
-            .await;
+        source.set(Ok(raised), changed_tiers.clone());
         let tiers_refresh = service.support_funding_refresh().await.expect("refresh");
         assert!(matches!(tiers_refresh, FundingRefresh::Updated));
         assert_eq!(
@@ -12583,15 +12735,13 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "[texts]\nthanks = \"Danke, dass du mitträgst\"\n",
         )
         .expect("rewrite texts");
-        service
-            .set_supporter_funding(Arc::new(FixedFundingSource {
-                funding: Ok(support_publish::SupportFunding {
-                    raised_cents: 6_000,
-                    goal_cents: raised.goal_cents,
-                }),
-                options: changed_tiers,
-            }))
-            .await;
+        source.set(
+            Ok(support_publish::SupportFunding {
+                raised_cents: 6_000,
+                goal_cents: raised.goal_cents,
+            }),
+            changed_tiers,
+        );
         let patches_before = fake.state.patch_calls.lock().expect("patch calls").len();
         let text_refresh = service.support_funding_refresh().await.expect("refresh");
         assert!(matches!(
@@ -12602,6 +12752,65 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             fake.state.patch_calls.lock().expect("patch calls").len(),
             patches_before
         );
+    }
+
+    #[tokio::test]
+    async fn service_support_monatsziel_faellt_auf_den_veroeffentlichten_stand_mit_aktuellem_ziel_zurueck(
+    ) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let configured_goal = FixedFundingSource::standard_funding().goal_cents + 1_234;
+        let source = Arc::new(FixedFundingSource::new(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+            configured_goal,
+        ));
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source,
+        );
+        let published = support_publish::SupportFunding {
+            raised_cents: 4_321,
+            goal_cents: FixedFundingSource::standard_funding().goal_cents,
+        };
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            &published.to_kv(),
+        )
+        .await;
+
+        let preview = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(
+            preview.funding,
+            support_publish::SupportFunding {
+                raised_cents: published.raised_cents,
+                goal_cents: configured_goal,
+            }
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("zuletzt veröffentlichten Stand von 4321 Cent")));
+
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            "kaputt",
+        )
+        .await;
+        let unreadable = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(unreadable.funding.raised_cents, 0);
+        assert!(unreadable
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("veröffentlichter Stand unlesbar")));
     }
 
     async fn seed_static_panel_kv(

@@ -19,7 +19,10 @@ pub use brain_contracts::invite::{
     InviteCheckInOutcome, InviteLoungeUpdate, InviteNotice, InviteProblem, InviteStatus,
     NoticeTarget,
 };
-pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
+pub use images::{
+    question_or_image_default, AttachedImages, ImageLimits, IMAGE_COUNT_RANGE,
+    IMAGE_DOWNLOAD_BYTES_RANGE, IMAGE_EDGE_RANGE, IMAGE_JPEG_QUALITY_RANGE, IMAGE_ONLY_QUESTION,
+};
 
 #[derive(Clone)]
 pub struct DiscordQueryContext {

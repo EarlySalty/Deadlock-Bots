@@ -20,6 +20,8 @@ const COMMUNITY_MOD_ROLE_ID: u64 = 1_401_891_955_931_222_110;
 const GOLD: u64 = 0xC8A86B;
 const COMPONENTS_V2: u64 = 32_768;
 const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
+const REVISION_BUSY: &str =
+    "Gerade wird schon eine Änderung an diesem Vorschlag erstellt. Versuch es bitte gleich noch einmal.";
 const PREFIX: &str = "turnier-proposal:";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,16 +121,20 @@ struct PublishRequest {
 struct TurnierClient {
     http: reqwest::Client,
     base_url: String,
-    token: String,
+    token: Option<String>,
 }
 
 impl TurnierClient {
-    fn new(base_url: String, token: String) -> Self {
-        Self {
-            http: reqwest::Client::new(),
+    fn new(
+        base_url: String,
+        token: Option<String>,
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Self, dl_bridges::http::HttpSetupError> {
+        Ok(Self {
+            http: dl_bridges::http::internal_client(limits)?,
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-        }
+        })
     }
 
     async fn get(&self, proposal_id: i64) -> Result<ProposalEnvelope, String> {
@@ -253,11 +259,14 @@ impl TurnierClient {
     }
 
     async fn request(&self, request: reqwest::RequestBuilder) -> Result<ProposalEnvelope, String> {
-        if self.token.trim().is_empty() {
-            return Err("TURNIER_INTERNAL_API_TOKEN fehlt".to_string());
-        }
+        let Some(token) = self.token.as_deref() else {
+            return Err(format!(
+                "Interner Token für die Turnier-API fehlt ({})",
+                dl_core::internal_tokens::key_names(dl_core::internal_tokens::TURNIER_API_RECEIVER)
+            ));
+        };
         let response = request
-            .header(INTERNAL_TOKEN_HEADER, &self.token)
+            .header(INTERNAL_TOKEN_HEADER, token)
             .send()
             .await
             .map_err(|error| format!("Turnier-API nicht erreichbar: {error}"))?;
@@ -287,21 +296,18 @@ impl TurnierProposalService {
         generator: Option<Arc<dyn TextGenerator>>,
         model: String,
         lookup: impl Fn(&str) -> Option<String>,
-    ) -> Self {
-        let base_url = lookup("TURNIER_INTERNAL_API_BASE_URL")
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Self, dl_bridges::http::HttpSetupError> {
+        let base_url = dl_core::internal_tokens::present(&lookup, "TURNIER_INTERNAL_API_BASE_URL")
             .unwrap_or_else(|| "http://127.0.0.1:8900".to_string());
-        let token = dl_core::internal_tokens::first_token(
-            &lookup,
-            dl_core::internal_tokens::DASHBOARD_INTERNAL_RECEIVER,
-        )
-        .unwrap_or_default();
-        Self {
-            client: TurnierClient::new(base_url, token),
+        let token = dl_core::internal_tokens::turnier_api_token(&lookup);
+        Ok(Self {
+            client: TurnierClient::new(base_url, token, limits)?,
             adapter,
             generator,
             model,
             revision_lock: tokio::sync::Mutex::new(()),
-        }
+        })
     }
 
     async fn publish(&self, proposal_id: i64, channel_id: u64) -> Result<u64, String> {
@@ -748,9 +754,9 @@ impl InteractionHandler for ProposalHandler {
                 if feedback.is_empty() {
                     return BridgeReply::ephemeral_text("Die gewünschte Änderung fehlt.");
                 }
-                // Der Bot läuft per PID-Lock als Einzelinstanz. Damit kann nur
-                // eine Revision zugleich dieselbe persistente Karte ersetzen.
-                let _revision_guard = self.service.revision_lock.lock().await;
+                let Ok(_revision_guard) = self.service.revision_lock.try_lock() else {
+                    return BridgeReply::ephemeral_text(REVISION_BUSY);
+                };
                 let current = match self.service.client.get(proposal_id).await {
                     Ok(value) => value,
                     Err(error) => return BridgeReply::ephemeral_text(error),
@@ -1233,12 +1239,18 @@ mod tests {
         use axum::http::Request;
         use tower::ServiceExt;
 
-        let service = Arc::new(TurnierProposalService::from_env(
-            DiscordAdapter::new("unused"),
-            None,
-            dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
-            |_| None,
-        ));
+        let service = Arc::new(
+            TurnierProposalService::from_env(
+                DiscordAdapter::new("unused"),
+                None,
+                dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
+                |_| None,
+                dl_bridges::http::HttpLimits::from_bridges(
+                    &dl_core::runtime_config::BridgeOptions::default(),
+                ),
+            )
+            .expect("Testclient"),
+        );
         let response = publisher_router(service, "expected".to_string())
             .oneshot(
                 Request::post("/internal/master/v1/turnier/proposals/publish")
@@ -1260,12 +1272,18 @@ mod tests {
         use axum::http::Request;
         use tower::ServiceExt;
 
-        let service = Arc::new(TurnierProposalService::from_env(
-            DiscordAdapter::new("unused"),
-            None,
-            dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
-            |_| None,
-        ));
+        let service = Arc::new(
+            TurnierProposalService::from_env(
+                DiscordAdapter::new("unused"),
+                None,
+                dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
+                |_| None,
+                dl_bridges::http::HttpLimits::from_bridges(
+                    &dl_core::runtime_config::BridgeOptions::default(),
+                ),
+            )
+            .expect("Testclient"),
+        );
         let response = publisher_router(service, "expected".to_string())
             .oneshot(
                 Request::post("/internal/master/v1/turnier/proposals/publish")
