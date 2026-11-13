@@ -1841,15 +1841,16 @@ impl ServerSyncService {
         &self,
         output: &rang_guide_publish::RangGuidePublishOutput,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
-            &output.payload_hash,
-        )
+        self.store_serversync_kv_pairs(&[
+            (
+                rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+                rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+            ),
+            (
+                rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+                output.payload_hash.as_str(),
+            ),
+        ])
         .await
     }
 
@@ -5832,20 +5833,21 @@ impl ServerSyncOps for ServerSyncService {
         thread_id: u64,
         payload_hash: &str,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
-            &thread_id.to_string(),
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
-            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
-            payload_hash,
-        )
+        let thread_id = thread_id.to_string();
+        self.store_serversync_kv_pairs(&[
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+                thread_id.as_str(),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
+                voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+                payload_hash,
+            ),
+        ])
         .await
     }
 

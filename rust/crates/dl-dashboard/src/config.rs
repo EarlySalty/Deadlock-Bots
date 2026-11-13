@@ -47,7 +47,7 @@ impl AccessLevel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DashboardConfig {
     pub discord_client_id: Option<String>,
     pub discord_client_secret: Option<String>,
@@ -171,21 +171,38 @@ impl DashboardConfig {
     pub fn auth_enforced(&self) -> bool {
         true
     }
-
-    /// Prüft ein Token gegen die turnier-/allgemeinen internen Routen.
-    pub fn accepts_turnier_token(&self, token: &str) -> bool {
-        token_matches(&self.turnier_tokens, token)
-    }
-
-    /// Prüft ein Token gegen die Twitch-internen Routen.
-    pub fn accepts_twitch_token(&self, token: &str) -> bool {
-        token_matches(&self.twitch_tokens, token)
-    }
 }
 
-fn token_matches(tokens: &[String], candidate: &str) -> bool {
-    let candidate = candidate.trim();
-    !candidate.is_empty() && tokens.iter().any(|t| t == candidate)
+impl std::fmt::Debug for DashboardConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DashboardConfig")
+            .field("discord_client_id", &self.discord_client_id)
+            .field(
+                "discord_client_secret",
+                &if self.discord_client_secret.is_some() {
+                    "<gesetzt>"
+                } else {
+                    "<fehlt>"
+                },
+            )
+            .field("discord_redirect_uri", &self.discord_redirect_uri)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("moderator_role_id", &self.moderator_role_id)
+            .field("access_role_ids", &self.access_role_ids)
+            .field("audit_bot_user_id", &self.audit_bot_user_id)
+            .field("auth_guild_ids", &self.auth_guild_ids)
+            .field("session_ttl_secs", &self.session_ttl_secs)
+            .field("oauth_state_ttl_secs", &self.oauth_state_ttl_secs)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("public_base_url", &self.public_base_url)
+            .field("listen_base_url", &self.listen_base_url)
+            .field("discord_api_base", &self.discord_api_base)
+            .field("broker_base", &self.broker_base)
+            .field("data_dir", &self.data_dir)
+            .field("turnier_tokens", &self.turnier_tokens.len())
+            .field("twitch_tokens", &self.twitch_tokens.len())
+            .finish()
+    }
 }
 
 fn split_csv(raw: &str) -> Vec<String> {
@@ -321,9 +338,9 @@ mod tests {
         // Nur MASTER_BROKER_TOKEN gesetzt → landet in der Turnier-Kette.
         let map = HashMap::from([("MASTER_BROKER_TOKEN", "brk")]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
-        assert!(cfg.accepts_turnier_token("brk"));
-        assert!(!cfg.accepts_turnier_token(""));
-        assert!(!cfg.accepts_twitch_token("brk"));
+        assert_eq!(cfg.turnier_tokens, vec!["brk".to_string()]);
+        assert!(cfg.twitch_tokens.is_empty());
+        assert!(!format!("{cfg:?}").contains("brk"));
 
         // Gleicher Wert in mehreren Variablen → nur einmal.
         let map = HashMap::from([
@@ -331,8 +348,8 @@ mod tests {
             ("TWITCH_INTERNAL_API_TOKEN", "same"),
         ]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
-        assert_eq!(cfg.turnier_tokens.len(), 1);
-        assert!(cfg.accepts_twitch_token("same"));
+        assert_eq!(cfg.turnier_tokens, vec!["same".to_string()]);
+        assert_eq!(cfg.twitch_tokens, vec!["same".to_string()]);
     }
 
     #[test]

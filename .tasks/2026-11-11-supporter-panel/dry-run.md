@@ -1,11 +1,23 @@
 # Support panel dry-run, funding 0 € of 250 €
 
-Rendered by `build_support_publish_output` with `dry_run = true`, empty KV and payload format `3`, from the committed `config/bot.toml` read through `SupporterConfig::new`: tiers 5/10/20/50 €, goal 250 €, no Steam Plus (`supporter_plus_monthly_cents` unset), Twitch off (`supporter_twitch_api_base` unset), `supporter_role_grant_apply` unset (off). Nothing was posted to Discord. Buttons are shown as label and custom_id.
+Rendered by `build_support_publish_output` with `dry_run = true`, empty KV and payload format `3`, with the dl-core defaults (`config/bot.toml` sets no supporter values): tiers 5/10/20/50 €, goal 250 €, Twitch off (`supporter_twitch_api_base` unset), `supporter_role_grant_apply` unset (off). No warnings. Nothing was posted to Discord. Buttons are shown as label and custom_id.
 
-With `supporter_role_grant_apply = true` (go-live) only card 3 changes; these lines replace their counterparts:
+With `supporter_role_grant_apply = true` (go-live) these paragraphs differ; the cards below show the flag-off render.
 
-> **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch. Kündigen kannst du jederzeit selbst über den Button unten.
-> **Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
+Card 1 (support):
+
+- on only: ## Was du jetzt bekommst
+- on only: **Mit den Streamern zusammen spielen.** Als Unterstützer bist du ein vertrauenswürdiges Mitglied der Community. Du kommst in den Streamer-VC und kannst dort mit den Streamern zusammen zocken.
+- on only: **Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst.
+
+Card 3 (support:zahlung):
+
+- off only: **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Kündigen kannst du jederzeit selbst über den Button unten.
+- off only: **Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.
+- off only: **Server-Boost.** Zählt vorerst als Unterstützung.
+- on only: **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch. Kündigen kannst du jederzeit selbst über den Button unten.
+- on only: **Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite. Die Rolle kommt automatisch.
+- on only: **Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
 
 ## Card 1 (support), action planned_post
 
@@ -13,15 +25,7 @@ With `supporter_role_grant_apply = true` (go-live) only card 3 changes; these li
 
 # Server unterstützen
 
-Hier steht, wie du den Server und die Projekte unterstützen kannst und was du dafür bekommst. Egal welchen Weg du wählst, du bekommst dieselbe Rolle und dieselben Vorteile.
-
----
-
-## Was du jetzt bekommst
-
-**Mit den Streamern zusammen spielen.** Als Unterstützer bist du ein vertrauenswürdiges Mitglied der Community. Du kommst in den Streamer-VC und kannst dort mit den Streamern zusammen zocken.
-
-**Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst.
+Hier steht, wie du den Server und die Projekte unterstützen kannst. Jeder Weg zählt gleich.
 
 ---
 
@@ -66,7 +70,7 @@ Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen
 
 **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Kündigen kannst du jederzeit selbst über den Button unten.
 
-**Einmalig.** Du wählst den Betrag selbst, ab 5 €. Dafür bekommst du die Vorteile für 31 Tage.
+**Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.
 
 **Server-Boost.** Zählt vorerst als Unterstützung.
 
