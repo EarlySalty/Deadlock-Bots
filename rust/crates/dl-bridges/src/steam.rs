@@ -1497,7 +1497,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn steam_bot_nicht_erreichbar() {
-        let client = test_client("http://127.0.0.1:9", None); // tote Adresse
+        let client = test_client("http://127.0.0.1:9", None);
         let handler = ForwardComponent { client };
         let reply = handler
             .handle(interaction("steam_link_panel:rankcheck"))

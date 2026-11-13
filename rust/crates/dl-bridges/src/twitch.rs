@@ -79,7 +79,6 @@ pub struct TwitchApiClient {
 }
 
 impl TwitchApiClient {
-    /// ENVs wie das Original; `None` ohne Token aus `internal_tokens::TWITCH_INTERNAL_API_RECEIVER`.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)

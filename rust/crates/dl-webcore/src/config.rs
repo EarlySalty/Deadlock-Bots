@@ -12,9 +12,7 @@ pub struct WebConfig {
     pub cors_origins: Vec<String>,
     /// Interne Dashboard-Basis-URL (DASHBOARD_INTERNAL_API_BASE)
     pub dashboard_base: String,
-    /// Token fürs OAuth-Relay: erster Wert aus `internal_tokens::DASHBOARD_INTERNAL_RECEIVER`
     pub relay_token: Option<String>,
-    /// Token für validate-session: `internal_tokens::TWITCH_DASHBOARD_RECEIVER`
     pub twitch_token: Option<String>,
     /// Öffentliche Callback-URL des Stats-Auth-Flows (PUBLIC_STATS_CALLBACK_URL)
     pub stats_callback_url: String,
