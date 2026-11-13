@@ -70,6 +70,7 @@ const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const DISCORD_RETRY_AFTER_FALLBACK: Duration = Duration::from_secs(1);
 const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
+const PANELS_BUSY: &str = "Ein anderes Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
@@ -923,15 +924,15 @@ pub struct ServerSyncService {
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
     supporter_funding: Arc<dyn crate::supporter::FundingSource>,
-    panel_apply_lock: tokio::sync::Mutex<()>,
+    panel_apply_busy: std::sync::Mutex<bool>,
     support_panel_busy: std::sync::Mutex<bool>,
 }
 
-struct SupportPanelClaim<'a> {
+struct PanelClaim<'a> {
     busy: &'a std::sync::Mutex<bool>,
 }
 
-impl<'a> SupportPanelClaim<'a> {
+impl<'a> PanelClaim<'a> {
     fn take(busy: &'a std::sync::Mutex<bool>) -> Option<Self> {
         let mut held = busy
             .lock()
@@ -944,7 +945,7 @@ impl<'a> SupportPanelClaim<'a> {
     }
 }
 
-impl Drop for SupportPanelClaim<'_> {
+impl Drop for PanelClaim<'_> {
     fn drop(&mut self) {
         *self
             .busy
@@ -1053,6 +1054,14 @@ async fn upsert_serversync_kv<'e>(
 }
 
 impl ServerSyncService {
+    fn claim_panels(&self) -> ServerSyncResult<PanelClaim<'_>> {
+        PanelClaim::take(&self.panel_apply_busy).ok_or_else(|| {
+            ServerSyncError::bad_request(format!(
+                "{PANELS_BUSY}; bitte gleich noch einmal versuchen."
+            ))
+        })
+    }
+
     pub fn new(
         pool: PgPool,
         adapter: Arc<dl_discord::DiscordAdapter>,
@@ -1073,7 +1082,7 @@ impl ServerSyncService {
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             supporter_funding,
-            panel_apply_lock: tokio::sync::Mutex::new(()),
+            panel_apply_busy: std::sync::Mutex::new(false),
             support_panel_busy: std::sync::Mutex::new(false),
         }))
     }
@@ -1114,7 +1123,7 @@ impl ServerSyncService {
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             supporter_funding,
-            panel_apply_lock: tokio::sync::Mutex::new(()),
+            panel_apply_busy: std::sync::Mutex::new(false),
             support_panel_busy: std::sync::Mutex::new(false),
         })
     }
@@ -2321,7 +2330,7 @@ impl ServerSyncService {
         }
         let funding = source.funding().await.map_err(ServerSyncError::internal)?;
         let options = source.panel_options();
-        let Some(_claim) = SupportPanelClaim::take(&self.support_panel_busy) else {
+        let Some(_claim) = PanelClaim::take(&self.support_panel_busy) else {
             return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
         };
         let stored_payload_format = self
@@ -4020,7 +4029,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -4107,7 +4116,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         confirm: bool,
     ) -> ServerSyncResult<regelwerk_publish::RegelwerkPublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let stored_message_ids = self
             .load_static_v2_message_ids(regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX)
             .await?;
@@ -4382,7 +4391,7 @@ impl ServerSyncOps for ServerSyncService {
                 )),
             ),
         };
-        let Some(_claim) = SupportPanelClaim::take(&self.support_panel_busy) else {
+        let Some(_claim) = PanelClaim::take(&self.support_panel_busy) else {
             return Err(ServerSyncError::bad_request(format!(
                 "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
             )));
@@ -4662,7 +4671,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn faq_apply(&self, confirm: bool) -> ServerSyncResult<FaqPublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let stored_message_ids = self
             .load_static_v2_message_ids(faq_publish::FAQ_MESSAGE_ID_PREFIX)
             .await?;
@@ -4926,7 +4935,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let live = dl_server_as_code::import::fetch_live_guild_model(
             self.adapter.http.as_ref(),
             self.guild_id,
@@ -5100,7 +5109,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let stored_message_ids = self.load_rang_guide_message_ids().await?;
         let stored_payload_format = self.load_rang_guide_payload_format().await?;
         let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
@@ -5885,7 +5894,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
-        let _apply_guard = self.panel_apply_lock.lock().await;
+        let _claim = self.claim_panels()?;
         let stored_message_ids = self.load_voice_ux_message_ids().await?;
         let stored_payload_formats = self.load_voice_ux_payload_formats().await?;
         let stored_payload_hashes = self.load_voice_ux_payload_hashes().await?;
@@ -11841,10 +11850,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
-    async fn panel_writes_warten_auf_die_apply_sperre() {
+    async fn panel_writes_warten_nie_und_melden_belegt() {
         let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
         let service = service_without_database(fake.base_url.clone());
-        let _held = service.panel_apply_lock.lock().await;
+        let claim = PanelClaim::take(&service.panel_apply_busy).expect("frei");
         let wait = std::time::Duration::from_secs(1);
 
         let (regelwerk_publish, regelwerk, faq, welcome, rang_guide, router) = tokio::join!(
@@ -11856,20 +11865,62 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             tokio::time::timeout(wait, service.router_apply(false)),
         );
 
-        assert!(regelwerk_publish.is_err(), "regelwerk_publish");
-        assert!(regelwerk.is_err(), "regelwerk_apply");
-        assert!(faq.is_err(), "faq_apply");
-        assert!(welcome.is_err(), "welcome_apply");
-        assert!(rang_guide.is_err(), "rang_guide_apply");
-        assert!(router.is_err(), "router_apply");
+        let belegt = |name: &str, error: Option<String>| {
+            assert!(
+                error.is_some_and(|text| text.contains(PANELS_BUSY)),
+                "{name}"
+            );
+        };
+        belegt(
+            "regelwerk_publish",
+            regelwerk_publish
+                .expect("wartet nicht")
+                .err()
+                .map(|e| e.to_string()),
+        );
+        belegt(
+            "regelwerk_apply",
+            regelwerk
+                .expect("wartet nicht")
+                .err()
+                .map(|e| e.to_string()),
+        );
+        belegt(
+            "faq_apply",
+            faq.expect("wartet nicht").err().map(|e| e.to_string()),
+        );
+        belegt(
+            "welcome_apply",
+            welcome.expect("wartet nicht").err().map(|e| e.to_string()),
+        );
+        belegt(
+            "rang_guide_apply",
+            rang_guide
+                .expect("wartet nicht")
+                .err()
+                .map(|e| e.to_string()),
+        );
+        belegt(
+            "router_apply",
+            router.expect("wartet nicht").err().map(|e| e.to_string()),
+        );
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+
+        drop(claim);
+        assert!(PanelClaim::take(&service.panel_apply_busy).is_some());
     }
 
     #[tokio::test]
     async fn support_panel_wartet_nie_auf_eine_sperre_und_meldet_belegt() {
         let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
         let service = service_without_database(fake.base_url.clone());
-        let _other_panels = service.panel_apply_lock.lock().await;
-        let claim = SupportPanelClaim::take(&service.support_panel_busy).expect("frei");
+        let _other_panels = PanelClaim::take(&service.panel_apply_busy).expect("frei");
+        let claim = PanelClaim::take(&service.support_panel_busy).expect("frei");
         let wait = std::time::Duration::from_secs(1);
 
         let refresh = tokio::time::timeout(wait, service.support_funding_refresh())
@@ -11892,7 +11943,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .is_empty());
 
         drop(claim);
-        assert!(SupportPanelClaim::take(&service.support_panel_busy).is_some());
+        assert!(PanelClaim::take(&service.support_panel_busy).is_some());
     }
 
     #[test]

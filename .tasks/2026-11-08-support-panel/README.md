@@ -28,4 +28,4 @@ Grant and revoke are implemented in `rust/bin/dl-bot/src/supporter.rs` and gated
 ## Known limits
 
 - Every serversync Discord call is bounded by `runtime.bridges.http_connect_timeout_ms` and `http_request_timeout_ms`; a 429 waits at most the request limit, a longer `retry_after` returns the 429 at once.
-- The other panels (Regelwerk, FAQ, Rang-Guide and the rest) still run one at a time under `panel_apply_lock` and hold it across their Discord calls. Those calls are bounded by the limits above, so a stalled call blocks the other panels for at most one request limit per call.
+- No panel apply waits on a lock. The support panel takes its own claim; the other panels (Regelwerk, FAQ, Welcome, Rang-Guide, Router) share one claim, so they still never write at the same time. A second apply while a claim is taken gets "bitte gleich noch einmal versuchen" at once instead of queueing, and the support panel and its funding refresh never wait for the other panels.
