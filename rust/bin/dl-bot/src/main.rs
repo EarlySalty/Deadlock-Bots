@@ -282,11 +282,17 @@ fn discord_brain_answerer(
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
-        .with_image_limits(brain_image_limits(options))?,
+        .with_image_limits(brain_image_limits(
+            options,
+            dl_bridges::http::HttpLimits::current()?,
+        ))?,
     ))
 }
 
-fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain::ImageLimits {
+fn brain_image_limits(
+    options: &dl_core::runtime_config::AiOptions,
+    http: dl_bridges::http::HttpLimits,
+) -> dl_brain::ImageLimits {
     let defaults = dl_brain::ImageLimits::default();
     dl_brain::ImageLimits {
         max_images: options.brain_image_max_count.unwrap_or(defaults.max_images),
@@ -305,6 +311,7 @@ fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain:
             .brain_image_followup_seconds
             .map(std::time::Duration::from_secs)
             .unwrap_or(defaults.followup_ttl),
+        http,
     }
 }
 

@@ -6,12 +6,8 @@
 //! (mit Warn-Log) — die Route entscheidet dann über 401/Redirect, wie im
 //! Original.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Antwort des Token-Endpunkts (nur die genutzten Felder).
 #[derive(Clone, Serialize, Deserialize)]
@@ -112,17 +108,14 @@ impl OAuthClient {
         client_id: Option<String>,
         client_secret: Option<String>,
         api_base: impl Into<String>,
-    ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .expect("reqwest-Client bauen");
-        Self {
-            http,
+        limits: dl_bridges::http::HttpLimits,
+    ) -> Result<Self, dl_bridges::http::HttpSetupError> {
+        Ok(Self {
+            http: dl_bridges::http::client(limits)?,
             client_id,
             client_secret,
             api_base: api_base.into().trim_end_matches('/').to_string(),
-        }
+        })
     }
 
     /// Baut die Authorize-URL (Browser-Redirect zu Discord).
@@ -337,7 +330,11 @@ mod tests {
             Some("12345".into()),
             Some("secret".into()),
             "https://discord.com/api/v10",
+            dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
         )
+        .expect("Testclient")
     }
 
     #[test]

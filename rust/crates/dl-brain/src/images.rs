@@ -77,6 +77,7 @@ pub struct ImageLimits {
     pub max_edge: u32,
     pub jpeg_quality: u8,
     pub followup_ttl: Duration,
+    pub http: dl_bridges::http::HttpLimits,
 }
 
 impl Default for ImageLimits {
@@ -87,6 +88,7 @@ impl Default for ImageLimits {
             max_edge: 1568,
             jpeg_quality: 85,
             followup_ttl: Duration::from_secs(10 * 60),
+            http: dl_bridges::http::HttpLimits::default(),
         }
     }
 }
@@ -109,6 +111,7 @@ impl ImageLimits {
                 *IMAGE_JPEG_QUALITY_RANGE.end(),
             ),
             followup_ttl: self.followup_ttl,
+            http: self.http,
         }
     }
 }
@@ -123,11 +126,8 @@ pub(crate) struct ImageFetcher {
 
 impl ImageFetcher {
     pub(crate) fn new(limits: ImageLimits) -> Result<Self, BrainError> {
-        let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .build()
-            .map_err(|_| image_error())?;
+        let client = dl_bridges::http::internal_client(limits.http)
+            .map_err(|error| BrainError::Backend(format!("bild: {error}")))?;
         Ok(Self {
             client,
             limits: limits.bounded(),

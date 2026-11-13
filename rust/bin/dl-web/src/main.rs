@@ -77,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
     // Master-Dashboard :8766 — Auth-Provider (Phase 9a). Stats/Tierlist
     // delegieren ihre Anmeldung hierher. Die internen Routen sind loopback-only,
     // daher mit Connect-Info binden (Peer-Adresse).
-    let dashboard_cfg = dl_dashboard::DashboardConfig::from_env();
+    let dashboard_cfg = dl_dashboard::DashboardConfig::from_env()
+        .with_bridges(&operating.snapshot().runtime.bridges);
     let dashboard = dl_dashboard::DashboardApp::from_config(dashboard_cfg, central_pool.clone())
         .await
         .context("Dashboard-App initialisieren")?;

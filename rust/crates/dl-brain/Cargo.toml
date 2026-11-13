@@ -11,6 +11,7 @@ version = "0.1.0"
 brain-client = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "5b5de88d27d0d3d61c61221028c4e520166f8a19" }
 brain-contracts = { git = "https://github.com/EarlySalty/Deadlock-Brain.git", rev = "5b5de88d27d0d3d61c61221028c4e520166f8a19" }
 async-trait.workspace = true
+dl-bridges.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 image.workspace = true

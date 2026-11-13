@@ -79,6 +79,7 @@ pub struct DashboardConfig {
     pub turnier_tokens: Vec<String>,
     /// Tokens für die Twitch-internen Routen (validate/import-session).
     pub twitch_tokens: Vec<String>,
+    pub http_limits: dl_bridges::http::HttpLimits,
 }
 
 impl DashboardConfig {
@@ -152,6 +153,16 @@ impl DashboardConfig {
             data_dir,
             turnier_tokens,
             twitch_tokens,
+            http_limits: dl_bridges::http::HttpLimits::from_bridges(
+                &dl_core::runtime_config::BridgeOptions::default(),
+            ),
+        }
+    }
+
+    pub fn with_bridges(self, bridges: &dl_core::runtime_config::BridgeOptions) -> Self {
+        Self {
+            http_limits: dl_bridges::http::HttpLimits::from_bridges(bridges),
+            ..self
         }
     }
 
@@ -201,6 +212,7 @@ impl std::fmt::Debug for DashboardConfig {
             .field("data_dir", &self.data_dir)
             .field("turnier_tokens", &self.turnier_tokens.len())
             .field("twitch_tokens", &self.twitch_tokens.len())
+            .field("http_limits", &self.http_limits)
             .finish()
     }
 }

@@ -18,6 +18,12 @@ pub enum HttpSetupError {
     Build(#[source] reqwest::Error),
 }
 
+impl Default for HttpLimits {
+    fn default() -> Self {
+        Self::from_bridges(&BridgeOptions::default())
+    }
+}
+
 impl HttpLimits {
     pub fn from_bridges(bridges: &BridgeOptions) -> Self {
         Self {

@@ -108,11 +108,7 @@ pub struct SyncReport {
 impl SyncConfig {
     pub fn from_env() -> Result<Self, String> {
         let token = dl_core::runtime_config::secret_value(TOKEN_ENV)
-            .map(|s| s.trim().to_string())
             .ok_or_else(|| format!("{TOKEN_ENV} fehlt"))?;
-        if token.is_empty() {
-            return Err(format!("{TOKEN_ENV} ist leer"));
-        }
         let guild_id = dl_core::runtime_config::lookup(GUILD_ENV)
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_GUILD_ID);
@@ -177,10 +173,7 @@ pub async fn import_csv_dir(
 }
 
 pub async fn sync_insights(pool: &PgPool, cfg: &SyncConfig) -> Result<SyncReport, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|err| err.to_string())?;
+    let client = dl_bridges::http::current_client().map_err(|err| err.to_string())?;
     let end = Utc::now();
     let start = end - Duration::days(119);
     let start_s = start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);

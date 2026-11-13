@@ -137,7 +137,8 @@ impl DashboardApp {
             cfg.discord_client_id.clone(),
             cfg.discord_client_secret.clone(),
             cfg.discord_api_base.clone(),
-        );
+            cfg.http_limits,
+        )?;
         let states = OAuthStateStore::new(pool.clone(), cfg.oauth_state_ttl_secs);
         let sessions =
             SessionStore::persistent(pool.clone(), cfg.session_ttl_secs, now_unix_f64()).await?;
@@ -3349,7 +3350,9 @@ mod visual_brain_route_tests {
                     cfg.discord_client_id.clone(),
                     cfg.discord_client_secret.clone(),
                     cfg.discord_api_base.clone(),
-                ),
+                    cfg.http_limits,
+                )
+                .expect("Testclient"),
                 states: OAuthStateStore::new(pool.clone(), cfg.oauth_state_ttl_secs),
                 data_dir: cfg.data_dir.clone(),
                 cfg,
