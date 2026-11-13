@@ -65,6 +65,7 @@ const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
 const FUNDING_BAR_SEGMENTS: i64 = 20;
 const CUSTOM_ID_MAX_CHARS: usize = 100;
+const BUTTON_LABEL_MAX_CHARS: usize = 80;
 
 pub const SUPPORT_INTRO: &str = "\
 # Server unterstützen\n\
@@ -1088,9 +1089,9 @@ fn validate_component_shape(value: &Value) -> Result<(), String> {
 fn validate_button(value: &Value) -> Result<(), String> {
     let label = value.get("label").and_then(Value::as_str).unwrap_or("");
     let label_chars = label.chars().count();
-    if label.trim().is_empty() || label_chars > 80 {
+    if label.trim().is_empty() || label_chars > BUTTON_LABEL_MAX_CHARS {
         return Err(format!(
-            "Support-Button-Label muss 1 bis 80 Zeichen haben, hat {label_chars}"
+            "Support-Button-Label muss 1 bis {BUTTON_LABEL_MAX_CHARS} Zeichen haben, hat {label_chars}"
         ));
     }
     let custom_id = value.get("custom_id").and_then(Value::as_str).unwrap_or("");
@@ -1306,7 +1307,12 @@ mod tests {
 
     #[test]
     fn button_prueft_genau_die_gesendeten_zeichen() {
-        let padded = interactive_button(1, 1, &format!("{}   ", "a".repeat(80)), "x");
+        let padded = interactive_button(
+            1,
+            1,
+            &format!("{}   ", "a".repeat(BUTTON_LABEL_MAX_CHARS)),
+            "x",
+        );
         assert!(validate_component_shape(&padded).is_err());
         let with_url = json!({
             "type": 2,
@@ -1442,6 +1448,12 @@ enabled = false
         assert_eq!(output.messages[2].message_key, "support:zahlung");
         assert!(output.repost_required);
 
+        for message in &output.messages {
+            assert_eq!(
+                message.payload.components[0]["accent_color"],
+                json!(SUPPORT_ACCENT_GOLD)
+            );
+        }
         let main = &output.messages[0].payload;
         assert_eq!(main.flags, SUPPORT_COMPONENTS_V2_FLAG);
         assert!(main.allowed_mentions.parse.is_empty());

@@ -70,7 +70,7 @@ const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const DISCORD_RETRY_AFTER_FALLBACK: Duration = Duration::from_secs(1);
 const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
-const PANELS_BUSY: &str = "Ein anderes Panel wird gerade geschrieben";
+const PANELS_BUSY: &str = "Ein Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
@@ -1185,10 +1185,13 @@ impl ServerSyncService {
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
-        let members =
-            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id))
-                .await
-                .map_err(ServerSyncError::internal)?;
+        let members = tokio::time::timeout(
+            self.http_limits.request,
+            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)),
+        )
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))?
+        .map_err(ServerSyncError::internal)?;
         let mut assignments: Vec<MemberRoleAssignment> = members
             .into_iter()
             .map(|member| {
@@ -1712,10 +1715,13 @@ impl ServerSyncService {
     }
 
     async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
-        let fetched =
-            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id))
-                .await
-                .map_err(ServerSyncError::internal)?;
+        let fetched = tokio::time::timeout(
+            self.http_limits.request,
+            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)),
+        )
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))?
+        .map_err(ServerSyncError::internal)?;
         let mut members: Vec<WelcomeTeamMember> = fetched
             .into_iter()
             .map(|member| {
@@ -3471,11 +3477,15 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RollbackExportOutput> {
-        let model = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let model = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
@@ -3548,11 +3558,15 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn diff(&self, requested_by_user_id: Option<u64>) -> ServerSyncResult<DiffOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
                 .await?;
@@ -3604,11 +3618,15 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<RestoreOutput> {
         let (rollback_export_id, artifact_hash, artifact) =
             self.load_rollback_artifact(rollback_export_id).await?;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
                 .await?;
@@ -3672,11 +3690,15 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<OnboardingPreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
@@ -3751,11 +3773,15 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
         // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
         validate_onboarding_references(&live, &preview.config)
@@ -3849,11 +3875,15 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<ServerGuidePreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "serverguide_preview")
                 .await?;
@@ -3928,11 +3958,15 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         validate_server_guide_config(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -4030,11 +4064,15 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
         let _claim = self.claim_panels()?;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let content = build_regelwerk_text(&live)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
         let stored_message_id = self.load_regelwerk_message_id().await?;
@@ -4913,11 +4951,15 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
@@ -4936,11 +4978,15 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
         let _claim = self.claim_panels()?;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
+        let live = tokio::time::timeout(
+            self.http_limits.request,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;

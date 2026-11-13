@@ -61,6 +61,7 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
         .context("Infisical-Credential ist ungültig.")?;
     let client = uplink_infisical_transport::client_builder(&config.infisical_socket, 0)
         .map_err(|_| anyhow::anyhow!("Geschützte Infisical-Gegenstelle ist nicht verfügbar."))?
+        .connect_timeout(config.connect_limit())
         .timeout(config.request_limit())
         .build()
         .map_err(|_| anyhow::anyhow!("Infisical-Verbindung konnte nicht vorbereitet werden."))?;
@@ -124,7 +125,7 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
 }
 
 pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str) -> Result<()> {
-    let mut token_header = reqwest::header::HeaderValue::from_str(token.trim())
+    let mut token_header = reqwest::header::HeaderValue::from_str(token)
         .map_err(|_| anyhow::anyhow!("Bestehender Broker-Zugang ist ungültig."))?;
     token_header.set_sensitive(true);
     let client = dl_bridges::http::internal_client(dl_bridges::http::HttpLimits {

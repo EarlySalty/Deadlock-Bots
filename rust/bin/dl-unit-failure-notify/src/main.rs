@@ -39,6 +39,7 @@ struct Args {
     binary: Option<PathBuf>,
 }
 
+const NOTIFIER_REQUEST_MAX_MS: u64 = 30_000;
 const DEVFEED_UNIT: &str = "deadlock-devfeed.service";
 const BOTLOGS_CHANNEL: u64 = 1_374_364_800_817_303_632;
 
@@ -116,7 +117,8 @@ impl Config {
 
     fn limits_valid(&self) -> bool {
         let range = dl_core::runtime_config::HTTP_TIMEOUT_MS_RANGE;
-        range.contains(&self.connect_timeout_millis())
+        self.request_timeout_millis() <= NOTIFIER_REQUEST_MAX_MS
+            && range.contains(&self.connect_timeout_millis())
             && range.contains(&self.request_timeout_millis())
             && self.connect_timeout_millis() <= self.request_timeout_millis()
     }
@@ -447,11 +449,39 @@ mod tests {
             (None, Some(0)),
             (Some(12), Some(11)),
             (None, Some(120_001)),
+            (Some(1), Some(30_001)),
+            (Some(1), Some(u64::MAX)),
         ] {
             assert!(
                 !limits(connect, request).limits_valid(),
                 "{connect:?} {request:?}"
             );
+        }
+    }
+
+    #[test]
+    fn config_file_rejects_limits_beyond_the_service_budget() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let file = root.path().join("config.json");
+        let base = serde_json::json!({
+            "broker_origin": "http://127.0.0.1:8770", "channel_id": 1,
+            "state_directory": "/unused", "infisical_socket": "/unused",
+            "project_id": "p", "environment": "e", "secret_path": "/", "host_label": "h",
+            "connect_timeout_ms": 1
+        });
+        for (request, accepted) in [
+            (serde_json::Value::Null, true),
+            (serde_json::json!(30000), true),
+            (serde_json::json!(30001), false),
+            (serde_json::json!(0), false),
+            (serde_json::json!(u64::MAX), false),
+        ] {
+            let mut value = base.clone();
+            value["request_timeout_ms"] = request;
+            fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(config(&file).is_ok(), accepted, "{value}");
         }
     }
 
