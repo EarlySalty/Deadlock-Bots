@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serenity::model::id::{GuildId, RoleId, UserId};
+use dl_bridges::http::HttpLimits;
 use sqlx::PgPool;
 
 use dl_core::internal_tokens::{first_token, STEAM_BOT_RECEIVER, TWITCH_DASHBOARD_RECEIVER};
@@ -127,6 +127,7 @@ pub struct SupporterSync {
     pool: PgPool,
     http: Arc<serenity::http::Http>,
     guild_id: u64,
+    http_limits: HttpLimits,
     serversync: Arc<ServerSyncService>,
     config: SupporterConfig,
 }
@@ -138,6 +139,7 @@ impl SupporterSync {
         guild_id: u64,
         serversync: Arc<ServerSyncService>,
         config: SupporterConfig,
+        http_limits: HttpLimits,
     ) -> Self {
         Self {
             pool,
@@ -145,6 +147,7 @@ impl SupporterSync {
             guild_id,
             serversync,
             config,
+            http_limits,
         }
     }
 
@@ -199,7 +202,7 @@ impl SupporterSync {
     }
 
     async fn tick(&self) -> Result<(), store::StoreError> {
-        let members = roles::fetch_members(&self.http, self.guild_id)
+        let members = roles::fetch_members(&self.http, self.guild_id, self.http_limits)
             .await
             .map_err(store::StoreError::Discord)?;
         if members.is_empty() {
@@ -244,40 +247,26 @@ impl SupporterSync {
             "Server-Unterstützer: Rollenabgleich"
         );
         if self.config.role_grant_apply {
-            self.apply_grants(&plan.grants).await;
+            roles::apply_roles(
+                &self.http,
+                self.guild_id,
+                &plan.grants,
+                true,
+                self.http_limits,
+            )
+            .await;
         }
         if self.config.role_sync_apply {
-            self.apply_revokes(&plan.revokes).await;
+            roles::apply_roles(
+                &self.http,
+                self.guild_id,
+                &plan.revokes,
+                false,
+                self.http_limits,
+            )
+            .await;
         }
         Ok(())
-    }
-
-    async fn apply_grants(&self, grants: &[u64]) {
-        let guild = GuildId::new(self.guild_id);
-        let role = RoleId::new(SUPPORTER_ROLE_ID);
-        for user_id in grants {
-            if let Err(error) = self
-                .http
-                .add_member_role(guild, UserId::new(*user_id), role, Some(GRANT_REASON))
-                .await
-            {
-                tracing::warn!(user_id, %error, "Server-Unterstützer: Rolle nicht vergeben");
-            }
-        }
-    }
-
-    async fn apply_revokes(&self, revokes: &[u64]) {
-        let guild = GuildId::new(self.guild_id);
-        let role = RoleId::new(SUPPORTER_ROLE_ID);
-        for user_id in revokes {
-            if let Err(error) = self
-                .http
-                .remove_member_role(guild, UserId::new(*user_id), role, Some(REVOKE_REASON))
-                .await
-            {
-                tracing::warn!(user_id, %error, "Server-Unterstützer: Rolle nicht entzogen");
-            }
-        }
     }
 
     async fn refresh_funding(&self, previous: RefreshState) -> RefreshState {
