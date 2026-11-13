@@ -247,6 +247,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn twitch_schreiberrolle_wird_ebenso_geprueft() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        block_member(pool, 71, false).await?;
+        let insert = "INSERT INTO core.supporter_sources
+                 (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
+             VALUES ($1, 'twitch_sub', 'earlysalty', NULL, now() + interval '1 day', now())
+             ON CONFLICT (discord_id, source, source_ref) DO UPDATE SET
+                 valid_until = EXCLUDED.valid_until,
+                 updated_at = now()";
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE twitchbot")
+            .execute(&mut *tx)
+            .await?;
+        let open = sqlx::query(insert).bind(72_i64).execute(&mut *tx).await?;
+        let blocked = sqlx::query(insert).bind(71_i64).execute(&mut *tx).await?;
+        tx.commit().await?;
+        assert_eq!(open.rows_affected(), 1);
+        assert_eq!(blocked.rows_affected(), 0);
+        assert_eq!(source_rows(pool, 72).await?, 1);
+        assert_eq!(source_rows(pool, 71).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn nach_abmeldung_darf_eine_quelle_nur_enden() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();

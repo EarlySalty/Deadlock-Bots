@@ -127,13 +127,13 @@ pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str)
     let mut token_header = reqwest::header::HeaderValue::from_str(token.trim())
         .map_err(|_| anyhow::anyhow!("Bestehender Broker-Zugang ist ungültig."))?;
     token_header.set_sensitive(true);
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(config.connect_limit())
-        .timeout(config.request_limit())
-        .build()
-        .map_err(|_| anyhow::anyhow!("Broker-Verbindung konnte nicht vorbereitet werden."))?;
+    let client = dl_bridges::http::internal_client(dl_bridges::http::HttpLimits {
+        connect: config.connect_limit(),
+        request: config.request_limit(),
+    })
+    .map_err(|error| {
+        anyhow::anyhow!("Broker-Verbindung konnte nicht vorbereitet werden: {error}")
+    })?;
     let response = client
         .post(format!(
             "{}/internal/master/v1/discord/send-message",

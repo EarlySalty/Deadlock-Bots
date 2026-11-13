@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 dl-core.workspace = true
+dl-bridges.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 url.workspace = true

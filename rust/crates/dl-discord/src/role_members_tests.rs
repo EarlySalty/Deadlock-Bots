@@ -1,5 +1,29 @@
 use super::*;
+use crate::member_pages::MEMBER_PAGE_LIMIT;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const FIRST_ID: u64 = 10;
+
+fn last_full_page_id() -> u64 {
+    FIRST_ID + u64::from(MEMBER_PAGE_LIMIT) - 1
+}
+
+fn short_page_ids() -> [u64; 2] {
+    [last_full_page_id() + 1, last_full_page_id() + 2]
+}
+
+fn streamer_ids() -> Vec<u64> {
+    (FIRST_ID..=last_full_page_id())
+        .chain(short_page_ids())
+        .filter(|id| id % 2 == 0)
+        .collect()
+}
+
+fn all_ids() -> Vec<u64> {
+    (FIRST_ID..=last_full_page_id())
+        .chain(short_page_ids())
+        .collect()
+}
 
 async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, PortError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -10,14 +34,27 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
             "roles": roles, "joined_at": "2026-10-08T00:00:00Z", "deaf": false, "mute": false, "flags": 0
         })
     };
+    let roles_of = |id: u64| -> &'static [&'static str] {
+        if id % 2 == 0 {
+            &["2"]
+        } else {
+            &["3"]
+        }
+    };
+    let full_page: Vec<serde_json::Value> = (FIRST_ID..=last_full_page_id())
+        .map(|id| member(id, roles_of(id)))
+        .collect();
+    let short_page: Vec<serde_json::Value> = short_page_ids()
+        .into_iter()
+        .map(|id| member(id, roles_of(id)))
+        .collect();
     let pages = [
         json!([
             {"id":"1","name":"@everyone","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":0,"permissions":"0","managed":false,"mentionable":false},
             {"id":"2","name":"Streamer","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":1,"permissions":"0","managed":false,"mentionable":false}
         ]),
-        json!([member(10, &["2"]), member(11, &["3"])]),
-        json!([member(12, &["2"]), member(13, &[])]),
-        json!([]),
+        serde_json::Value::Array(full_page),
+        serde_json::Value::Array(short_page),
     ];
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = requests.clone();
@@ -34,12 +71,12 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
                 .lock()
                 .unwrap()
                 .push(String::from_utf8(request).unwrap());
-            let status = if fail_last_page && index == 3 {
+            let status = if fail_last_page && index == 2 {
                 "403 Forbidden"
             } else {
                 "200 OK"
             };
-            let body = if fail_last_page && index == 3 {
+            let body = if fail_last_page && index == 2 {
                 json!({"code":50013,"message":"Missing Permissions"}).to_string()
             } else {
                 page.to_string()
@@ -59,11 +96,10 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
     server.abort();
     let _ = server.await;
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 4, "REST decoding failed: {result:?}");
+    assert_eq!(requests.len(), 3, "REST decoding failed: {result:?}");
     assert!(requests[0].contains("/guilds/1/roles"));
     assert!(!requests[1].contains("after="));
-    assert!(requests[2].contains("after=11"));
-    assert!(requests[3].contains("after=13"));
+    assert!(requests[2].contains(&format!("after={}", last_full_page_id())));
     result
 }
 
@@ -77,7 +113,7 @@ async fn complete_role_snapshot_reads_every_rest_page_without_gateway_cache() {
             .iter()
             .map(|member| member.user_id)
             .collect::<Vec<_>>(),
-        vec![10, 12]
+        streamer_ids()
     );
 }
 
@@ -92,7 +128,7 @@ async fn everyone_snapshot_includes_all_members_without_explicit_everyone_role()
             .iter()
             .map(|member| member.user_id)
             .collect::<Vec<_>>(),
-        vec![10, 11, 12, 13]
+        all_ids()
     );
 }
 
