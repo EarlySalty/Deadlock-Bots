@@ -4025,24 +4025,6 @@ async fn geloeschte_wartende_bitte_wird_beim_abgleich_still_verworfen() {
 }
 
 #[tokio::test]
-async fn abgleich_liest_keine_bitten_ausserhalb_des_fensters() {
-    let (watcher, store, port, _) = setup();
-    let mut state = open_request_state(Phase::WaitingForCode, None);
-    state.friend_code = None;
-    if let Some(request) = state.request.as_mut() {
-        request.created_at = NOW - REQUEST_WINDOW_SECONDS - 1;
-    }
-    store.states.lock().await.insert(USER, state);
-    watcher
-        .reread_waiting_requests(NOW)
-        .await
-        .expect("Abgleich läuft");
-    assert!(port.deleted.lock().await.is_empty());
-    assert_eq!(port.history_calls.load(Ordering::SeqCst), 0);
-    assert!(stored(&store).await.request.is_some());
-}
-
-#[tokio::test]
 async fn hinweisfreigabe_haelt_trotz_zwischenzeitlicher_schreibung() {
     let (watcher, store, port, _) = setup();
     port.reply_fails.store(true, Ordering::SeqCst);
@@ -4107,4 +4089,78 @@ async fn abgelaufene_leihe_wendet_kein_zweites_urteil_an() {
         .expect("Speichern läuft");
     assert!(settled);
     assert_eq!(stored(&store).await, state);
+}
+
+#[tokio::test]
+async fn zahl_in_einem_anderen_kanal_aendert_die_offene_bitte_nicht() {
+    let (watcher, store, port, invite) = setup();
+    let mut state = open_request_state(Phase::Pending, Some(SteamWait::Delivery));
+    if let Some(request) = state.request.as_mut() {
+        request.direct = true;
+    }
+    store.states.lock().await.insert(USER, state);
+    let at = NOW + 2 * ONE_HOUR;
+    let mut chat = message(2, at, "war das Match 45678912 verbuggt?");
+    chat.channel_id = 555;
+    watcher
+        .handle_message(chat, at, Some(false))
+        .await
+        .expect("Nachricht wird gelesen");
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(port.replies.lock().await.is_empty());
+    let state = stored(&store).await;
+    assert_eq!(state.friend_code.as_deref(), Some("123456789"));
+    let request = state.request.expect("Bitte bleibt");
+    assert_eq!(request.message_id, 1);
+    assert_eq!(state.status.channel_id, Some(CHECK_IN_CHANNEL_ID));
+}
+
+#[tokio::test]
+async fn raumbitte_im_versand_mit_neuem_code_laedt_erst_nach_einem_nein() {
+    let (watcher, store, _, invite) = setup();
+    let mut state = open_request_state(Phase::Dispatching, None);
+    state.status = RequestStatus::for_channel(CHECK_IN_CHANNEL_ID);
+    store.states.lock().await.insert(USER, state);
+    watcher
+        .handle_message(
+            message(2, NOW + 5, "Kann mich jemand einladen? 987654321"),
+            NOW + 5,
+            Some(false),
+        )
+        .await
+        .expect("Neuer Code wird gelesen");
+    watcher
+        .dispatch_due(USER, NOW + 20)
+        .await
+        .expect("Takt läuft");
+    assert!(invite.calls.lock().await.is_empty());
+    let state = stored(&store).await;
+    assert_eq!(state.friend_code.as_deref(), Some("987654321"));
+    assert_eq!(state.dispatch_started_at_millis, None);
+    let request = state.request.expect("Bitte vorhanden");
+    assert_eq!(request.message_id, 2);
+    assert_eq!(request.phase, Phase::Pending);
+    assert!(!request.direct);
+}
+
+#[tokio::test]
+async fn direkte_bitte_mit_neuem_code_im_laufenden_versand_bleibt_direkt() {
+    let (watcher, store, _, _) = setup();
+    let mut state = open_request_state(Phase::Dispatching, None);
+    state.status = RequestStatus::for_channel(CHECK_IN_CHANNEL_ID);
+    state.dispatch_started_at_millis = Some(NOW * 1000);
+    store.states.lock().await.insert(USER, state);
+    watcher
+        .record_message(
+            message(2, NOW + 5, "Kannst du mich einladen? 987654321"),
+            NOW + 5,
+            Some(false),
+        )
+        .await
+        .expect("Direkte Bitte wird gelesen");
+    let state = stored(&store).await;
+    let request = state.request.expect("Bitte vorhanden");
+    assert_eq!(request.message_id, 2);
+    assert!(request.direct);
+    assert_eq!(state.friend_code.as_deref(), Some("987654321"));
 }

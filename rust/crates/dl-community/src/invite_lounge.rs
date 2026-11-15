@@ -1959,6 +1959,14 @@ fn update_state(
     now_millis: i64,
 ) -> bool {
     state.last_seen = event.message_id;
+    if kind.is_none() && outside_request_channel(state, event.channel_id) {
+        tracing::info!(
+            user_id = event.author_id,
+            message_id = event.message_id,
+            "Invite-Lounge übernimmt keinen Freundescode aus einem anderen Kanal"
+        );
+        return false;
+    }
     let request_before = state.request.as_ref().map(|request| request.message_id);
     let has_message_code = code.is_some();
     let code_changed = code
@@ -2023,7 +2031,7 @@ fn update_state(
         }
     }
     if code_changed {
-        restart_for_new_code(state, event);
+        restart_for_new_code(state, event, kind == Some(RequestKind::Direct));
     }
     if state.request.as_ref().map(|request| request.message_id) != request_before {
         note_dropped_answers(
@@ -2051,7 +2059,19 @@ fn update_state(
     needs_hint
 }
 
-fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage) {
+fn outside_request_channel(state: &LoungeState, channel_id: u64) -> bool {
+    state.request.as_ref().is_some_and(|request| {
+        matches!(
+            request.phase,
+            Phase::WaitingForCode | Phase::Pending | Phase::Dispatching
+        )
+    }) && state
+        .status
+        .channel_id
+        .is_some_and(|request_channel| request_channel != channel_id)
+}
+
+fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage, direct: bool) {
     let Some(request) = state.request.as_mut().filter(|request| {
         matches!(request.phase, Phase::Pending | Phase::Dispatching)
             && request.message_id != event.message_id
@@ -2060,7 +2080,9 @@ fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage) {
     };
     let old = request.message_id;
     request.restart_at(event.message_id, event.created_at);
+    request.direct |= direct;
     state.dispatch_started_at_millis = None;
+
     tracing::info!(
         user_id = event.author_id,
         old_message_id = old,
