@@ -148,11 +148,14 @@ impl OutboxEntry {
     }
 }
 
-pub(super) fn brain_lease_millis(brain_timeout: std::time::Duration) -> i64 {
-    i64::try_from(brain_timeout.as_millis())
+pub(super) fn claim_cutoff(brain_timeout: std::time::Duration) -> std::time::Duration {
+    brain_timeout.saturating_mul(2)
+}
+
+pub(super) fn claim_lease_millis(cutoff: std::time::Duration) -> i64 {
+    i64::try_from(cutoff.as_millis())
         .unwrap_or(i64::MAX)
         .saturating_mul(2)
-        .max(BRAIN_BACKOFF_MILLIS)
 }
 
 pub(super) fn brain_backoff(attempts: u32) -> i64 {
@@ -388,15 +391,12 @@ mod tests {
     const LEASE: i64 = 240_000;
 
     #[test]
-    fn leihfrist_deckt_das_doppelte_brain_zeitlimit() {
-        assert_eq!(
-            brain_lease_millis(std::time::Duration::from_millis(120_000)),
-            240_000
-        );
-        assert_eq!(
-            brain_lease_millis(std::time::Duration::ZERO),
-            BRAIN_BACKOFF_MILLIS
-        );
+    fn frist_und_leihfrist_folgen_dem_brain_zeitlimit() {
+        for (timeout_secs, cutoff_secs, lease_millis) in [(120, 240, 480_000), (3, 6, 12_000)] {
+            let cutoff = claim_cutoff(std::time::Duration::from_secs(timeout_secs));
+            assert_eq!(cutoff, std::time::Duration::from_secs(cutoff_secs));
+            assert_eq!(claim_lease_millis(cutoff), lease_millis);
+        }
     }
 
     fn reply(text: &str) -> InviteReply {
