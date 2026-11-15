@@ -14,6 +14,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_core::runtime_config::{TWITCH_DEFAULT_TIMEOUT_SECONDS, TWITCH_TIMEOUT_SECONDS_RANGE};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use reqwest::Url;
 use serde_json::{json, Value};
@@ -79,7 +80,10 @@ pub struct TwitchApiClient {
 }
 
 impl TwitchApiClient {
-    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
+    pub fn from_env(
+        lookup: impl Fn(&str) -> Option<String>,
+        limits: crate::http::HttpLimits,
+    ) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
                 .map(|v| v.trim().to_string())
@@ -101,12 +105,12 @@ impl TwitchApiClient {
             .unwrap_or(false);
         let timeout = get("TWITCH_INTERNAL_API_TIMEOUT_SEC")
             .and_then(|v| v.parse::<f64>().ok())
-            .map(|v| v.max(0.5))
-            .unwrap_or(10.0);
+            .filter(|v| v.is_finite() && TWITCH_TIMEOUT_SECONDS_RANGE.contains(v))
+            .unwrap_or(TWITCH_DEFAULT_TIMEOUT_SECONDS);
         match Self::try_new(
             base_url,
             token,
-            Duration::from_secs_f64(timeout),
+            limits.with_request(Duration::from_secs_f64(timeout)),
             allow_non_loopback,
         ) {
             Ok(client) => Some(client),
@@ -120,16 +124,13 @@ impl TwitchApiClient {
     pub fn try_new(
         base_url: impl Into<String>,
         token: impl Into<String>,
-        timeout: Duration,
+        limits: crate::http::HttpLimits,
         allow_non_loopback: bool,
     ) -> Result<Arc<Self>, TwitchBridgeError> {
         let base_url = normalize_internal_api_base_url(&base_url.into(), allow_non_loopback)
             .map_err(TwitchBridgeError::Api)?;
-        let http = crate::http::internal_client(crate::http::HttpLimits {
-            connect: timeout,
-            request: timeout,
-        })
-        .map_err(|err| TwitchBridgeError::Api(err.to_string()))?;
+        let http = crate::http::internal_client(limits)
+            .map_err(|err| TwitchBridgeError::Api(err.to_string()))?;
         Ok(Arc::new(Self {
             http,
             base_url,
@@ -143,7 +144,13 @@ impl TwitchApiClient {
         token: impl Into<String>,
         timeout: Duration,
     ) -> Arc<Self> {
-        Self::try_new(base_url, token, timeout, false).expect("valid Twitch API client")
+        Self::try_new(
+            base_url,
+            token,
+            crate::http::HttpLimits::default().with_request(timeout),
+            false,
+        )
+        .expect("valid Twitch API client")
     }
 
     async fn request(
@@ -1001,19 +1008,37 @@ mod tests {
                 "schema_version=1\n[runtime.bridges]\ntwitch_host='{host}'\n"
             ))
             .expect("Loopback-Konfiguration");
-            let client = super::TwitchApiClient::from_env(|key| {
-                if key == "TWITCH_INTERNAL_API_TOKEN" {
-                    Some("synthetic-test-token".into())
-                } else {
-                    config.runtime_value(key)
-                }
-            });
+            let client = super::TwitchApiClient::from_env(
+                |key| {
+                    if key == "TWITCH_INTERNAL_API_TOKEN" {
+                        Some("synthetic-test-token".into())
+                    } else {
+                        config.runtime_value(key)
+                    }
+                },
+                crate::http::HttpLimits::default(),
+            );
             assert!(client.is_some(), "gültiger Host {host}");
         }
         assert!(dl_core::bot_config::BotConfig::parse(
             "schema_version=1\n[runtime.bridges]\ntwitch_host='192.0.2.1'\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn timeouts_outside_the_validator_range_fall_back_to_the_default() {
+        for raw in ["inf", "-inf", "NaN", "0.1", "1e12", "kaputt"] {
+            let client = super::TwitchApiClient::from_env(
+                |key| match key {
+                    "TWITCH_INTERNAL_API_TOKEN" => Some("synthetic-test-token".into()),
+                    "TWITCH_INTERNAL_API_TIMEOUT_SEC" => Some(raw.into()),
+                    _ => None,
+                },
+                crate::http::HttpLimits::default(),
+            );
+            assert!(client.is_some(), "{raw}");
+        }
     }
 
     use super::*;
