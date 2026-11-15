@@ -4,7 +4,7 @@
 
 The supporter role tick awaited the guild member snapshot and every grant or revoke inline, without a deadline. One Discord call that never answered blocked the tick and every later cycle, so no supporter got or lost the role until a restart.
 
-Reproduced in `rust/bin/dl-bot/src/supporter/roles.rs` tests against a local HTTP server that accepts and never answers: `hanging_member_snapshot_times_out_and_later_cycles_retry`, `hanging_and_failed_roles_allow_other_members_and_later_cycles`, `rate_limiter_waits_are_bounded_and_later_cycles_proceed`. Each test drives the production tick into a call that never answers and requires the tick and the next cycle to finish; all pass on this branch (ionos, throwaway database, 2026-11-15, `/tmp/claude-1000/p1-tests.log`).
+Reproduced in `rust/bin/dl-bot/src/supporter/roles.rs` tests against a local HTTP server that accepts and never answers: `hanging_member_snapshot_times_out_and_later_cycles_retry`, `hanging_and_failed_roles_allow_other_members_and_later_cycles`, `rate_limiter_waits_are_bounded_and_later_cycles_proceed`. Each test drives the production tick into a call that never answers and requires the tick and the next cycle to finish; all pass on this branch (ionos, throwaway database, 2026-11-15, log `Documents/.tasks/2026-11-13-supporter-recovery/fix-20261115-p1-tests.log`).
 
 ## Layer 2, why it was possible
 
@@ -30,7 +30,7 @@ All twins named by the gate review use either `adapter.http` or the gateway `Htt
 | `dl-discord/src/gateway.rs` 225, 241, 373, 562 (`ctx.http`) | ac6a2daa, `ClientBuilder::new_with_http(adapter.rest_http(token), ...)` |
 | voice worker gateway identity | ac6a2daa, `build_voice_worker_client` takes `adapter.rest_http(&voice_worker_token)` |
 
-The other `reqwest` clients in `rust/` were checked on this branch. Every production client sets a request timeout: dl-dashboard `server_stats.rs:633`, `public.rs:92`, `visual_brain.rs:436`, `authority.rs:97`, dl-mcp `main.rs:69`, `dl-community-points-sync` `lib.rs:66`, and dl-bridges `http.rs`. The bare `reqwest::Client::new()` calls are all in `#[cfg(test)]` code.
+Every other `reqwest::Client::builder()` in `rust/` outside tests was read on this branch, and each one sets `.timeout`. That covers dl-dashboard (`server_stats.rs:633`, `public.rs:92`, `visual_brain.rs:436`, `authority.rs:97`, `names.rs:244`), dl-ai (`lib.rs:230,295,534,612`, `chat_provider.rs:1073`, `tool_chat/anthropic_http.rs:45`), `dl-tierlist/lib.rs:46`, `dl-answer/game_http.rs:70`, `dl-webcore/dashboard.rs:43`, dl-bot `scrim_adapter.rs:2544,2610`, dl-mcp `main.rs:69`, `dl-community-points-sync/lib.rs:66`, `dl-verbinder/main.rs:886` and dl-bridges `http.rs`. The bare `reqwest::Client::new()` calls are all in test code. Outside tests, no `Http::new(` or `serenity::Client::builder(` is left in `rust/`; the only `HttpBuilder::new` is `bounded_http`.
 
 Two things stay open, and both are recorded in `claude-config/orchestrierung/OFFENE-URSACHEN.md` on 2026-11-15.
 
@@ -48,3 +48,4 @@ The open row from 2026-11-13 still applies to this pattern: per-key locks are he
 | ac6a2daa | Discord REST runs on the configured HTTP limits (this cause). |
 | 949b5826 | The Twitch internal API timeout follows the validated range. |
 | fd125266 | The `/invite` wait matches the 2 × 90 s Steam task budget. |
+| 46f5fb11, a78e8b2a | The Twitch range test now asserts the parsed value. The lock_timeout guard also sees commented and `set_config` forms. |
