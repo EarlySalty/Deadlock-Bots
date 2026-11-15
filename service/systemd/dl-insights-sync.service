@@ -2,6 +2,7 @@
 Description=Deadlock Discord Insights CSV-Sync (wöchentlich)
 After=network-online.target infisical.service
 Wants=network-online.target
+OnFailure=unit-failure-notify@%n.service
 
 [Service]
 Type=oneshot

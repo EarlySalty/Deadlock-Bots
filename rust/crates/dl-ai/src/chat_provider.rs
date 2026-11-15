@@ -1584,6 +1584,21 @@ mod tests {
     }
 
     #[test]
+    fn upstream_status_reads_back_exactly_the_status_of_the_hint() {
+        for status in [400, 402, 404, 412, 413, 418, 429, 500, 503] {
+            let hinweis = anbieter_hinweis(status, r#"{"error":{"message":"HTTP 999 x"}}"#);
+            assert_eq!(
+                ChatProviderError::Provider(hinweis).upstream_status(),
+                Some(status)
+            );
+        }
+        assert_eq!(
+            ChatProviderError::Provider("missing chat response content".into()).upstream_status(),
+            None
+        );
+    }
+
+    #[test]
     fn kein_json_wird_trotzdem_durchgereicht() {
         let hinweis = anbieter_hinweis(500, "upstream connect error");
         assert!(hinweis.contains("upstream connect error"), "{hinweis}");

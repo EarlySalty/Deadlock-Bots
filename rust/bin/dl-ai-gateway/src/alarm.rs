@@ -1,11 +1,14 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dl_ai::tool_chat::{AlarmConfig, Delivery, Refusal, RefusalNotifier};
+use dl_ai::tool_chat::{AlarmConfig, Delivery, Refusal, RefusalAlarm, RefusalNotifier};
+use dl_ai::upstream::{protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT};
 
-const GATEWAY_UNIT: &str = "dl-ai-gateway.service";
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const ON_FAILURE: &str = "unit-failure-notify@dl-ai-gateway.service.service";
+const SCAN_LIMIT: i64 = 256;
 
 pub struct ProcessNotifier {
     config: AlarmConfig,
@@ -21,8 +24,9 @@ impl RefusalNotifier for ProcessNotifier {
     fn notify(&self, refusal: Refusal, delivery: Delivery) {
         tracing::warn!(
             provider = %refusal.provider,
-            kind = refusal.kind,
-            reason = refusal.reason,
+            class = refusal.class.as_str(),
+            kind = refusal.kind.as_str(),
+            reason = %refusal.reason,
             status = ?refusal.status,
             "AI_GATEWAY_PROVIDER_REFUSAL"
         );
@@ -35,26 +39,16 @@ impl RefusalNotifier for ProcessNotifier {
             return;
         };
         let command = command(&self.config, &refusal);
-        let budget = Duration::from_secs(self.config.notify_timeout_secs.get());
-        runtime.spawn(run(command, budget, refusal, delivery));
+        runtime.spawn(run(
+            command,
+            self.config.notify_timeout(),
+            refusal,
+            delivery,
+        ));
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Outcome {
-    Sent,
-    Suppressed,
-}
-
-fn command(config: &AlarmConfig, refusal: &Refusal) -> tokio::process::Command {
-    let event_id = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_micros())
-            .unwrap_or_default()
-    );
+fn helper(config: &AlarmConfig) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&config.notify_binary);
     command
         .env_clear()
@@ -63,23 +57,9 @@ fn command(config: &AlarmConfig, refusal: &Refusal) -> tokio::process::Command {
         .arg("--config")
         .arg(&config.notify_config)
         .arg("--credential")
-        .arg(&config.credential)
-        .arg("--unit")
-        .arg(GATEWAY_UNIT)
-        .arg("--provider-refusal")
-        .arg("--provider")
-        .arg(&refusal.provider)
-        .arg("--kind")
-        .arg(refusal.kind)
-        .arg("--reason")
-        .arg(refusal.reason)
-        .arg("--event-id")
-        .arg(event_id);
+        .arg(&config.credential);
     if let Some(home) = std::env::var_os("HOME") {
         command.env("HOME", home);
-    }
-    if let Some(status) = refusal.status {
-        command.arg("--status").arg(status.to_string());
     }
     command
         .stdin(Stdio::null())
@@ -89,30 +69,46 @@ fn command(config: &AlarmConfig, refusal: &Refusal) -> tokio::process::Command {
     command
 }
 
-async fn deliver(
+fn command(config: &AlarmConfig, refusal: &Refusal) -> tokio::process::Command {
+    let mut command = helper(config);
+    command
+        .arg("--unit")
+        .arg(GATEWAY_UNIT)
+        .arg("--provider-refusal")
+        .arg("--provider")
+        .arg(&refusal.provider)
+        .arg("--kind")
+        .arg(refusal.kind.as_str())
+        .arg("--reason")
+        .arg(&refusal.reason)
+        .arg("--event-id")
+        .arg(refusal.event_id());
+    if let Some(status) = refusal.status {
+        command.arg("--status").arg(status.to_string());
+    }
+    command
+}
+
+async fn output(
     mut command: tokio::process::Command,
     budget: Duration,
-) -> Result<Outcome, &'static str> {
-    let child = command
-        .spawn()
-        .map_err(|_| "notify helper could not start")?;
+) -> Result<String, &'static str> {
+    let child = command.spawn().map_err(|_| "helper could not start")?;
     let output = tokio::time::timeout(budget, child.wait_with_output())
         .await
-        .map_err(|_| "notify helper timed out")?
-        .map_err(|_| "notify helper unreachable")?;
+        .map_err(|_| "helper timed out")?
+        .map_err(|_| "helper unreachable")?;
     if !output.status.success() {
-        return Err("notify helper reported a failure");
+        return Err("helper reported a failure");
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .rev()
-        .find_map(|line| match line.trim() {
-            "outcome=sent" => Some(Outcome::Sent),
-            "outcome=suppressed" => Some(Outcome::Suppressed),
-            _ => None,
-        })
-        .ok_or("notify helper gave no outcome")
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn deliver(
+    command: tokio::process::Command,
+    budget: Duration,
+) -> Result<Answer, &'static str> {
+    Answer::parse(&output(command, budget).await?).ok_or("helper gave no answer")
 }
 
 async fn run(
@@ -122,26 +118,20 @@ async fn run(
     delivery: Delivery,
 ) {
     match deliver(command, budget).await {
-        Ok(Outcome::Sent) => {
+        Ok(answer) => {
             tracing::info!(
                 provider = %refusal.provider,
-                reason = refusal.reason,
-                "AI_GATEWAY_ALARM_SENT"
+                class = refusal.class.as_str(),
+                outcome = ?answer.outcome,
+                next_at = answer.next_at,
+                "AI_GATEWAY_ALARM_ANSWERED"
             );
-            delivery.confirm();
-        }
-        Ok(Outcome::Suppressed) => {
-            tracing::info!(
-                provider = %refusal.provider,
-                reason = refusal.reason,
-                "AI_GATEWAY_ALARM_SUPPRESSED"
-            );
-            delivery.confirm();
+            delivery.answered(answer);
         }
         Err(cause) => {
             tracing::error!(
                 provider = %refusal.provider,
-                reason = refusal.reason,
+                class = refusal.class.as_str(),
                 cause,
                 "AI_GATEWAY_ALARM_FAILED"
             );
@@ -150,16 +140,21 @@ async fn run(
     }
 }
 
-pub fn readiness(config: &AlarmConfig) -> Vec<&'static str> {
+pub async fn readiness(config: &AlarmConfig) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if !executable(&config.notify_binary) {
-        missing.push("notify_binary is not an executable file");
+    if protected_path(&config.notify_binary, false).is_err() || !executable(&config.notify_binary) {
+        missing.push("notify_binary is not a protected executable file");
     }
-    if std::fs::File::open(&config.notify_config).is_err() {
-        missing.push("notify_config is not readable");
+    let mut handshake = helper(config);
+    handshake.arg("--contract");
+    let spoken = output(handshake, config.notify_timeout())
+        .await
+        .is_ok_and(|stdout| stdout.lines().any(|line| line.trim() == CONTRACT));
+    if !spoken {
+        missing.push("notify helper does not accept this config, credential and contract");
     }
-    if std::fs::File::open(&config.credential).is_err() {
-        missing.push("credential is not readable");
+    if !on_failure_wired(config.notify_timeout()).await {
+        missing.push("dl-ai-gateway.service has no OnFailure alarm");
     }
     missing
 }
@@ -170,129 +165,208 @@ fn executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-pub fn report_readiness(config: &AlarmConfig) {
-    for cause in readiness(config) {
-        tracing::error!(cause, "AI_GATEWAY_ALARM_UNREADY");
+async fn on_failure_wired(budget: Duration) -> bool {
+    let mut command = tokio::process::Command::new("/usr/bin/systemctl");
+    command
+        .env_clear()
+        .env("PATH", CHILD_PATH)
+        .args(["--user", "show", GATEWAY_UNIT, "-p", "OnFailure", "--value"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    for name in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
     }
+    output(command, budget)
+        .await
+        .is_ok_and(|stdout| stdout.split_whitespace().any(|unit| unit == ON_FAILURE))
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+pub async fn scan(alarm: &RefusalAlarm, budget: Duration) -> Result<(), String> {
+    let lookback = i64::try_from(DAY_SECS).unwrap_or(i64::MAX);
+    let rows = tokio::time::timeout(budget, dl_ai::usage::recent_failures(lookback, SCAN_LIMIT))
+        .await
+        .map_err(|_| "ledger scan timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    alarm.observe(&rows, now());
+    Ok(())
+}
+
+pub async fn watch(alarm: Arc<RefusalAlarm>, config: AlarmConfig) -> anyhow::Error {
+    let mut interval = tokio::time::interval(config.scan_interval());
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+    let mut healthy = tokio::time::Instant::now();
+    loop {
+        interval.tick().await;
+        match scan(&alarm, config.scan_interval()).await {
+            Ok(()) => healthy = tokio::time::Instant::now(),
+            Err(cause) => {
+                tracing::error!(cause = %cause, "AI_GATEWAY_ALARM_SCAN_FAILED");
+                if healthy.elapsed() >= config.standing_after() {
+                    return anyhow::anyhow!(
+                        "provider refusal scan failed for longer than {} s",
+                        config.standing_after_secs
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub fn unready(missing: &[&'static str]) -> Option<anyhow::Error> {
+    (!missing.is_empty()).then(|| anyhow::anyhow!("alarm not ready: {}", missing.join("; ")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::{NonZeroU32, NonZeroU64};
+    use dl_ai::upstream::{Class, Outcome, RefusalKind};
+    use std::ffi::OsStr;
 
-    fn config(binary: &str) -> AlarmConfig {
+    fn config(binary: &Path, credential: &Path) -> AlarmConfig {
         AlarmConfig {
             notify_binary: binary.into(),
             notify_config: "/etc/hostname".into(),
-            credential: "/etc/hostname".into(),
-            refusal_streak: NonZeroU32::MIN,
-            notify_timeout_secs: NonZeroU64::MIN,
+            credential: credential.into(),
+            standing_after_secs: 600,
+            scan_interval_secs: 60,
+            notify_timeout_secs: 75,
         }
     }
 
     fn refusal() -> Refusal {
         Refusal {
             provider: "anthropic_api".into(),
-            kind: "limit",
-            reason: "billing",
+            class: Class::Billing,
+            kind: RefusalKind::Limit,
+            reason: "billing".into(),
             status: Some(400),
+            first_at: 100,
+            last_at: 160,
         }
     }
 
-    fn script(name: &str, body: &str) -> std::path::PathBuf {
+    fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("dl-ai-gateway-alarm-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join(name);
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("script");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         path
     }
 
+    fn arg<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|arg| arg == flag)
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+    }
+
     #[test]
-    fn helper_gets_unit_provider_kind_reason_status_and_no_inherited_environment() {
-        let command = command(&config("/bin/notify"), &refusal());
+    fn helper_gets_the_refusal_and_its_event_id() {
+        let command = command(
+            &config(Path::new("/bin/notify"), Path::new("/run/c")),
+            &refusal(),
+        );
         let args: Vec<String> = command
             .as_std()
             .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
+            .map(OsStr::to_string_lossy)
+            .map(|arg| arg.into_owned())
             .collect();
-        let position = |flag: &str| {
-            args.iter()
-                .position(|arg| arg == flag)
-                .map(|index| args[index + 1].as_str())
-        };
-        assert_eq!(position("--unit"), Some(GATEWAY_UNIT));
-        assert_eq!(position("--provider"), Some("anthropic_api"));
-        assert_eq!(position("--kind"), Some("limit"));
-        assert_eq!(position("--reason"), Some("billing"));
-        assert_eq!(position("--status"), Some("400"));
-        assert!(args.contains(&"--provider-refusal".to_owned()));
-        assert!(!args.contains(&"--refusals".to_owned()));
-        let envs: Vec<String> = command
-            .as_std()
-            .get_envs()
-            .map(|(key, _)| key.to_string_lossy().into_owned())
-            .collect();
-        assert!(envs
-            .iter()
-            .all(|key| ["PATH", "LANG", "HOME"].contains(&key.as_str())));
+        assert_eq!(arg(&args, "--unit"), Some(GATEWAY_UNIT));
+        assert_eq!(arg(&args, "--provider"), Some("anthropic_api"));
+        assert_eq!(arg(&args, "--kind"), Some("limit"));
+        assert_eq!(arg(&args, "--reason"), Some("billing"));
+        assert_eq!(arg(&args, "--status"), Some("400"));
+        assert_eq!(arg(&args, "--event-id"), Some("100-160"));
+        assert_eq!(arg(&args, "--credential"), Some("/run/c"));
     }
 
     #[tokio::test]
-    async fn only_a_stated_outcome_counts_as_delivered() {
+    async fn only_an_exact_answer_line_counts_and_no_parent_environment_leaks() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
         let budget = Duration::from_secs(5);
-        let sent = script("sent", "echo noise\necho outcome=sent");
-        let suppressed = script("suppressed", "echo outcome=suppressed");
-        let silent = script("silent", "exit 0");
-        let failing = script("failing", "echo outcome=sent\nexit 1");
-        let secret = script(
-            "secret",
-            "if [ -n \"$DL_GATEWAY_SECRET_PROBE\" ]; then exit 3; fi\necho outcome=sent",
-        );
-        let slow = script("slow", "sleep 5\necho outcome=sent");
-        std::env::set_var("DL_GATEWAY_SECRET_PROBE", "1");
-        let outcome =
-            |path: &std::path::Path| command(&config(&path.to_string_lossy()), &refusal());
-        assert_eq!(deliver(outcome(&sent), budget).await, Ok(Outcome::Sent));
+        let run = |body: &str, name: &str| {
+            command(
+                &config(&script(dir.path(), name, body), Path::new("/run/c")),
+                &refusal(),
+            )
+        };
         assert_eq!(
-            deliver(outcome(&suppressed), budget).await,
-            Ok(Outcome::Suppressed)
-        );
-        assert_eq!(
-            deliver(outcome(&silent), budget).await,
-            Err("notify helper gave no outcome")
+            deliver(
+                run("echo noise\necho outcome=sent next_at=7", "sent"),
+                budget
+            )
+            .await,
+            Ok(Answer {
+                outcome: Outcome::Sent,
+                next_at: 7
+            })
         );
         assert_eq!(
-            deliver(outcome(&failing), budget).await,
-            Err("notify helper reported a failure")
-        );
-        assert_eq!(deliver(outcome(&secret), budget).await, Ok(Outcome::Sent));
-        assert_eq!(
-            deliver(outcome(&slow), Duration::from_millis(200)).await,
-            Err("notify helper timed out")
+            deliver(run("echo outcome=sent", "old"), budget).await,
+            Err("helper gave no answer")
         );
         assert_eq!(
-            deliver(command(&config("/nonexistent/notify"), &refusal()), budget).await,
-            Err("notify helper could not start")
+            deliver(
+                run("echo outcome=sent next_at=7\nexit 1", "failing"),
+                budget
+            )
+            .await,
+            Err("helper reported a failure")
         );
         assert_eq!(
-            readiness(&config(&sent.to_string_lossy())),
-            Vec::<&str>::new()
+            deliver(
+                run(
+                    "if [ -n \"$CARGO_MANIFEST_DIR\" ]; then exit 3; fi\necho outcome=suppressed next_at=9",
+                    "inherit"
+                ),
+                budget
+            )
+            .await,
+            Ok(Answer {
+                outcome: Outcome::Suppressed,
+                next_at: 9
+            })
         );
         assert_eq!(
-            readiness(&AlarmConfig {
-                credential: "/nonexistent/credential".into(),
-                ..config("/nonexistent/notify")
-            }),
-            vec![
-                "notify_binary is not an executable file",
-                "credential is not readable"
-            ]
+            deliver(
+                run("sleep 5\necho outcome=sent next_at=7", "slow"),
+                Duration::from_millis(200)
+            )
+            .await,
+            Err("helper timed out")
         );
-        if let Some(dir) = sent.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+    }
+
+    #[tokio::test]
+    async fn an_unprepared_host_is_reported_not_ready() {
+        let dir = tempfile::tempdir().expect("dir");
+        let old_helper = script(dir.path(), "old", "exit 2");
+        let missing = readiness(&config(&old_helper, Path::new("/nonexistent/c"))).await;
+        assert!(
+            missing.contains(&"notify helper does not accept this config, credential and contract")
+        );
+        let missing = readiness(&config(
+            Path::new("/nonexistent/notify"),
+            Path::new("/run/c"),
+        ))
+        .await;
+        assert!(missing.contains(&"notify_binary is not a protected executable file"));
+        assert!(unready(&missing).is_some());
+        assert!(unready(&[]).is_none());
     }
 }

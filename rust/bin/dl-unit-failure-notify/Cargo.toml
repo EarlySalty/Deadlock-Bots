@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+dl-provider-refusal.workspace = true
 reqwest.workspace = true
 url.workspace = true
 serde.workspace = true

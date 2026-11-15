@@ -2,6 +2,7 @@
 Description=Deadlock Community-Punkte-Sync (Twitch-Punkte und Ledger in die zentrale DB)
 After=network-online.target
 Wants=network-online.target
+OnFailure=unit-failure-notify@%n.service
 
 [Service]
 Type=oneshot

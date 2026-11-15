@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use alarm::{Delivery, Refusal, RefusalAlarm, RefusalNotifier};
+pub use alarm::{
+    standing_refusals, Delivery, LedgerFailure, Refusal, RefusalAlarm, RefusalNotifier,
+};
 pub use anthropic_http::{parse_response, wire_request, AnthropicHttpBackend};
 pub use backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 pub use chat_backend::ChatProviderBackend;

@@ -218,11 +218,9 @@ async fn last_result<R: AsyncBufRead + Unpin>(
     }
 }
 
-fn mentions_limit(text: &str) -> bool {
+fn mentions(text: &str, needles: &[&str]) -> bool {
     let text = text.to_ascii_lowercase();
-    ["usage limit", "rate limit", "rate_limit", "limit reached"]
-        .iter()
-        .any(|needle| text.contains(needle))
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn served_model(usage: Option<&Map<String, Value>>, requested: &str) -> Option<String> {
@@ -248,14 +246,14 @@ fn usage(result: &Value) -> Usage {
 }
 
 fn result_failure(status: Option<u16>, text: &str) -> (FailureKind, &'static str) {
-    let overloaded = status == Some(529) || text.to_ascii_lowercase().contains("overloaded");
-    let limit_text = mentions_limit(text);
-    if overloaded {
+    if status == Some(529) || mentions(text, &["overloaded"]) {
         (FailureKind::Overloaded, "upstream_overloaded")
-    } else if limit_text {
+    } else if mentions(text, &["usage limit", "limit reached"]) {
         (FailureKind::Limit, "usage_limit")
     } else if status == Some(429) {
         (FailureKind::Limit, "http_429")
+    } else if mentions(text, &["rate limit", "rate_limit"]) {
+        (FailureKind::Limit, "rate_limit")
     } else if text.contains("output token maximum") {
         (FailureKind::InvalidOutput, "output_token_maximum")
     } else {
@@ -393,6 +391,10 @@ mod tests {
         assert_eq!(
             failure(500, "Claude AI usage limit reached"),
             Some((FailureKind::Limit, "usage_limit", Some(500)))
+        );
+        assert_eq!(
+            failure(500, "API Error: rate_limit_error"),
+            Some((FailureKind::Limit, "rate_limit", Some(500)))
         );
         assert_eq!(
             failure(400, "bad request"),

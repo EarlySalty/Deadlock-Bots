@@ -1310,6 +1310,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dl-bridges",
+ "dl-provider-refusal",
  "fireworks-model-selection",
  "reqwest",
  "serde",
@@ -1336,6 +1337,7 @@ dependencies = [
  "dl-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -1763,6 +1765,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-provider-refusal"
+version = "0.1.0"
+dependencies = [
+ "nix",
+]
+
+[[package]]
 name = "dl-repostats"
 version = "0.1.0"
 dependencies = [
@@ -1870,6 +1879,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dl-provider-refusal",
  "fs2",
  "hex",
  "libc",

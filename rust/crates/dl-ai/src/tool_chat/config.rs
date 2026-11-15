@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::upstream::safe_code;
+use crate::upstream::{safe_code, HELPER_NETWORK_BOUND_SECS};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,8 +23,48 @@ pub struct AlarmConfig {
     pub notify_binary: PathBuf,
     pub notify_config: PathBuf,
     pub credential: PathBuf,
-    pub refusal_streak: NonZeroU32,
-    pub notify_timeout_secs: NonZeroU64,
+    pub standing_after_secs: u64,
+    pub scan_interval_secs: u64,
+    pub notify_timeout_secs: u64,
+}
+
+impl AlarmConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if [&self.notify_binary, &self.notify_config, &self.credential]
+            .iter()
+            .any(|path| !path.is_absolute())
+        {
+            return Err(ConfigError::Invalid("alarm paths must be absolute".into()));
+        }
+        if !(60..=3_600).contains(&self.standing_after_secs) {
+            return Err(ConfigError::Invalid(
+                "alarm standing_after_secs must be 60 to 3600".into(),
+            ));
+        }
+        if !(1..=self.standing_after_secs).contains(&self.scan_interval_secs) {
+            return Err(ConfigError::Invalid(
+                "alarm scan_interval_secs must be 1 to standing_after_secs".into(),
+            ));
+        }
+        if self.notify_timeout_secs <= HELPER_NETWORK_BOUND_SECS || self.notify_timeout_secs > 300 {
+            return Err(ConfigError::Invalid(format!(
+                "alarm notify_timeout_secs must exceed {HELPER_NETWORK_BOUND_SECS} and stay up to 300"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn standing_after(&self) -> Duration {
+        Duration::from_secs(self.standing_after_secs)
+    }
+
+    pub fn scan_interval(&self) -> Duration {
+        Duration::from_secs(self.scan_interval_secs)
+    }
+
+    pub fn notify_timeout(&self) -> Duration {
+        Duration::from_secs(self.notify_timeout_secs)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -141,17 +180,7 @@ impl GatewayConfig {
         if self.slots.is_empty() {
             return invalid("at least one slot is required".into());
         }
-        let alarm = &self.alarm;
-        if [
-            &alarm.notify_binary,
-            &alarm.notify_config,
-            &alarm.credential,
-        ]
-        .iter()
-        .any(|path| !path.is_absolute())
-        {
-            return invalid("alarm paths must be absolute".into());
-        }
+        self.alarm.validate()?;
         for (name, slot) in &self.slots {
             if !safe_code(name) {
                 return invalid(format!("slot name {name} is invalid"));
@@ -283,6 +312,7 @@ fn valid_model(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     const SAMPLE: &str = r#"
 listen = "127.0.0.1:18790"
@@ -314,7 +344,8 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
 notify_binary = "/bin/notify"
 notify_config = "/etc/notify.json"
 credential = "/run/credential"
-refusal_streak = 5
+standing_after_secs = 600
+scan_interval_secs = 60
 notify_timeout_secs = 75
 "#;
 
@@ -344,10 +375,12 @@ notify_timeout_secs = 75
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 0"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 9"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\ndeadline_ms = 0"),
-            SAMPLE.replace("refusal_streak = 5", "refusal_streak = 0"),
+            SAMPLE.replace("standing_after_secs = 600", "standing_after_secs = 59"),
+            SAMPLE.replace("scan_interval_secs = 60", "scan_interval_secs = 601"),
+            SAMPLE.replace("scan_interval_secs = 60", "scan_interval_secs = 0"),
             SAMPLE.replace("\"/bin/notify\"", "\"notify\""),
-            SAMPLE.replace("notify_timeout_secs = 75", "notify_timeout_secs = 0"),
-            SAMPLE.replace("refusal_streak = 5\n", ""),
+            SAMPLE.replace("notify_timeout_secs = 75", "notify_timeout_secs = 35"),
+            SAMPLE.replace("standing_after_secs = 600\n", ""),
             SAMPLE
                 .split("\n[alarm]")
                 .next()
@@ -394,5 +427,14 @@ notify_timeout_secs = 75
             );
             assert!(slot.deadline_ms.is_some_and(|ms| ms < 300_000), "{name}");
         }
+        let template = include_str!("../../../../../service/systemd/unit-failure-notify@.service");
+        let source = template
+            .lines()
+            .find_map(|line| line.strip_prefix("LoadCredential=infisical-token:"))
+            .map(|path| path.replace("%h", "/home/nathanael"));
+        assert_eq!(
+            source.as_deref().map(Path::new),
+            Some(config.alarm.credential.as_path())
+        );
     }
 }

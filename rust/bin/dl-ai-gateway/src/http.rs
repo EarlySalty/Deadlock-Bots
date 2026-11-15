@@ -127,11 +127,8 @@ fn into_request(wire: WireRequest) -> Result<ToolChatRequest, &'static str> {
 fn failure_response(failure: RouteError) -> Response {
     match &failure {
         RouteError::UnknownSlot => invalid("unknown slot"),
-        RouteError::Failed { .. } => {
-            let last = failure
-                .last()
-                .map_or(FailureKind::Unavailable, |last| last.kind);
-            let (status, kind) = match last {
+        RouteError::Failed { last, .. } => {
+            let (status, kind) = match last.1.kind {
                 FailureKind::Limit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
                 FailureKind::Busy | FailureKind::Overloaded => (
                     StatusCode::from_u16(529).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),

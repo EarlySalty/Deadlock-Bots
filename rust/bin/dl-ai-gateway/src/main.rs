@@ -28,14 +28,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = GatewayConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
+    let missing = alarm::readiness(&config.alarm).await;
     if cli.check_config {
         println!("config ok: {} slots", config.slots.len());
-        for cause in alarm::readiness(&config.alarm) {
-            println!("alarm not ready: {cause}");
-        }
+    }
+    if let Some(unready) = alarm::unready(&missing) {
+        return Err(unready);
+    }
+    if cli.check_config {
+        println!("alarm ready");
         return Ok(());
     }
-    alarm::report_readiness(&config.alarm);
     dl_core::token_snapshot::load(&cli.config).map_err(anyhow::Error::msg)?;
     let dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
         .context("central database access missing from the private snapshot")?;
@@ -51,23 +54,31 @@ async fn main() -> Result<()> {
                 .or_else(|| std::env::var(key).ok())
         },
         Arc::new(PostgresLedger),
-    )?
-    .with_alarm(Arc::new(RefusalAlarm::new(
+    )?;
+    let refusals = Arc::new(RefusalAlarm::new(
         Arc::new(alarm::ProcessNotifier::new(config.alarm.clone())),
-        config.alarm.refusal_streak,
-    )));
+        config.alarm.standing_after_secs,
+    ));
+    alarm::scan(&refusals, config.alarm.scan_interval())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("first provider refusal scan")?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding {}", config.listen))?;
     tracing::info!(listen = %config.listen, slots = ?router.slot_names(), "AI_GATEWAY_LISTENING");
-    axum::serve(
-        listener,
-        http::app(Arc::new(router), config.max_request_bytes),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await
-    .context("serving")?;
-    Ok(())
+    let serve = async {
+        axum::serve(
+            listener,
+            http::app(Arc::new(router), config.max_request_bytes),
+        )
+        .with_graceful_shutdown(shutdown())
+        .await
+    };
+    tokio::select! {
+        served = serve => served.context("serving"),
+        failure = alarm::watch(refusals, config.alarm.clone()) => Err(failure),
+    }
 }
 
 async fn shutdown() {

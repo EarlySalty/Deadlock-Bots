@@ -38,7 +38,8 @@ impl FailureKind {
         match self {
             Self::Limit => "rate_limited",
             Self::Unavailable => "transport",
-            Self::Busy | Self::Overloaded => "busy",
+            Self::Busy => "busy",
+            Self::Overloaded => "overloaded",
             Self::Timeout => "timeout",
             Self::InvalidRequest => "invalid_request",
             Self::InvalidOutput => "invalid_output",

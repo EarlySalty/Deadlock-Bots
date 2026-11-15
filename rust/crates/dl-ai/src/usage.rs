@@ -109,6 +109,48 @@ pub async fn replay_pending() -> Result<usize, sqlx::Error> {
     Ok(unresolved_count)
 }
 
+const RECENT_FAILURES: &str = "WITH settled AS (SELECT provider,attempt_state,error_code,error_reason,http_status,finished_at FROM public.llm_usage WHERE project='Deadlock-Bots' AND ts >= $1 AND attempt_state IN ('succeeded','failed') AND finished_at IS NOT NULL), recovered AS (SELECT provider,max(finished_at) AS at FROM settled WHERE attempt_state='succeeded' GROUP BY provider) SELECT f.provider,f.error_code,f.error_reason,f.http_status,extract(epoch FROM min(f.finished_at))::bigint AS first_at,extract(epoch FROM max(f.finished_at))::bigint AS last_at FROM settled f LEFT JOIN recovered r ON r.provider=f.provider WHERE f.attempt_state='failed' AND (r.at IS NULL OR f.finished_at > r.at) GROUP BY f.provider,f.error_code,f.error_reason,f.http_status ORDER BY last_at DESC LIMIT $2";
+
+type FailureRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    i64,
+    i64,
+);
+
+pub async fn recent_failures(
+    lookback_secs: i64,
+    limit: i64,
+) -> Result<Vec<crate::tool_chat::LedgerFailure>, sqlx::Error> {
+    let Some((pool, _)) = LEDGER.get() else {
+        return Err(sqlx::Error::PoolClosed);
+    };
+    let since = (Utc::now() - chrono::Duration::seconds(lookback_secs))
+        .to_rfc3339_opts(SecondsFormat::Secs, false);
+    let rows: Vec<FailureRow> = sqlx::query_as(RECENT_FAILURES)
+        .bind(since)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(provider, error_code, error_reason, http_status, first_at, last_at)| {
+                crate::tool_chat::LedgerFailure {
+                    provider,
+                    error_code,
+                    error_reason,
+                    http_status,
+                    first_at,
+                    last_at,
+                }
+            },
+        )
+        .collect())
+}
+
 fn recovery_from_journal(line: &str) -> Option<Completion> {
     let record: Value = serde_json::from_str(line).ok()?;
     let raw_message = record["MESSAGE"].as_str()?;
@@ -280,6 +322,10 @@ impl Attempt {
                 completion.tokens_in = count(body, "prompt_tokens");
                 completion.tokens_out = count(body, "completion_tokens");
                 completion.total = count(body, "total_tokens");
+                completion.cache_read_tokens = body["usage"]["prompt_tokens_details"]
+                    ["cached_tokens"]
+                    .as_i64()
+                    .filter(|value| *value >= 0);
                 if completion.request_id.is_none() {
                     completion.request_id = body["id"]
                         .as_str()
@@ -415,6 +461,7 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
                     | "invalid_output"
                     | "rate_limited"
                     | "busy"
+                    | "overloaded"
                     | "invalid_request"
             )
         })
@@ -445,8 +492,31 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_chat::{Delivery, Refusal, RefusalAlarm, RefusalNotifier};
     use serde_json::json;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type AttemptRow = (String, Option<i64>, Option<i32>, Option<String>);
+    type CacheRow = (
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+
+    struct Counting(AtomicUsize);
+
+    impl RefusalNotifier for Counting {
+        fn notify(&self, refusal: Refusal, delivery: Delivery) {
+            assert_eq!(refusal.reason, "billing");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            drop(delivery);
+        }
+    }
 
     #[test]
     fn unbekannte_zaehler_bleiben_unbekannt_und_ids_enthalten_keine_inhalte() {
@@ -734,7 +804,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let attempts: Vec<(String, Option<i64>, Option<i32>, Option<String>)> = sqlx::query_as("SELECT attempt_state,total,http_status,error_reason FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
+        let attempts: Vec<AttemptRow> = sqlx::query_as("SELECT attempt_state,total,http_status,error_reason FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(
             attempts,
@@ -785,7 +855,7 @@ mod tests {
                 ..CallOutcome::default()
             })
             .await;
-        let rows: Vec<(i64, Option<String>, Option<String>, Option<i32>, Option<i64>, Option<i64>, Option<i64>)> =
+        let rows: Vec<CacheRow> =
             sqlx::query_as("SELECT id,error_code,error_reason,http_status,tokens_in,cache_read_tokens,cache_write_tokens FROM public.llm_usage WHERE id IN ($1,$2,$3) ORDER BY id")
                 .bind(refused_id)
                 .bind(served_id)
@@ -825,6 +895,44 @@ mod tests {
                 ),
             ]
         );
+        for (provider, reason, status) in [
+            ("anthropic_api", "billing", 400),
+            ("claude_plan", "http_429", 429),
+        ] {
+            Attempt::begin_call(provider, "brain_answer", "fixture-model")
+                .await
+                .unwrap()
+                .finish_call(CallOutcome {
+                    error_code: Some("rate_limited"),
+                    error_reason: Some(reason),
+                    http_status: Some(status),
+                    ..CallOutcome::default()
+                })
+                .await;
+        }
+        let mut failures: Vec<(String, Option<String>, Option<i32>)> = recent_failures(3_600, 256)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.provider == "anthropic_api" || row.provider == "claude_plan")
+            .map(|row| (row.provider, row.error_reason, row.http_status))
+            .collect();
+        failures.sort();
+        assert_eq!(
+            failures,
+            vec![
+                ("anthropic_api".into(), Some("billing".into()), Some(400)),
+                ("claude_plan".into(), Some("http_429".into()), Some(429)),
+            ],
+            "only refusals after the last success of a provider count"
+        );
+        let counting = Arc::new(Counting(AtomicUsize::new(0)));
+        let alarm = RefusalAlarm::new(counting.clone(), 600);
+        let rows = recent_failures(3_600, 256).await.unwrap();
+        let now = Utc::now().timestamp();
+        alarm.observe(&rows, now);
+        alarm.observe(&rows, now + 60);
+        assert_eq!(counting.0.load(Ordering::SeqCst), 1);
         sqlx::query("DROP TABLE public.llm_usage")
             .execute(&pool)
             .await

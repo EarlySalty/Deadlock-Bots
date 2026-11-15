@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
-use crate::upstream::status_reason;
+use crate::upstream::{billing_status, status_reason};
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError};
 
 pub struct ChatProviderBackend {
@@ -24,15 +24,17 @@ impl ChatProviderBackend {
 }
 
 fn provider_error(error: ChatProviderError) -> BackendError {
-    let (kind, fallback) = match error {
-        ChatProviderError::Timeout => (FailureKind::Timeout, "provider_timeout"),
-        ChatProviderError::RateLimit => (FailureKind::Limit, "provider_rate_limit"),
-        ChatProviderError::Auth(_) => (FailureKind::Unavailable, "provider_auth"),
-        ChatProviderError::Provider(_) => (FailureKind::Unavailable, "provider_error"),
-    };
-    match error.upstream_status() {
-        Some(status) => BackendError::upstream(kind, status_reason(status), status),
-        None => BackendError::new(kind, fallback),
+    match (&error, error.upstream_status()) {
+        (ChatProviderError::Timeout, _) => {
+            BackendError::new(FailureKind::Timeout, "provider_timeout")
+        }
+        (_, Some(status)) if status == 429 || billing_status(status) => {
+            BackendError::upstream(FailureKind::Limit, status_reason(status), status)
+        }
+        (_, Some(status)) => {
+            BackendError::upstream(FailureKind::Unavailable, status_reason(status), status)
+        }
+        (_, None) => BackendError::new(FailureKind::Unavailable, "provider_error"),
     }
 }
 
@@ -166,7 +168,7 @@ mod tests {
             mapped(ChatProviderError::Provider(crate::anbieter_hinweis(
                 412, "{}"
             ))),
-            (FailureKind::Unavailable, "http_status", Some(412))
+            (FailureKind::Limit, "billing", Some(412))
         );
         assert_eq!(
             mapped(ChatProviderError::Provider(crate::anbieter_hinweis(

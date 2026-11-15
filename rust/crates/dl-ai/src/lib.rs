@@ -18,7 +18,7 @@ mod selected_chat;
 pub mod tool_chat;
 mod transparency;
 mod transparency_log;
-pub mod upstream;
+pub use dl_provider_refusal as upstream;
 pub mod usage;
 pub use chat_provider::*;
 pub use chat_text::*;

@@ -408,7 +408,7 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 2]) -> Result<(
         fs::write(
             stage.0.join("BUILD-PROVENANCE.toml"),
             format!(
-                "source_sha = \"{sha}\"\nrebuilt_binaries = [\"dl-bot\", \"dl-ai-gateway\"]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot und KI-Gateway aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration aus dem Repository; keine Migrationsänderung\"\n",
+                "source_sha = \"{sha}\"\nrebuilt_binaries = [\"dl-bot\", \"dl-ai-gateway\"]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot und KI-Gateway aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration aus dem Repository; dieser Release wendet keine Migrationen an, Schemaänderungen laufen getrennt über dl-central-migrate\"\n",
                 artifacts[0].1, artifacts[1].1
             ),
         )?;

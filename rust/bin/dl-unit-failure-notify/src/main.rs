@@ -4,13 +4,14 @@ mod state;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use dl_provider_refusal::{safe_code, Answer, Class, Outcome, RefusalKind, CONTRACT, GATEWAY_UNIT};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -38,6 +39,8 @@ struct Args {
     status: Option<u16>,
     #[arg(long, requires = "event_mode")]
     event_id: Option<String>,
+    #[arg(long, conflicts_with_all = ["install", "event_mode"])]
+    contract: bool,
     /// Einmaliger, klar gekennzeichneter Test ohne Discord-Drosselung.
     #[arg(long, requires = "devfeed_429")]
     notification_test: bool,
@@ -52,24 +55,18 @@ struct Args {
 
 const DEVFEED_UNIT: &str = "deadlock-devfeed.service";
 const BOTLOGS_CHANNEL: u64 = 1_374_364_800_817_303_632;
-const GATEWAY_UNIT: &str = "dl-ai-gateway.service";
-
-const MAX_CODE_LEN: usize = 64;
-const REFUSAL_KINDS: [&str; 3] = ["limit", "overloaded", "unavailable"];
 
 struct RefusalEvent<'a> {
     provider: &'a str,
-    kind: &'a str,
+    kind: RefusalKind,
     reason: &'a str,
     status: Option<u16>,
 }
 
-fn valid_code(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_CODE_LEN
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+impl RefusalEvent<'_> {
+    fn class(&self) -> Class {
+        Class::of(self.reason)
+    }
 }
 
 fn validate_refusal_event<'a>(
@@ -83,17 +80,17 @@ fn validate_refusal_event<'a>(
     let provider = args
         .provider
         .as_deref()
-        .filter(|provider| valid_code(provider))
+        .filter(|provider| safe_code(provider))
         .context("Anbietername ist ungültig.")?;
     let kind = args
         .kind
         .as_deref()
-        .filter(|kind| REFUSAL_KINDS.contains(kind))
+        .and_then(RefusalKind::parse)
         .context("Art der Ablehnung ist ungültig.")?;
     let reason = args
         .reason
         .as_deref()
-        .filter(|reason| valid_code(reason))
+        .filter(|reason| safe_code(reason))
         .context("Ablehnungsgrund ist ungültig.")?;
     Ok(RefusalEvent {
         provider,
@@ -104,11 +101,19 @@ fn validate_refusal_event<'a>(
 }
 
 fn refusal_cause(event: &RefusalEvent<'_>) -> &'static str {
-    match (event.reason, event.kind) {
-        ("billing", _) => "Das Guthaben oder das Ausgabenlimit beim Anbieter ist aufgebraucht.",
-        (_, "limit") => "Der Anbieter verweigert weitere Anfragen wegen eines Limits.",
-        (_, "overloaded") => "Der Anbieter ist überlastet und lehnt Anfragen ab.",
-        _ => "Der Anbieter lehnt Anfragen ab oder antwortet nur mit Fehlern.",
+    match (event.class(), event.kind) {
+        (Class::Billing, _) => {
+            "Das Guthaben oder das Ausgabenlimit beim Anbieter ist aufgebraucht."
+        }
+        (Class::Other, RefusalKind::Limit) => {
+            "Der Anbieter verweigert weitere Anfragen wegen eines Limits."
+        }
+        (Class::Other, RefusalKind::Overloaded) => {
+            "Der Anbieter ist überlastet und lehnt Anfragen ab."
+        }
+        (Class::Other, RefusalKind::Unavailable) => {
+            "Der Anbieter lehnt Anfragen ab oder antwortet nur mit Fehlern."
+        }
     }
 }
 
@@ -125,10 +130,12 @@ fn refusal_content(host: &str, event: &RefusalEvent<'_>) -> String {
     )
 }
 
-fn refusal_outcome(refusal: bool, outcome: &str) {
+fn refusal_answer(refusal: bool, outcome: Outcome, state: &state::State) -> Result<()> {
     if refusal {
-        println!("outcome={outcome}");
+        let next_at = state.next_eligible(now()?);
+        println!("{}", Answer { outcome, next_at }.line());
     }
+    Ok(())
 }
 
 fn valid_event_id(id: &str) -> bool {
@@ -236,41 +243,8 @@ fn config(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-/// Dieselbe Eigentümer-/Sticky-Verzeichnisregel wie der vorhandene UDS-Client,
-/// hier für vertrauenswürdige Betriebsdateien und den Installationspfad.
 fn protected_path(path: &Path, directory: bool) -> Result<()> {
-    if !path.is_absolute() {
-        bail!("Betriebspfad muss absolut sein.");
-    }
-    // SAFETY: geteuid hat keine Zeigerargumente und verändert keinen Zustand.
-    let uid = unsafe { libc::geteuid() };
-    let components: Vec<_> = path.components().collect();
-    let mut current = PathBuf::new();
-    let mut after_sticky = false;
-    for (index, component) in components.iter().enumerate() {
-        if !matches!(component, Component::RootDir | Component::Normal(_)) {
-            bail!("Betriebspfad ist nicht geschützt.");
-        }
-        current.push(component);
-        let metadata = fs::symlink_metadata(&current)
-            .map_err(|_| anyhow::anyhow!("Betriebspfad ist nicht verfügbar."))?;
-        let last = index + 1 == components.len();
-        if ![0, uid].contains(&metadata.uid())
-            || metadata.file_type().is_symlink()
-            || (last && !directory && !metadata.is_file())
-            || ((!last || directory) && !metadata.is_dir())
-            || (after_sticky && (metadata.uid() != uid || metadata.mode() & 0o077 != 0))
-        {
-            bail!("Betriebspfad hat keine vertrauenswürdigen Eigentümer oder Rechte.");
-        }
-        after_sticky = metadata.mode() & 0o022 != 0;
-        if after_sticky
-            && !(metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o1000 != 0 && !last)
-        {
-            bail!("Betriebspfad darf nicht gruppen- oder weltbeschreibbar sein.");
-        }
-    }
-    Ok(())
+    dl_provider_refusal::protected_path(path, directory).map_err(|reason| anyhow::anyhow!(reason))
 }
 
 fn valid_unit(unit: &str) -> bool {
@@ -354,6 +328,13 @@ async fn run(args: Args) -> Result<()> {
     if args.install {
         return install(&args);
     }
+    if args.contract {
+        if let Some(credential) = args.credential.as_deref() {
+            protected_path(credential, false)?;
+        }
+        println!("{CONTRACT}");
+        return Ok(());
+    }
     let unit = args
         .unit
         .as_deref()
@@ -366,16 +347,12 @@ async fn run(args: Args) -> Result<()> {
     } else {
         None
     };
-    let invocation = if let Some(event) = &refusal {
+    let invocation = if refusal.is_some() {
         args.event_id
             .as_deref()
             .filter(|id| valid_event_id(id))
-            .context("Ereignis-ID der Anbieter-Ablehnung ist ungültig.")?;
-        format!(
-            "{}-{}",
-            event.reason,
-            args.event_id.as_deref().unwrap_or_default()
-        )
+            .context("Ereignis-ID der Anbieter-Ablehnung ist ungültig.")?
+            .to_owned()
     } else if args.devfeed_429 {
         let id = validate_devfeed_event(unit, config.channel_id, args.event_id.as_deref())?;
         if args.notification_test {
@@ -390,7 +367,11 @@ async fn run(args: Args) -> Result<()> {
         journal::validate_invocation(&id)?.to_owned()
     };
     let state_key = if let Some(event) = &refusal {
-        format!("{unit}:provider-refusal:{}", event.provider)
+        format!(
+            "{unit}:provider-refusal:{}:{}",
+            event.provider,
+            event.class().as_str()
+        )
     } else if args.notification_test {
         format!("{unit}:devfeed-429-test")
     } else if args.devfeed_429 {
@@ -413,18 +394,24 @@ async fn run(args: Args) -> Result<()> {
     store.save(&state)?;
     if state.unreported == 0 && state.pending.is_none() {
         println!("Diese Dienstinstanz wurde bereits gemeldet.");
-        refusal_outcome(refusal.is_some(), "suppressed");
-        return Ok(());
+        return refusal_answer(refusal.is_some(), Outcome::Suppressed, &state);
     }
     if !state.eligible(now()?) {
         println!("Meldung entprellt; Wiederholung wurde für die nächste Meldung gezählt.");
-        refusal_outcome(refusal.is_some(), "suppressed");
-        return Ok(());
+        return refusal_answer(refusal.is_some(), Outcome::Suppressed, &state);
     }
-    if state.pending.is_none() {
+    let refusal_text = refusal
+        .as_ref()
+        .map(|event| refusal_content(&config.host_label, event));
+    let stale = match (&state.pending, &refusal_text) {
+        (Some(pending), Some(text)) => &pending.content != text,
+        (None, _) => true,
+        (Some(_), None) => false,
+    };
+    if stale {
         let repeats = state.unreported.saturating_sub(1);
-        let content = if let Some(event) = &refusal {
-            refusal_content(&config.host_label, event)
+        let content = if let Some(text) = refusal_text {
+            text
         } else if args.devfeed_429 {
             devfeed_content(args.notification_test, repeats)
         } else {
@@ -458,8 +445,7 @@ async fn run(args: Args) -> Result<()> {
     // verlorene ACKs dürfen nach Broker-TTL/Neustart keinen Replay-Sturm erzeugen.
     let attempt_time = now()?;
     if !state.eligible(attempt_time) {
-        refusal_outcome(refusal.is_some(), "suppressed");
-        return Ok(());
+        return refusal_answer(refusal.is_some(), Outcome::Suppressed, &state);
     }
     state.reserve_attempt(attempt_time);
     store.save(&state)?;
@@ -472,8 +458,7 @@ async fn run(args: Args) -> Result<()> {
     state.confirm(now()?);
     store.save(&state)?;
     println!("Ausfallmeldung wurde bestätigt und der Meldezustand gespeichert.");
-    refusal_outcome(refusal.is_some(), "sent");
-    Ok(())
+    refusal_answer(refusal.is_some(), Outcome::Sent, &state)
 }
 
 fn safe_cause(diagnostic: Result<&'static str>) -> &'static str {
@@ -492,6 +477,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dl_provider_refusal::MAX_CODE_LEN;
 
     #[test]
     fn devfeed_mode_is_confined_to_existing_feed_and_botlogs() {
@@ -723,6 +709,7 @@ mod tests {
             reason: None,
             status: None,
             event_id: None,
+            contract: false,
             notification_test: false,
             install: true,
             unit_directory: Some(root.path().to_owned()),

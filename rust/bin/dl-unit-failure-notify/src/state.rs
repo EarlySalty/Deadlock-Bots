@@ -8,8 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DAY: u64 = 86_400;
-const WEEK: u64 = 7 * DAY;
+use dl_provider_refusal::{DAY_SECS as DAY, WEEK_SECS as WEEK};
+
+const MAX_STATE_BYTES: u64 = 32_768;
+const MAX_RECENT_INVOCATIONS: usize = 256;
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +49,7 @@ impl State {
             .iter()
             .any(|known| known == invocation)
         {
-            if self.recent_invocations.len() >= 256 {
+            if self.recent_invocations.len() >= MAX_RECENT_INVOCATIONS {
                 self.recent_invocations.remove(0);
             }
             self.recent_invocations.push(invocation.to_owned());
@@ -84,6 +86,20 @@ impl State {
                 .retain(|time| now.saturating_sub(*time) < WEEK);
             self.confirmed.push(now);
         }
+    }
+
+    pub fn next_eligible(&self, now: u64) -> u64 {
+        let budget = self
+            .confirmed
+            .iter()
+            .chain(self.uncertain_attempts.iter())
+            .flat_map(|time| [time.saturating_add(DAY), time.saturating_add(WEEK)]);
+        [now, self.legacy_not_before]
+            .into_iter()
+            .chain(budget)
+            .filter(|time| *time >= now && self.eligible(*time))
+            .min()
+            .unwrap_or(now.saturating_add(WEEK))
     }
 
     pub fn reserve_attempt(&mut self, now: u64) {
@@ -143,7 +159,7 @@ impl Store {
             .open(&self.path)
         {
             Ok(file) => {
-                if file.metadata()?.len() > 32_768 {
+                if file.metadata()?.len() > MAX_STATE_BYTES {
                     bail!("Meldezustand ist zu groß.");
                 }
                 let mut state: State = serde_json::from_reader(file)
@@ -287,6 +303,41 @@ mod tests {
         assert!(!state.eligible(1_000 + 2 * DAY));
         assert!(state.eligible(1_000 + WEEK));
     }
+    #[test]
+    fn full_invocation_window_of_longest_event_ids_stays_loadable() {
+        let mut state = State {
+            confirmed: vec![1, 2],
+            uncertain_attempts: vec![3, 4],
+            pending: Some(Pending {
+                key: "k".repeat(80),
+                content: "ä".repeat(1_024),
+                included: u64::MAX,
+            }),
+            ..State::default()
+        };
+        for index in 0..=MAX_RECENT_INVOCATIONS {
+            state.observe(&format!("{index:0>64}"));
+        }
+        let bytes = serde_json::to_vec(&state).expect("serialized");
+        assert_eq!(state.recent_invocations.len(), MAX_RECENT_INVOCATIONS);
+        assert!((bytes.len() as u64) < MAX_STATE_BYTES, "{}", bytes.len());
+    }
+
+    #[test]
+    fn next_eligible_is_the_first_moment_the_budget_allows_a_send() {
+        let state = State {
+            confirmed: vec![1_000, 1_000 + DAY],
+            ..State::default()
+        };
+        assert_eq!(state.next_eligible(1_000 + DAY), 1_000 + WEEK);
+        assert_eq!(State::default().next_eligible(5), 5);
+        let rolled_back = State {
+            confirmed: vec![9_000],
+            ..State::default()
+        };
+        assert_eq!(rolled_back.next_eligible(10), 9_000 + DAY);
+    }
+
     #[test]
     fn duplicate_invocation_is_counted_once_and_confirmation_preserves_newer_counts() {
         let mut state = State::default();
