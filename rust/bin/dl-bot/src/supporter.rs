@@ -279,19 +279,22 @@ impl SupporterSync {
         let changed = next != previous;
         match outcome {
             Ok(FundingRefresh::Skipped(reason)) if changed => {
-                tracing::warn!(reason, "Server-Unterstützer: Monatsziel nicht aktualisiert")
+                tracing::warn!(
+                    reason,
+                    "Server-Unterstützer: Monatsstand nicht aktualisiert"
+                )
             }
             Err(error) if changed => {
-                tracing::warn!(%error, "Server-Unterstützer: Monatsziel nicht abrufbar")
+                tracing::warn!(%error, "Server-Unterstützer: Monatsstand nicht abrufbar")
             }
             Ok(outcome) => {
                 if changed {
-                    tracing::info!(?outcome, "Server-Unterstützer: Monatsziel wieder aktuell");
+                    tracing::info!(?outcome, "Server-Unterstützer: Monatsstand wieder aktuell");
                 }
-                tracing::debug!(?outcome, "Server-Unterstützer: Monatsziel geprüft");
+                tracing::debug!(?outcome, "Server-Unterstützer: Monatsstand geprüft");
             }
             Err(error) => {
-                tracing::debug!(%error, "Server-Unterstützer: Monatsziel weiter nicht abrufbar")
+                tracing::debug!(%error, "Server-Unterstützer: Monatsstand weiter nicht abrufbar")
             }
         }
         next

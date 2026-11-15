@@ -186,7 +186,7 @@ mod tests {
         Json(payload): Json<Value>,
     ) -> axum::response::Response {
         if headers
-            .get("X-Internal-Token")
+            .get(dl_core::internal_tokens::HEADER)
             .and_then(|v| v.to_str().ok())
             != Some("fixture-token")
         {
@@ -222,7 +222,7 @@ mod tests {
         headers: HeaderMap,
     ) -> axum::response::Response {
         if headers
-            .get("X-Internal-Token")
+            .get(dl_core::internal_tokens::HEADER)
             .and_then(|v| v.to_str().ok())
             != Some("fixture-token")
         {
@@ -369,7 +369,8 @@ mod tests {
         let client = TwitchApiClient::try_new(
             format!("http://{address}"),
             "fixture-token",
-            std::time::Duration::from_millis(100),
+            dl_bridges::http::HttpLimits::default()
+                .with_request(std::time::Duration::from_millis(100)),
             false,
         )
         .expect("Scout-Fixture");

@@ -434,7 +434,7 @@ async fn run_once(
     let client = dl_bridges::http::internal_client(limits)?;
     let entries: Vec<InviteEntry> = client
         .get(&url)
-        .header("X-Internal-Token", token)
+        .header(dl_core::internal_tokens::HEADER, token)
         .send()
         .await?
         .error_for_status()?

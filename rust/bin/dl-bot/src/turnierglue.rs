@@ -19,7 +19,7 @@ const MOD_ROLE_ID: u64 = 1_337_518_124_647_579_661;
 const COMMUNITY_MOD_ROLE_ID: u64 = 1_401_891_955_931_222_110;
 const GOLD: u64 = 0xC8A86B;
 const COMPONENTS_V2: u64 = 32_768;
-const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
+const INTERNAL_TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 const REVISION_BUSY: &str =
     "Gerade wird schon eine Änderung an diesem Vorschlag erstellt. Versuch es bitte gleich noch einmal.";
 const PREFIX: &str = "turnier-proposal:";
@@ -298,8 +298,7 @@ impl TurnierProposalService {
         lookup: impl Fn(&str) -> Option<String>,
         limits: dl_bridges::http::HttpLimits,
     ) -> Result<Self, dl_bridges::http::HttpSetupError> {
-        let base_url = dl_core::internal_tokens::present(&lookup, "TURNIER_INTERNAL_API_BASE_URL")
-            .unwrap_or_else(|| "http://127.0.0.1:8900".to_string());
+        let base_url = dl_core::internal_tokens::turnier_api_base(&lookup);
         let token = dl_core::internal_tokens::turnier_api_token(&lookup);
         Ok(Self {
             client: TurnierClient::new(base_url, token, limits)?,

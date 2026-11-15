@@ -13,13 +13,32 @@ use reqwest::{Client, Url};
 use crate::BrainError;
 
 pub const IMAGE_ONLY_QUESTION: &str = "Was sagst du zu meinem Bild?";
-const MAX_DECODE_EDGE: u32 = 12_000;
-const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
-const MIN_EDGE: u32 = 384;
-pub const IMAGE_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=MAX_QUERY_IMAGES;
-pub const IMAGE_DOWNLOAD_BYTES_RANGE: std::ops::RangeInclusive<u64> = 1..=MAX_DECODE_ALLOC;
+use dl_core::runtime_config::{
+    BRAIN_IMAGE_COUNT_RANGE, BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE, BRAIN_IMAGE_EDGE_RANGE,
+    BRAIN_IMAGE_JPEG_QUALITY_RANGE,
+};
+
+const MAX_DECODE_EDGE: u32 = narrow_u32(*BRAIN_IMAGE_EDGE_RANGE.end());
+const MAX_DECODE_ALLOC: u64 = *BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE.end();
+const MIN_EDGE: u32 = narrow_u32(*BRAIN_IMAGE_EDGE_RANGE.start());
+pub const IMAGE_COUNT_RANGE: std::ops::RangeInclusive<usize> = BRAIN_IMAGE_COUNT_RANGE;
+pub const IMAGE_DOWNLOAD_BYTES_RANGE: std::ops::RangeInclusive<u64> =
+    BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE;
 pub const IMAGE_EDGE_RANGE: std::ops::RangeInclusive<u32> = MIN_EDGE..=MAX_DECODE_EDGE;
-pub const IMAGE_JPEG_QUALITY_RANGE: std::ops::RangeInclusive<u8> = 40..=95;
+pub const IMAGE_JPEG_QUALITY_RANGE: std::ops::RangeInclusive<u8> =
+    narrow_u8(*BRAIN_IMAGE_JPEG_QUALITY_RANGE.start())
+        ..=narrow_u8(*BRAIN_IMAGE_JPEG_QUALITY_RANGE.end());
+const _: () = assert!(*BRAIN_IMAGE_COUNT_RANGE.end() == MAX_QUERY_IMAGES);
+
+const fn narrow_u32(value: u64) -> u32 {
+    assert!(value <= u32::MAX as u64);
+    value as u32
+}
+
+const fn narrow_u8(value: u64) -> u8 {
+    assert!(value <= u8::MAX as u64);
+    value as u8
+}
 const MAX_REMEMBERED: usize = 512;
 const MAX_REMEMBERED_BYTES: usize = 64 * 1024 * 1024;
 

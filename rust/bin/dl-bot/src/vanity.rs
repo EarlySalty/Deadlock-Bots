@@ -370,6 +370,11 @@ async fn upsert_directory_member(
         .as_deref()
         .and_then(parse_discord_timestamp);
     let account_created_at = discord_snowflake_created_at(user_id_u64);
+    let mut tx = pool.begin().await?;
+    if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+        tx.commit().await?;
+        return Ok(());
+    }
     sqlx::query(
         r#"
         INSERT INTO activity.guild_member_directory(
@@ -390,8 +395,9 @@ async fn upsert_directory_member(
     .bind(account_created_at)
     .bind(member.user.bot.unwrap_or(false))
     .bind(synced_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -439,6 +445,39 @@ mod tests {
             vanity_attribution_window_start(previous).to_rfc3339(),
             "2026-07-06T11:58:30+00:00"
         );
+    }
+
+    #[tokio::test]
+    async fn abgemeldete_mitglieder_landen_nicht_im_verzeichnis() -> TaskResult<()> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(71, TRUE, now()), (72, FALSE, now())",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("UPDATE core.user_privacy SET deleted_at = now() WHERE user_id = 72")
+            .execute(pool)
+            .await?;
+        let synced_at = Utc::now();
+        for id in ["71", "72", "73"] {
+            let member = DirectoryMember {
+                user: DirectoryUser {
+                    id: id.to_string(),
+                    bot: None,
+                },
+                joined_at: None,
+            };
+            upsert_directory_member(pool, 1, &member, synced_at).await?;
+        }
+        let stored: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM activity.guild_member_directory WHERE guild_id = 1 ORDER BY user_id",
+        )
+        .fetch_all(pool)
+        .await?;
+        assert_eq!(stored, vec![73]);
+        Ok(())
     }
 
     #[test]

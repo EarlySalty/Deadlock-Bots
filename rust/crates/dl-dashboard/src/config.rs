@@ -88,11 +88,7 @@ impl DashboardConfig {
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let get = |key: &str| -> Option<String> {
-            lookup(key)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
+        let get = |key: &str| dl_core::internal_tokens::present(&lookup, key);
 
         let turnier_tokens = dl_core::internal_tokens::all_tokens(
             get,

@@ -2,8 +2,6 @@
 //! die Community-Website. Hier zunächst die Patchnotes (reine DB); die
 //! Live-Guild-Stats brauchen Bot-Daten und folgen separat.
 
-use std::time::Duration;
-
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -88,11 +86,7 @@ pub async fn patch_notes(State(app): State<DashboardApp>) -> Response {
     }
 }
 
-async fn fetch_guild_stats(base: &str) -> Option<Value> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .ok()?;
+async fn fetch_guild_stats(client: &reqwest::Client, base: &str) -> Option<Value> {
     let url = format!(
         "{}/internal/master/v1/discord/guild-stats",
         base.trim_end_matches('/')
@@ -113,7 +107,7 @@ pub async fn guild_stats(State(app): State<DashboardApp>) -> Response {
     if let Some(cached) = app.guild_stats_cached(now) {
         return with_cors(cached, 200, 30);
     }
-    let Some(data) = fetch_guild_stats(app.broker_base()).await else {
+    let Some(data) = fetch_guild_stats(app.broker_http(), app.broker_base()).await else {
         // Kein Gateway/Guild → wie das Original 503.
         return with_cors(json!({ "error": "No guild data available" }), 503, 30);
     };

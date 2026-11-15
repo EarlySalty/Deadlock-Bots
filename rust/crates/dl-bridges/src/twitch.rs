@@ -167,7 +167,7 @@ impl TwitchApiClient {
         let mut request = self
             .http
             .request(method, &url)
-            .header("X-Internal-Token", &self.token);
+            .header(dl_core::internal_tokens::HEADER, &self.token);
         if let Some(key) = idempotency_key {
             request = request.header("Idempotency-Key", key);
         }

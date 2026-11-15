@@ -65,6 +65,7 @@ pub async fn active_supporters(pool: &PgPool) -> Result<HashSet<u64>, StoreError
 pub async fn sync_boost_rows(pool: &PgPool, boosters: &[u64]) -> Result<BoostSync, StoreError> {
     let ids = to_db_ids(boosters);
     let mut tx = pool.begin().await?;
+    dl_central_db::lock_users_privacy(&mut tx, &ids).await?;
     sqlx::query(
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)

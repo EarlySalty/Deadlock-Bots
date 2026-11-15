@@ -2914,7 +2914,11 @@ impl LfgPanelInterface {
                 Err(err) => {
                     if let Some(retry_after) = err.retry_after_seconds() {
                         self.enqueue_render(post_id).await;
-                        tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.0))).await;
+                        tokio::time::sleep(dl_core::duration::retry_after(
+                            retry_after,
+                            crate::rename_queue::DISCORD_RETRY_AFTER_MAX,
+                        ))
+                        .await;
                     } else {
                         tracing::warn!(%err, post_id, "LFG-Render-Update fehlgeschlagen");
                     }

@@ -42,6 +42,15 @@ pub fn turnier_api_token(lookup: impl Fn(&str) -> Option<String>) -> Option<Stri
     first_token(lookup, TURNIER_API_RECEIVER)
 }
 
+pub const HEADER: &str = "X-Internal-Token";
+
+pub const TURNIER_API_DEFAULT_BASE: &str = "http://127.0.0.1:8900";
+
+pub fn turnier_api_base(lookup: impl Fn(&str) -> Option<String>) -> String {
+    present(&lookup, "TURNIER_INTERNAL_API_BASE_URL")
+        .unwrap_or_else(|| TURNIER_API_DEFAULT_BASE.to_string())
+}
+
 pub fn key_names(keys: &[&str]) -> String {
     keys.join("/")
 }

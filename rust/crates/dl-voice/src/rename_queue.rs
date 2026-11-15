@@ -27,6 +27,7 @@ const QUEUE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const ERROR_BACKOFF: Duration = Duration::from_secs(10);
 const RENAME_THROTTLE: Duration = Duration::from_secs(360);
 const MAX_RETRIES: i32 = 5;
+pub(crate) const DISCORD_RETRY_AFTER_MAX: Duration = Duration::from_secs(3600);
 const RENAME_REQUEST_ID_LOCK_KEY: i64 = -7_010_030_001;
 pub const LIVE_DOT_REFRESH_REASON: &str = "Live-Streamer-Markierung";
 
@@ -352,7 +353,11 @@ pub fn spawn_worker(pool: PgPool, exec: Arc<dyn RenameExec>) {
                     if let Some(retry_after) = e.retry_after_seconds() {
                         last_attempt.insert(claimed.channel_id, Instant::now());
                         let _ = set_pending(&q.pool, claimed.id, Some(&err_text), true).await;
-                        tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.0))).await;
+                        tokio::time::sleep(dl_core::duration::retry_after(
+                            retry_after,
+                            DISCORD_RETRY_AFTER_MAX,
+                        ))
+                        .await;
                     } else if claimed.retry_count + 1 >= MAX_RETRIES {
                         let _ = set_failed(&q.pool, claimed.id, &err_text).await;
                     } else {

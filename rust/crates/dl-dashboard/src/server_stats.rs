@@ -8,7 +8,6 @@
 //! die rückwirkende Neu-Klassifikation ist ein eigener Lauf.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -630,13 +629,7 @@ fn sort_by_count(mut entries: Vec<Value>, label_key: &str) -> Vec<Value> {
 
 /// Vanity-Link der Gilde über die guild-stats-Broker-Bridge (statt Bot-Cache).
 async fn fetch_public_links(app: &DashboardApp, guild: Option<i64>) -> Vec<Value> {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    let client = app.broker_http();
     let mut url = format!(
         "{}/internal/master/v1/discord/guild-stats",
         app.broker_base().trim_end_matches('/')

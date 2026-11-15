@@ -78,6 +78,10 @@ impl DiscordAdapter {
         self.request_limit
     }
 
+    pub fn rest_client(&self) -> &reqwest::Client {
+        &self.rest_client
+    }
+
     /// Koppelt den Adapter an serenitys vom Gateway befüllten Client-Cache.
     /// Einmalig direkt nach dem Client-Build aufzurufen.
     pub fn link_cache(&self, cache: Arc<Cache>) {
@@ -1072,42 +1076,26 @@ impl DiscordPort for DiscordAdapter {
     ) -> Result<RoleMembers, PortError> {
         let gid = GuildId::new(guild_id);
         let rid = RoleId::new(role_id);
-        let roles = self
-            .http
-            .get_guild_roles(gid)
+        let roles = tokio::time::timeout(self.request_limit, self.http.get_guild_roles(gid))
             .await
+            .map_err(|_| {
+                PortError::Discord("Zeitlimit beim Lesen der Rollen überschritten".into())
+            })?
             .map_err(|err| PortError::Discord(err.to_string()))?;
         let role = roles
             .iter()
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
-        let mut members = Vec::new();
-        let mut pager = crate::member_pages::MemberPager::default();
-        while !pager.is_done() {
-            let page = self
-                .http
-                .get_guild_members(
-                    gid,
-                    Some(u64::from(crate::member_pages::MEMBER_PAGE_LIMIT)),
-                    pager.after(),
-                )
-                .await
-                .map_err(|err| PortError::Discord(err.to_string()))?;
-            pager
-                .advance(
-                    page.iter().map(|member| Some(member.user.id.get())),
-                    page.len(),
-                )
-                .map_err(|err| PortError::Discord(err.to_string()))?;
-            members.extend(
-                page.iter()
-                    .filter(|member| role_id == guild_id || member.roles.contains(&rid))
-                    .map(|member| MemberInfo {
-                        user_id: member.user.id.get(),
-                        display_name: member.display_name().to_string(),
-                    }),
-            );
-        }
+        let members = crate::member_pages::fetch_all(&self.http, gid, self.request_limit)
+            .await
+            .map_err(PortError::Discord)?
+            .into_iter()
+            .filter(|member| role_id == guild_id || member.roles.contains(&rid))
+            .map(|member| MemberInfo {
+                user_id: member.user.id.get(),
+                display_name: member.display_name().to_string(),
+            })
+            .collect();
         Ok(RoleMembers {
             role_id,
             name: role.name.clone(),

@@ -45,7 +45,7 @@ pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
 pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
 pub const PORT: u16 = 8901;
-pub const TOKEN_HEADER: &str = "X-Internal-Token";
+pub const TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 const AUDIT_LOG_REASON: &str = "Onboarding-Redesign Welle 2a (Rechte-Sanierung)";
 const ONBOARDING_AUDIT_LOG_REASON: &str = "serversync welle2b";
 const ROLLBACK_VERSION: &str = "serversync.rollback_export.v2";
@@ -68,7 +68,6 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
-const DISCORD_RETRY_AFTER_FALLBACK: Duration = Duration::from_secs(1);
 const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const PANELS_BUSY: &str = "Ein Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
@@ -2327,7 +2326,7 @@ impl ServerSyncService {
         Ok((
             funding,
             Some(format!(
-                "Support: Monatsziel nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {} Cent, bis der nächste Abgleich ihn aktualisiert.",
+                "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {} Cent, bis der nächste Abgleich ihn aktualisiert.",
                 funding.raised_cents
             )),
         ))
@@ -2338,11 +2337,11 @@ impl ServerSyncService {
         if let Some(missing) = source.missing_config() {
             return Ok(FundingRefresh::Skipped(missing));
         }
-        let funding = source.funding().await.map_err(ServerSyncError::internal)?;
-        let options = source.panel_options();
         let Some(_claim) = PanelClaim::take(&self.support_panel_busy) else {
             return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
         };
+        let fetched = source.funding().await;
+        let options = source.panel_options();
         let stored_payload_format = self
             .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
             .await?;
@@ -2378,6 +2377,17 @@ impl ServerSyncService {
                     "veröffentlichte Panel-Optionen unlesbar: {error}"
                 ))
             })?;
+        let funding = match fetched {
+            Ok(funding) => funding,
+            Err(error) if published_options != options => {
+                tracing::warn!(
+                    %error,
+                    "Support: Monatsstand nicht abrufbar; geänderte Panel-Optionen gehen mit dem veröffentlichten Stand raus"
+                );
+                live
+            }
+            Err(error) => return Err(ServerSyncError::internal(error)),
+        };
         if live == funding && published_options == options {
             return Ok(FundingRefresh::Unchanged);
         }
@@ -3472,6 +3482,7 @@ impl ServerSyncOps for ServerSyncService {
             &self.pool,
             self.adapter.http.as_ref(),
             self.guild_id,
+            self.http_limits.request,
         )
         .await?;
         Ok(snapshot_output(report))
@@ -3481,15 +3492,12 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RollbackExportOutput> {
-        let model = tokio::time::timeout(
+        let model = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
@@ -3562,15 +3570,12 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn diff(&self, requested_by_user_id: Option<u64>) -> ServerSyncResult<DiffOutput> {
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
                 .await?;
@@ -3622,15 +3627,12 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<RestoreOutput> {
         let (rollback_export_id, artifact_hash, artifact) =
             self.load_rollback_artifact(rollback_export_id).await?;
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
                 .await?;
@@ -3694,15 +3696,12 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<OnboardingPreviewOutput> {
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
@@ -3762,7 +3761,7 @@ impl ServerSyncOps for ServerSyncService {
                 guild_id: preview.guild_id,
                 confirmed_hash: confirmed,
                 requested_by_user_id,
-                dry_run: confirm,
+                dry_run: !confirm,
                 status: "hash_mismatch",
                 result: json!({
                     "stored": preview.diff_hash,
@@ -3777,15 +3776,12 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
         // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
         validate_onboarding_references(&live, &preview.config)
@@ -3879,15 +3875,12 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<ServerGuidePreviewOutput> {
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "serverguide_preview")
                 .await?;
@@ -3947,7 +3940,7 @@ impl ServerSyncOps for ServerSyncService {
                 guild_id: preview.guild_id,
                 confirmed_hash: confirmed,
                 requested_by_user_id,
-                dry_run: confirm,
+                dry_run: !confirm,
                 status: "hash_mismatch",
                 result: json!({
                     "stored": preview.diff_hash,
@@ -3962,15 +3955,12 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         validate_server_guide_config(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -4068,15 +4058,12 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
         let _claim = self.claim_panels()?;
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let content = build_regelwerk_text(&live)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
         let stored_message_id = self.load_regelwerk_message_id().await?;
@@ -4415,12 +4402,17 @@ impl ServerSyncOps for ServerSyncService {
         let source = self.supporter_funding.clone();
         let options = source.panel_options();
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
+        let Some(_claim) = PanelClaim::take(&self.support_panel_busy) else {
+            return Err(ServerSyncError::bad_request(format!(
+                "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
+            )));
+        };
         let (funding, funding_warning) = match self.support_funding_for_apply(source.as_ref()).await
         {
             Ok(found) => found,
             Err(error) if confirm => {
                 return Err(ServerSyncError::bad_request(format!(
-                    "Support: Monatsziel unbekannt ({error}); Apply blockiert, damit das Panel keinen erfundenen Betrag zeigt."
+                    "Support: Monatsstand unbekannt ({error}); Apply blockiert, damit das Panel keinen erfundenen Betrag zeigt."
                 )));
             }
             Err(error) => (
@@ -4429,14 +4421,9 @@ impl ServerSyncOps for ServerSyncService {
                     goal_cents: source.goal_cents(),
                 },
                 Some(format!(
-                    "Support: Monatsziel unbekannt ({error}); die Vorschau zeigt 0 €, Bestätigen wird abgelehnt."
+                    "Support: Monatsstand unbekannt ({error}); die Vorschau zeigt 0 €, Bestätigen wird abgelehnt."
                 )),
             ),
-        };
-        let Some(_claim) = PanelClaim::take(&self.support_panel_busy) else {
-            return Err(ServerSyncError::bad_request(format!(
-                "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
-            )));
         };
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
@@ -4955,15 +4942,12 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
@@ -4982,15 +4966,12 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
         let _claim = self.claim_panels()?;
-        let live = tokio::time::timeout(
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
             self.http_limits.request,
-            dl_server_as_code::import::fetch_live_guild_model(
-                self.adapter.http.as_ref(),
-                self.guild_id,
-            ),
         )
-        .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))??;
+        .await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
@@ -6331,12 +6312,13 @@ impl DiscordRestResponse {
 async fn discord_regelwerk_send_with_retry<S, Fut>(
     mut send: S,
     method: &str,
-    max_wait: Duration,
+    wait_budget: Duration,
 ) -> ServerSyncResult<DiscordRestResponse>
 where
     S: FnMut() -> Fut,
     Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
 {
+    let mut waited = Duration::ZERO;
     for attempt in 1..=REGELWERK_DISCORD_MAX_ATTEMPTS {
         let response = send().await?;
         if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -6345,24 +6327,26 @@ where
         if attempt == REGELWERK_DISCORD_MAX_ATTEMPTS {
             return Ok(response);
         }
-        let retry_after = regelwerk_retry_after(&response).unwrap_or(DISCORD_RETRY_AFTER_FALLBACK);
-        if retry_after > max_wait {
+        let retry_after = regelwerk_retry_after(&response);
+        let Some(wait) = dl_bridges::http::rate_limit_wait(retry_after, waited, wait_budget) else {
             tracing::warn!(
                 method,
                 attempt,
-                retry_after_ms = retry_after.as_millis(),
-                max_wait_ms = max_wait.as_millis(),
+                retry_after,
+                waited_ms = waited.as_millis(),
+                wait_budget_ms = wait_budget.as_millis(),
                 "Discord REST rate-limited länger als das Zeitlimit; kein weiterer Versuch"
             );
             return Ok(response);
-        }
+        };
+        waited += wait;
         tracing::warn!(
             method,
             attempt,
-            retry_after_ms = retry_after.as_millis(),
+            wait_ms = wait.as_millis(),
             "Discord Regelwerk REST rate-limited"
         );
-        tokio::time::sleep(retry_after).await;
+        tokio::time::sleep(wait).await;
     }
     unreachable!("retry loop always returns")
 }
@@ -6382,16 +6366,8 @@ fn discord_regelwerk_json_response<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_slice::<T>(&response.body)?)
 }
 
-fn regelwerk_retry_after(response: &DiscordRestResponse) -> Option<Duration> {
-    retry_after_from_body(&response.body)
-        .or_else(|| retry_after_from_header(&response.headers))
-        .and_then(retry_after_duration)
-}
-
-fn retry_after_duration(seconds: f64) -> Option<Duration> {
-    seconds
-        .is_finite()
-        .then(|| Duration::from_secs_f64(seconds.max(0.0)))
+fn regelwerk_retry_after(response: &DiscordRestResponse) -> Option<f64> {
+    retry_after_from_body(&response.body).or_else(|| retry_after_from_header(&response.headers))
 }
 
 fn retry_after_from_body(body: &[u8]) -> Option<f64> {
@@ -8673,6 +8649,15 @@ where
         .map_err(|err| ServerSyncError::bad_request(format!("ungueltiges JSON: {err}")))
 }
 
+pub const TOKEN_OVERRIDE: &str = "SERVERSYNC_INTERNAL_TOKEN";
+
+pub fn token_key_names() -> String {
+    format!(
+        "{TOKEN_OVERRIDE}/{}",
+        dl_core::internal_tokens::key_names(dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
+    )
+}
+
 fn authorize(
     state: &HttpState,
     peer: &SocketAddr,
@@ -8682,9 +8667,10 @@ fn authorize(
         return Err(ServerSyncError::forbidden("loopback requests only"));
     }
     let Some(expected) = state.token.as_deref().filter(|token| !token.is_empty()) else {
-        return Err(ServerSyncError::forbidden(
-            "SERVERSYNC_INTERNAL_TOKEN ist nicht konfiguriert",
-        ));
+        return Err(ServerSyncError::forbidden(format!(
+            "{} ist nicht konfiguriert",
+            token_key_names()
+        )));
     };
     let presented = headers
         .get(TOKEN_HEADER)
@@ -11033,6 +11019,70 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    async fn regelwerk_429_attempts(
+        body: Value,
+        header: Option<&'static str>,
+        budget: Duration,
+    ) -> usize {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_sender = Arc::clone(&attempts);
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts_for_call = Arc::clone(&attempts_for_sender);
+                let body = body.to_string();
+                async move {
+                    *attempts_for_call.lock().expect("attempts") += 1;
+                    let mut response =
+                        DiscordRestResponse::for_test(reqwest::StatusCode::TOO_MANY_REQUESTS, body);
+                    if let Some(value) = header {
+                        response.headers.insert(
+                            reqwest::header::RETRY_AFTER,
+                            reqwest::header::HeaderValue::from_static(value),
+                        );
+                    }
+                    Ok(response)
+                }
+            },
+            "PATCH",
+            budget,
+        )
+        .await
+        .expect("antwort");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let count = *attempts.lock().expect("attempts");
+        count
+    }
+
+    #[tokio::test]
+    async fn discord_retry_ueberlebt_unendliche_und_riesige_wartezeiten() {
+        let budget = Duration::from_millis(50);
+        assert_eq!(
+            regelwerk_429_attempts(json!({"retry_after": 1e300}), None, budget).await,
+            1
+        );
+        assert_eq!(
+            regelwerk_429_attempts(json!({"retry_after": 1e20}), None, budget).await,
+            1
+        );
+        assert_eq!(
+            regelwerk_429_attempts(json!({}), Some("inf"), budget).await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn discord_retry_zaehlt_alle_wartezeiten_gegen_das_zeitlimit() {
+        let started = std::time::Instant::now();
+        let attempts = regelwerk_429_attempts(
+            json!({"retry_after": 0.03}),
+            None,
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(attempts, 2);
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
     #[tokio::test]
     async fn regelwerk_discord_retry_retryt_429_mit_retry_after_body() {
         let attempts = Arc::new(Mutex::new(0usize));
@@ -11078,7 +11128,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
         let retry_after = regelwerk_retry_after(&response).expect("retry-after header");
 
-        assert_eq!(retry_after.as_millis(), 250);
+        assert_eq!(retry_after, 0.25);
     }
 
     #[test]
@@ -12832,6 +12882,29 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
             changed_tiers.to_kv().ok()
         );
+
+        let mut without_role = changed_tiers.clone();
+        without_role.role_grant = false;
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            without_role.clone(),
+        );
+        let options_only = service.support_funding_refresh().await.expect("refresh");
+        assert!(matches!(options_only, FundingRefresh::Updated));
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            without_role.to_kv().ok()
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(raised.to_kv().as_str())
+        );
+        assert!(service.support_funding_refresh().await.is_err());
+        source.set(Ok(raised), changed_tiers.clone());
+        let restored = service.support_funding_refresh().await.expect("refresh");
+        assert!(matches!(restored, FundingRefresh::Updated));
 
         std::fs::write(
             repo.path().join(support_publish::SUPPORT_TEXTS_FILE),

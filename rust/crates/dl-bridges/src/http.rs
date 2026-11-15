@@ -4,6 +4,8 @@ use dl_core::runtime_config::{
     BridgeOptions, HTTP_DEFAULT_CONNECT_TIMEOUT_MS, HTTP_DEFAULT_REQUEST_TIMEOUT_MS,
 };
 
+pub const RETRY_AFTER_FALLBACK: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpLimits {
     pub connect: Duration,
@@ -52,10 +54,17 @@ impl HttpLimits {
             request,
         }
     }
+}
 
-    pub fn capped_wait(self, wait: Duration) -> Duration {
-        wait.min(self.request)
-    }
+pub fn rate_limit_wait(
+    retry_after_secs: Option<f64>,
+    waited: Duration,
+    budget: Duration,
+) -> Option<Duration> {
+    let wait = retry_after_secs.map_or(RETRY_AFTER_FALLBACK, |seconds| {
+        dl_core::duration::retry_after(seconds, Duration::MAX)
+    });
+    (waited.saturating_add(wait) <= budget).then_some(wait)
 }
 
 pub fn client(limits: HttpLimits) -> Result<reqwest::Client, HttpSetupError> {
@@ -102,16 +111,40 @@ mod tests {
         });
         assert_eq!(configured.connect, Duration::from_millis(7));
         assert_eq!(configured.request, Duration::from_millis(11));
-        assert_eq!(
-            configured.capped_wait(Duration::from_secs(3600)),
-            Duration::from_millis(11)
-        );
-        assert_eq!(
-            configured.capped_wait(Duration::from_millis(3)),
-            Duration::from_millis(3)
-        );
         let shorter = configured.with_request(Duration::from_millis(5));
         assert_eq!(shorter.connect, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn rate_limit_wait_refuses_what_the_budget_cannot_hold() {
+        let budget = Duration::from_secs(10);
+        for seconds in [f64::INFINITY, 1e300, 1e20, 11.0] {
+            assert_eq!(
+                rate_limit_wait(Some(seconds), Duration::ZERO, budget),
+                None,
+                "{seconds}"
+            );
+        }
+        assert_eq!(
+            rate_limit_wait(Some(f64::NAN), Duration::ZERO, budget),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            rate_limit_wait(Some(-2.0), Duration::ZERO, budget),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            rate_limit_wait(None, Duration::ZERO, budget),
+            Some(RETRY_AFTER_FALLBACK)
+        );
+        assert_eq!(
+            rate_limit_wait(Some(4.0), Duration::from_secs(6), budget),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            rate_limit_wait(Some(4.0), Duration::from_secs(7), budget),
+            None
+        );
     }
 
     #[tokio::test]

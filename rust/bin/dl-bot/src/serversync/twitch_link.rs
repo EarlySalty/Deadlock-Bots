@@ -1,7 +1,7 @@
 //! Button "Twitch verknüpfen" im Verify-Panel (#deadlock-rang).
 //!
-//! Ein Klick holt beim Dashboard (:8766, loopback, gleicher interner Token wie
-//! der Broker) einen frischen Discord-Link für den delegierten Flow mit Scope
+//! Ein Klick holt beim Dashboard (:8766, loopback, eigener interner
+//! Dashboard-Token aus `DASHBOARD_INTERNAL_RECEIVER`) einen frischen Discord-Link für den delegierten Flow mit Scope
 //! `identify connections` und schickt ihn nur dem Klickenden. Den Rest
 //! (Callback, Speichern, Bestätigungsseite) erledigt das Dashboard; der Bot
 //! speichert nichts und sieht kein Token.
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use super::rang_guide_publish::TWITCH_LINK_OPEN_CUSTOM_ID;
 
 const INITIATE_PATH: &str = "/internal/v1/discord/twitch-link/initiate";
-const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
+const INTERNAL_TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 
 pub const TWITCH_LINK_INTRO: &str = "Hier verknüpfst du dein Twitch-Konto mit dem Server. Discord fragt dich gleich, ob wir sehen dürfen, welche Konten du mit Discord verbunden hast. Wir merken uns davon nur dein Twitch-Konto, damit dich der Bot in Partner-Streams erkennt.\n-# Der Link ist ein paar Stunden gültig.";
 pub const TWITCH_LINK_FAILED: &str =
@@ -43,8 +43,9 @@ impl DashboardTwitchLinkClient {
             http: dl_bridges::http::internal_client(limits)?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             token: token
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty()),
+                .as_deref()
+                .and_then(dl_core::internal_tokens::token_value)
+                .map(str::to_string),
         })
     }
 }

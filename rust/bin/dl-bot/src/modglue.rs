@@ -21,6 +21,7 @@ const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
     &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
+const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 10;
 const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
@@ -1894,19 +1895,22 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
         &self,
         image_urls: &[String],
     ) -> Vec<dl_moderation::moderation_system::ModerationEvidenceFile> {
-        let client = match dl_bridges::http::current_client() {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::warn!(%error, "Moderation: Beweisbilder nicht gespiegelt");
-                return Vec::new();
-            }
-        };
+        let client = self.adapter.rest_client();
         let mut files = Vec::new();
         for url in image_urls.iter().take(MODERATION_EVIDENCE_IMAGE_LIMIT) {
-            let response = match client.get(url).send().await {
-                Ok(response) => response,
-                Err(error) => {
+            let response = match tokio::time::timeout(
+                MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT,
+                client.get(url).send(),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
                     tracing::warn!(%error, "Moderation: Beweisbild nicht geladen");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("Moderation: Beweisbild nicht rechtzeitig geladen");
                     continue;
                 }
             };
@@ -1925,13 +1929,22 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             {
                 continue;
             }
-            let bytes = match response.bytes().await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(%error, "Moderation: Beweisbild nicht vollständig geladen");
-                    continue;
-                }
-            };
+            let bytes =
+                match tokio::time::timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, response.bytes())
+                    .await
+                {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "Moderation: Beweisbild nicht vollständig geladen");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Moderation: Beweisbild nicht rechtzeitig vollständig geladen"
+                        );
+                        continue;
+                    }
+                };
             if bytes.len() > MODERATION_EVIDENCE_IMAGE_MAX_BYTES {
                 continue;
             }
@@ -4550,8 +4563,9 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 .map_err(|err| err.to_string())?;
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = dl_bridges::http::current_client()
-            .map_err(|err| err.to_string())?
+        let response = self
+            .adapter
+            .rest_client()
             .post(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages"
             ))
@@ -4608,13 +4622,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             };
             form = form.part(format!("files[{id}]"), part);
         }
-        let client = match dl_bridges::http::current_client() {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::warn!(%err, channel_id, message_id, "Coaching: Edit ohne HTTP-Client");
-                return;
-            }
-        };
+        let client = self.adapter.rest_client();
         let response = match client
             .patch(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"

@@ -54,6 +54,11 @@ pub enum ServerAsCodeError {
     UnknownTargetKind(String),
     #[error("unbekannte Objektart: {0}")]
     UnknownObjectKind(String),
+    #[error("Discord-Lesezugriff {operation} lief länger als das Zeitlimit von {limit_ms} ms")]
+    DiscordDeadline {
+        operation: &'static str,
+        limit_ms: u128,
+    },
     #[error("Diff-Hash stimmt nicht: erwartet {expected}, bekommen {actual}")]
     DiffHashMismatch { expected: String, actual: String },
     #[error("Diff-Preview {0} nicht gefunden")]

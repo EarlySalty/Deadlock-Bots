@@ -880,6 +880,7 @@ mod tests {
             pool: db.pool().clone(),
             codec: dl_webcore::SessionCodec::new(None),
             dashboard: dl_webcore::DashboardClient::new(
+                reqwest::Client::new(),
                 "http://dashboard.invalid".to_string(),
                 None,
                 None,
