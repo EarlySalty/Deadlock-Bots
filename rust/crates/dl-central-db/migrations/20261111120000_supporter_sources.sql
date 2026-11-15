@@ -61,20 +61,28 @@ ON CONFLICT (schema_name, table_name, column_name) DO UPDATE SET
     owner_service = EXCLUDED.owner_service,
     reason = EXCLUDED.reason;
 
+ALTER TABLE core.supporter_sources ENABLE ROW LEVEL SECURITY;
+
 DO $roles$
-DECLARE writer text;
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deadlock') THEN
         GRANT SELECT, INSERT, UPDATE, DELETE ON core.supporter_sources TO deadlock;
         GRANT SELECT ON core.active_supporters TO deadlock;
     END IF;
-    FOREACH writer IN ARRAY ARRAY['twitchbot', 'twitchdash'] LOOP
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = writer) THEN
-            EXECUTE format('GRANT USAGE ON SCHEMA core TO %I', writer);
-            EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON core.supporter_sources TO %I', writer);
-            EXECUTE format('GRANT SELECT ON core.active_supporters TO %I', writer);
-        END IF;
-    END LOOP;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'twitchdash') THEN
+        GRANT USAGE ON SCHEMA core TO twitchdash;
+        GRANT SELECT (discord_id, source, source_ref, valid_until)
+            ON core.supporter_sources TO twitchdash;
+        GRANT INSERT (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
+            ON core.supporter_sources TO twitchdash;
+        GRANT UPDATE (valid_until, updated_at) ON core.supporter_sources TO twitchdash;
+        GRANT DELETE ON core.supporter_sources TO twitchdash;
+        DROP POLICY IF EXISTS supporter_sources_twitch_rows ON core.supporter_sources;
+        CREATE POLICY supporter_sources_twitch_rows ON core.supporter_sources
+            FOR ALL TO twitchdash
+            USING (source IN ('twitch_sub', 'twitch_bot_customer'))
+            WITH CHECK (source IN ('twitch_sub', 'twitch_bot_customer') AND monthly_cents IS NULL);
+    END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'twitchdash')
        AND to_regclass('core.discord_platform_connections') IS NOT NULL THEN
         GRANT SELECT (platform, platform_user_id, discord_id, verified)
