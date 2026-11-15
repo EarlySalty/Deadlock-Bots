@@ -258,7 +258,7 @@ mod tests {
         let client = TwitchApiClient::try_new(
             format!("http://{address}"),
             "fixture-token",
-            std::time::Duration::from_secs(2),
+            dl_bridges::http::HttpLimits::default().with_request(std::time::Duration::from_secs(2)),
             false,
         )
         .expect("Client");

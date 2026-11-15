@@ -709,7 +709,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         scrim_relay_handler,
     );
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
-    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(operating_value);
+    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(operating_value, http_limits);
     let matcher = match &twitch_client {
         Some(twitch_client) => {
             dl_bridges::twitch::register(
