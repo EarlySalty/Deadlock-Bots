@@ -4,12 +4,10 @@ use serde::{Deserialize, Serialize};
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
 pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
-pub(super) const ANSWER_MAX_ATTEMPTS: u32 = 8;
 pub(super) const ANSWER_QUEUE_LIMIT: usize = 5;
-pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
 pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
-const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
-const NOTICE_MAX_BACKOFF_MILLIS: i64 = 60 * 60_000;
+const BRAIN_BACKOFF_MILLIS: i64 = 60_000;
+const BRAIN_MAX_BACKOFF_MILLIS: i64 = 60 * 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Notice {
@@ -129,11 +127,11 @@ impl OutboxEntry {
         }
     }
 
-    pub(super) fn ready(&self, now_millis: i64) -> bool {
+    pub(super) fn ready(&self, now_millis: i64, lease_millis: i64) -> bool {
         now_millis >= self.next_at_millis
             && self
                 .claimed_at_millis
-                .is_none_or(|claimed| now_millis.saturating_sub(claimed) >= NOTICE_LEASE_MILLIS)
+                .is_none_or(|claimed| now_millis.saturating_sub(claimed) >= lease_millis)
     }
 
     pub(super) fn claim(&mut self, now_millis: i64) {
@@ -144,15 +142,22 @@ impl OutboxEntry {
     pub(super) fn reschedule(&mut self, now_millis: i64) -> bool {
         self.attempts = self.attempts.saturating_add(1);
         self.claimed_at_millis = None;
-        self.next_at_millis = now_millis.saturating_add(notice_backoff(self.attempts));
+        self.next_at_millis = now_millis.saturating_add(brain_backoff(self.attempts));
         let first = self.first_attempt_at_millis.unwrap_or(now_millis);
         now_millis.saturating_sub(first) < NOTICE_MAX_AGE_MILLIS
     }
 }
 
-pub(super) fn notice_backoff(attempts: u32) -> i64 {
+pub(super) fn brain_lease_millis(brain_timeout: std::time::Duration) -> i64 {
+    i64::try_from(brain_timeout.as_millis())
+        .unwrap_or(i64::MAX)
+        .saturating_mul(2)
+        .max(BRAIN_BACKOFF_MILLIS)
+}
+
+pub(super) fn brain_backoff(attempts: u32) -> i64 {
     let shift = attempts.saturating_sub(1).min(6);
-    (NOTICE_BACKOFF_MILLIS << shift).min(NOTICE_MAX_BACKOFF_MILLIS)
+    (BRAIN_BACKOFF_MILLIS << shift).min(BRAIN_MAX_BACKOFF_MILLIS)
 }
 
 fn status(status: InviteStatus) -> InviteLoungeUpdate {
@@ -189,10 +194,13 @@ impl HeldAnswer {
         }
     }
 
-    pub(super) fn retry_later(&mut self, now_millis: i64) -> bool {
+    pub(super) fn lease(&mut self, now_millis: i64, lease_millis: i64) {
+        self.retry_at_millis = now_millis.saturating_add(lease_millis);
+    }
+
+    pub(super) fn retry_later(&mut self, now_millis: i64) {
         self.attempts = self.attempts.saturating_add(1);
-        self.retry_at_millis = now_millis.saturating_add(notice_backoff(self.attempts));
-        self.attempts < ANSWER_MAX_ATTEMPTS
+        self.retry_at_millis = now_millis.saturating_add(brain_backoff(self.attempts));
     }
 }
 
@@ -377,6 +385,19 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_790_000_000;
+    const LEASE: i64 = 240_000;
+
+    #[test]
+    fn leihfrist_deckt_das_doppelte_brain_zeitlimit() {
+        assert_eq!(
+            brain_lease_millis(std::time::Duration::from_millis(120_000)),
+            240_000
+        );
+        assert_eq!(
+            brain_lease_millis(std::time::Duration::ZERO),
+            BRAIN_BACKOFF_MILLIS
+        );
+    }
 
     fn reply(text: &str) -> InviteReply {
         classify_invite_reply(&Ok(text.to_string()))
@@ -582,23 +603,23 @@ mod tests {
     }
 
     #[test]
-    fn gehaltene_antwort_wartet_wachsend_und_endet_nach_begrenzten_versuchen() {
+    fn gehaltene_antwort_wartet_wachsend_bis_zur_stundengrenze() {
         let mut held = HeldAnswer::fresh(5, "nein".into());
         assert_eq!(held.retry_at_millis, 0);
+        held.lease(1_000, LEASE);
+        assert_eq!(held.retry_at_millis, 1_000 + LEASE);
+        assert_eq!(held.attempts, 0);
         let mut waits = Vec::new();
         let mut now = 1_000;
-        while held.retry_later(now) {
+        for _ in 0..12 {
+            held.retry_later(now);
             waits.push(held.retry_at_millis - now);
             now = held.retry_at_millis;
         }
-        assert_eq!(held.attempts, ANSWER_MAX_ATTEMPTS);
-        assert_eq!(
-            waits.len(),
-            usize::try_from(ANSWER_MAX_ATTEMPTS - 1).unwrap_or(0)
-        );
-        assert_eq!(waits.first(), Some(&NOTICE_BACKOFF_MILLIS));
+        assert_eq!(held.attempts, 12);
+        assert_eq!(waits.first(), Some(&BRAIN_BACKOFF_MILLIS));
         assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
-        assert!(waits.iter().all(|wait| *wait <= NOTICE_MAX_BACKOFF_MILLIS));
+        assert_eq!(waits.last(), Some(&BRAIN_MAX_BACKOFF_MILLIS));
     }
 
     #[test]
@@ -625,18 +646,18 @@ mod tests {
         );
         assert_eq!(answer.key, "invite-lounge:55:answer:60");
         let mut entry = entry;
-        assert!(entry.ready(0));
+        assert!(entry.ready(0, LEASE));
         entry.claim(1_000);
-        assert!(!entry.ready(1_000 + NOTICE_LEASE_MILLIS - 1));
-        assert!(entry.ready(1_000 + NOTICE_LEASE_MILLIS));
+        assert!(!entry.ready(1_000 + LEASE - 1, LEASE));
+        assert!(entry.ready(1_000 + LEASE, LEASE));
         assert!(entry.reschedule(2_000));
-        assert_eq!(entry.next_at_millis, 2_000 + NOTICE_BACKOFF_MILLIS);
+        assert_eq!(entry.next_at_millis, 2_000 + BRAIN_BACKOFF_MILLIS);
         assert_eq!(entry.first_attempt_at_millis, Some(1_000));
         for _ in 0..50 {
             assert!(entry.reschedule(2_000));
         }
         assert!(entry.reschedule(1_000 + NOTICE_MAX_AGE_MILLIS - 1));
         assert!(!entry.reschedule(1_000 + NOTICE_MAX_AGE_MILLIS));
-        assert_eq!(notice_backoff(20), NOTICE_MAX_BACKOFF_MILLIS);
+        assert_eq!(brain_backoff(20), BRAIN_MAX_BACKOFF_MILLIS);
     }
 }

@@ -146,14 +146,18 @@ impl DiscordAdapter {
             .map_err(|err| err.to_string())
     }
 
-    pub async fn message_exists(&self, channel_id: u64, message_id: u64) -> Result<bool, String> {
+    pub async fn message_content(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Option<String>, String> {
         match self
             .http
             .get_message(ChannelId::new(channel_id), MessageId::new(message_id))
             .await
         {
-            Ok(_) => Ok(true),
-            Err(err) if Self::is_http_404(&err) => Ok(false),
+            Ok(message) => Ok(Some(message.content)),
+            Err(err) if Self::is_http_404(&err) => Ok(None),
             Err(err) => Err(err.to_string()),
         }
     }
@@ -522,15 +526,6 @@ impl DiscordAdapter {
         ReactionType::Unicode(emoji.to_string())
     }
 
-    fn is_unknown_channel(err: &serenity::Error) -> bool {
-        // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
-        // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).
-        if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)) = err {
-            return resp.status_code.as_u16() == 404;
-        }
-        false
-    }
-
     /// REST-404 (Unknown Member / Unknown User) = bestätigt abwesend.
     /// Jeder andere Fehler (Rate-Limit/5xx/Transport) ist NICHT „abwesend".
     pub(crate) fn is_http_404(err: &serenity::Error) -> bool {
@@ -568,7 +563,7 @@ impl DiscordPort for DiscordAdapter {
         let mut body = Map::new();
         body.insert("content".into(), json!(content));
         self.send_raw(channel_id, &body).await.map_err(|err| {
-            if Self::is_unknown_channel(&err) {
+            if Self::is_http_404(&err) {
                 PortError::ChannelNotFound
             } else {
                 PortError::Discord(err.to_string())
@@ -584,7 +579,7 @@ impl DiscordPort for DiscordAdapter {
     ) -> Result<u64, PortError> {
         let body = Self::reply_body(channel_id, reply, content);
         self.send_raw(channel_id, &body).await.map_err(|err| {
-            if Self::is_unknown_channel(&err) {
+            if Self::is_http_404(&err) {
                 PortError::ChannelNotFound
             } else {
                 PortError::Discord(err.to_string())
@@ -650,7 +645,7 @@ impl DiscordPort for DiscordAdapter {
             .await
             .map(|_| ())
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     PortError::ChannelNotFound
                 } else {
                     PortError::Discord(err.to_string())
@@ -733,7 +728,7 @@ impl DiscordPort for DiscordAdapter {
         self.send_raw(message.channel_id, &body)
             .await
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     PortError::ChannelNotFound
                 } else {
                     PortError::Discord(err.to_string())
@@ -757,7 +752,7 @@ impl DiscordPort for DiscordAdapter {
             .await
             .map(|_| ())
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     PortError::MessageNotFound
                 } else {
                     PortError::Discord(err.to_string())
@@ -986,7 +981,7 @@ impl DiscordPort for DiscordAdapter {
             )
             .await
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     PortError::ChannelNotFound
                 } else {
                     PortError::Discord(err.to_string())
@@ -1347,7 +1342,7 @@ impl ChangelogDiscord for DiscordAdapter {
             );
         }
         self.send_raw(channel_id, &body).await.map_err(|err| {
-            if Self::is_unknown_channel(&err) {
+            if Self::is_http_404(&err) {
                 ChangelogError::ChannelNotFound(channel_id)
             } else {
                 ChangelogError::Discord(err.to_string())
@@ -1388,7 +1383,7 @@ impl ChangelogDiscord for DiscordAdapter {
             .get_message(ChannelId::new(channel_id), MessageId::new(message_id))
             .await
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     ChangelogError::ChannelNotFound(channel_id)
                 } else {
                     ChangelogError::Discord(err.to_string())
@@ -1410,7 +1405,7 @@ impl ChangelogDiscord for DiscordAdapter {
             .get_messages(ChannelId::new(channel_id), pagination, Some(limit))
             .await
             .map_err(|err| {
-                if Self::is_unknown_channel(&err) {
+                if Self::is_http_404(&err) {
                     ChangelogError::ChannelNotFound(channel_id)
                 } else {
                     ChangelogError::Discord(err.to_string())
