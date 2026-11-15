@@ -79,6 +79,12 @@ pub struct TwitchApiClient {
     token: String,
 }
 
+fn timeout_seconds(raw: Option<String>) -> f64 {
+    raw.and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && TWITCH_TIMEOUT_SECONDS_RANGE.contains(v))
+        .unwrap_or(TWITCH_DEFAULT_TIMEOUT_SECONDS)
+}
+
 impl TwitchApiClient {
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
@@ -103,10 +109,7 @@ impl TwitchApiClient {
         let allow_non_loopback = get("TWITCH_INTERNAL_API_ALLOW_NON_LOOPBACK")
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-        let timeout = get("TWITCH_INTERNAL_API_TIMEOUT_SEC")
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| v.is_finite() && TWITCH_TIMEOUT_SECONDS_RANGE.contains(v))
-            .unwrap_or(TWITCH_DEFAULT_TIMEOUT_SECONDS);
+        let timeout = timeout_seconds(get("TWITCH_INTERNAL_API_TIMEOUT_SEC"));
         match Self::try_new(
             base_url,
             token,
@@ -1038,6 +1041,23 @@ mod tests {
                 crate::http::HttpLimits::default(),
             );
             assert!(client.is_some(), "{raw}");
+            assert_eq!(
+                super::timeout_seconds(Some(raw.into())),
+                super::TWITCH_DEFAULT_TIMEOUT_SECONDS,
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            super::timeout_seconds(None),
+            super::TWITCH_DEFAULT_TIMEOUT_SECONDS
+        );
+        for kept in ["0.5", "2.5", "3600"] {
+            let expected: f64 = kept.parse().expect("test value");
+            assert_eq!(
+                super::timeout_seconds(Some(kept.into())),
+                expected,
+                "{kept}"
+            );
         }
     }
 
