@@ -1052,6 +1052,22 @@ async fn upsert_serversync_kv<'e>(
     Ok(())
 }
 
+async fn delete_serversync_kv_keys<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    keys: &[String],
+) -> ServerSyncResult<()> {
+    sqlx::query(
+        "DELETE FROM bot.kv_store
+          WHERE ns = $1
+            AND k = ANY($2)",
+    )
+    .bind(SERVERSYNC_KV_NS)
+    .bind(keys)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 impl ServerSyncService {
     fn claim_panels(&self) -> ServerSyncResult<PanelClaim<'_>> {
         PanelClaim::take(&self.panel_apply_busy).ok_or_else(|| {
@@ -1341,16 +1357,7 @@ impl ServerSyncService {
     }
 
     async fn delete_serversync_kv(&self, key: &str) -> ServerSyncResult<()> {
-        sqlx::query(
-            "DELETE FROM bot.kv_store
-              WHERE ns = $1
-                AND k = $2",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(key)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        delete_serversync_kv_keys(&self.pool, &[key.to_owned()]).await
     }
 
     async fn load_serversync_kv_prefix(
@@ -1790,15 +1797,21 @@ impl ServerSyncService {
         message_index: usize,
         message_id: u64,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
+        let mut tx = self.pool.begin().await?;
+        upsert_serversync_kv(
+            &mut *tx,
             &welcome_publish::welcome_message_id_key(section_id, message_index),
             &message_id.to_string(),
         )
         .await?;
         if message_index == 0 {
-            self.delete_serversync_kv(&welcome_publish::welcome_legacy_message_id_key(section_id))
-                .await?;
+            delete_serversync_kv_keys(
+                &mut *tx,
+                &[welcome_publish::welcome_legacy_message_id_key(section_id)],
+            )
+            .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1811,10 +1824,7 @@ impl ServerSyncService {
             .await?
             .into_keys()
             .collect::<Vec<_>>();
-        for key in keys {
-            self.delete_serversync_kv(&key).await?;
-        }
-        Ok(())
+        delete_serversync_kv_keys(&self.pool, &keys).await
     }
 
     async fn load_rang_guide_payload_format(&self) -> ServerSyncResult<Option<String>> {

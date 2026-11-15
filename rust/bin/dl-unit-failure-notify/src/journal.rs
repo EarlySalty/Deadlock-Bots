@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command};
 
+pub const DIAGNOSIS_LIMIT_MS: u64 = 10_000;
+
 pub async fn command(program: &str, args: &[&str], limit: usize) -> Result<Vec<u8>> {
     let mut child = Command::new(program)
         .args(args)
@@ -18,7 +20,7 @@ pub async fn command(program: &str, args: &[&str], limit: usize) -> Result<Vec<u
         .stdout
         .take()
         .context("Lokale Dienstdiagnose fehlt.")?;
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_millis(DIAGNOSIS_LIMIT_MS), async {
         let mut bytes = Vec::new();
         stdout
             .take((limit + 1) as u64)

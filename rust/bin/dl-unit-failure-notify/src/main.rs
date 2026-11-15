@@ -39,7 +39,19 @@ struct Args {
     binary: Option<PathBuf>,
 }
 
-const NOTIFIER_REQUEST_MAX_MS: u64 = 30_000;
+const SERVICE_UNIT: &str = include_str!("../../../../service/systemd/unit-failure-notify@.service");
+const SERVICE_TIMEOUT_START_MS: u64 = 75_000;
+const SERVICE_STOP_MARGIN_MS: u64 = 5_000;
+const NOTIFIER_SEQUENTIAL_REQUESTS: u64 = 2;
+const NOTIFIER_REQUEST_MAX_MS: u64 =
+    (SERVICE_TIMEOUT_START_MS - journal::DIAGNOSIS_LIMIT_MS - SERVICE_STOP_MARGIN_MS)
+        / NOTIFIER_SEQUENTIAL_REQUESTS;
+const _: () = assert!(
+    journal::DIAGNOSIS_LIMIT_MS
+        + NOTIFIER_SEQUENTIAL_REQUESTS * NOTIFIER_REQUEST_MAX_MS
+        + SERVICE_STOP_MARGIN_MS
+        <= SERVICE_TIMEOUT_START_MS
+);
 const DEVFEED_UNIT: &str = "deadlock-devfeed.service";
 const BOTLOGS_CHANNEL: u64 = 1_374_364_800_817_303_632;
 
@@ -270,7 +282,7 @@ fn install(args: &Args) -> Result<()> {
     if fs::symlink_metadata(binary)?.mode() & 0o111 == 0 {
         bail!("Installiertes Binary ist nicht ausführbar.");
     }
-    let unit = include_str!("../../../../service/systemd/unit-failure-notify@.service")
+    let unit = SERVICE_UNIT
         .replace("@BINARY@", &binary.to_string_lossy())
         .replace("@CONFIG@", &args.config.to_string_lossy());
     let temporary = directory.join(format!(
@@ -460,6 +472,16 @@ mod tests {
     }
 
     #[test]
+    fn service_unit_start_timeout_is_the_budget_the_limits_are_derived_from() {
+        let declared = SERVICE_UNIT
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("TimeoutStartSec="))
+            .map(|value| value.trim().parse::<u64>().map(|secs| secs * 1000))
+            .collect::<Vec<_>>();
+        assert_eq!(declared, vec![Ok(SERVICE_TIMEOUT_START_MS)]);
+    }
+
+    #[test]
     fn config_file_rejects_limits_beyond_the_service_budget() {
         let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -472,8 +494,8 @@ mod tests {
         });
         for (request, accepted) in [
             (serde_json::Value::Null, true),
-            (serde_json::json!(30000), true),
-            (serde_json::json!(30001), false),
+            (serde_json::json!(NOTIFIER_REQUEST_MAX_MS), true),
+            (serde_json::json!(NOTIFIER_REQUEST_MAX_MS + 1), false),
             (serde_json::json!(0), false),
             (serde_json::json!(u64::MAX), false),
         ] {
