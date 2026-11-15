@@ -1282,6 +1282,39 @@ mod tests {
         found
     }
 
+    const BANNED_COPY: [&str; 6] = [
+        "Ko-fi",
+        "KI-Abos",
+        "Warum ich",
+        "Server-Abo",
+        "admin.",
+        "\u{2014}",
+    ];
+
+    fn rendered_copy(output: &SupportPublishOutput) -> String {
+        output
+            .messages
+            .iter()
+            .flat_map(|message| {
+                let labels = buttons(&message.payload)
+                    .into_iter()
+                    .filter_map(|button| button["label"].as_str().map(str::to_string));
+                text_contents(&message.payload).into_iter().chain(labels)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_no_banned_copy(output: &SupportPublishOutput, variant: &str) {
+        let rendered = rendered_copy(output).to_lowercase();
+        for banned in BANNED_COPY {
+            assert!(
+                !rendered.contains(&banned.to_lowercase()),
+                "{variant}: {banned}"
+            );
+        }
+    }
+
     const STORED_IDS: [u64; SUPPORT_MESSAGE_COUNT] = [7001, 7002, 7003];
 
     fn stored<'a>(ids: &'a [u64], hash: Option<&'a str>) -> SupportStoredState<'a> {
@@ -1520,30 +1553,7 @@ enabled = false
         );
         assert!(pay_buttons.iter().all(|button| button.get("url").is_none()));
 
-        let rendered = output
-            .messages
-            .iter()
-            .flat_map(|message| {
-                let labels = buttons(&message.payload)
-                    .into_iter()
-                    .filter_map(|button| button["label"].as_str().map(str::to_string));
-                text_contents(&message.payload).into_iter().chain(labels)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        for banned in [
-            "Ko-fi",
-            "KI-Abos",
-            "Warum ich",
-            "Server-Abo",
-            "admin.",
-            "\u{2014}",
-        ] {
-            assert!(
-                !rendered.to_lowercase().contains(&banned.to_lowercase()),
-                "{banned}"
-            );
-        }
+        assert_no_banned_copy(&output, "Standard");
 
         for message in &output.messages {
             validate_support_message_budget(&message.payload).expect("budget");
@@ -1557,6 +1567,37 @@ enabled = false
                 unique.len(),
                 "Komponenten-IDs sind je Nachricht eindeutig"
             );
+        }
+    }
+
+    #[test]
+    fn keine_panel_variante_rendert_verbotene_woerter() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_banner_bytes(temp.path(), b"banner");
+        for twitch in [false, true] {
+            for role_grant in [false, true] {
+                let variant = SupportPanelOptions {
+                    twitch,
+                    role_grant,
+                    ..options()
+                };
+                let output = build_support_publish_output(
+                    temp.path(),
+                    &stored(&[], None),
+                    funding(1500),
+                    &variant,
+                    true,
+                )
+                .expect("output");
+                let rendered = rendered_copy(&output);
+                assert_eq!(rendered.contains("Twitch"), twitch, "twitch={twitch}");
+                assert_eq!(
+                    rendered.contains(SUPPORT_ROLE_NOTE.trim()),
+                    role_grant,
+                    "role_grant={role_grant}"
+                );
+                assert_no_banned_copy(&output, &format!("twitch={twitch} role_grant={role_grant}"));
+            }
         }
     }
 
