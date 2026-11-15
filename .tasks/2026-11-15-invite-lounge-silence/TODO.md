@@ -1,22 +1,31 @@
-# TODO: invite lounge, final gate round (round 5)
+# TODO: invite lounge, stopped after the final gate round
 
 Worktree: /home/nathanael/.worktrees/bots-invite-lounge-silence-20261115
-Branch: fix/invite-lounge-silence
+Branch: fix/invite-lounge-silence, HEAD 856e7939 (pushed). Nothing merged or deployed. Alp's request is still in the live state.
 
 ## State
 
-- Rounds 1 to 4 ended BLOCK. The round-four review is done: GATE-RETRO.md, the Fable second opinion, one clean fixer pass (86ae2201 and follow-ups after an independent Opus review), and gate-learning ledger lines for round 4.
-- claude-config 6b25202 added the privacy row (eraser misses `invite_lounge:*`) to OFFENE-URSACHEN. Worktree /home/nathanael/.worktrees/cc-lounge-ursachen-20261115 stays for the row correction after the merge.
-- Only one final gate round remains. A run without a verdict is not a round; rerun it with the same command:
-  `(gate-review --repo /home/nathanael/.worktrees/bots-invite-lounge-silence-20261115 --base origin/main; echo "EXIT=$?") > <scratchpad>/gate-r5.log 2>&1`
+Rounds 1 to 4 ended BLOCK. After round 4 came the round-four review: the retro, the Fable opinion, one fixer pass (86ae2201) and an independent Opus review with follow-ups (c64783ea, 35e0a042, 856e7939).
 
-## On ALLOW
-1. `git -C /home/nathanael/.worktrees/bots-invite-lounge-silence-20261115 push origin HEAD:main`.
-2. Deploy dl-bot through the deploy wrapper (memory dl-bot-build-und-deploy) and restart the user unit `deadlock-bot-rust.service`. The broker runs inside dl-bot, so the `fail_if_not_exists` fix goes live with it.
-3. Live proof:
-   - The journal shows "Invite-Lounge verwirft gelöschte Bitte still" for user 1037837117818142741.
-   - The redacted kv row `invite_lounge:requests/user:1037837117818142741` shows `request` absent.
-4. In claude-config, correct the OFFENE-URSACHEN Lagged row (8c92b9b) to the merge SHA. Write the ledger retro line. Delete the branch, the remote branch and both worktrees.
+The final round 5 also ended BLOCK: 40 blocking findings, of which 26 are [hook] restatements, plus 15 NITs. The log is in gate-r5.log, next to this file and gitignored. Under the rules no further round runs without a user decision.
 
-## On BLOCK
-Stop. Report the retro, the remaining findings and the decision needed to the user. Do not start another round.
+## Remaining real findings (round 5)
+
+1. **Friend-code rule.** One rule decides which message may set the stored code, and whether a later direct request without a code reuses it. Three paths still disagree:
+   - The 856e7939 guard drops a corrected code that a member posts after an `Attempted` request, for example after the invalid-code notice. A later "Kannst du mich nochmal einladen?" then invites the stale invalid code. On main the corrected code was taken, so this is a regression.
+   - `open_request_in` treats a `WaitingForCode` request of any age as open. A stray number completes a direct request that is weeks old and invites it. The behaviour predates the branch, but the branch claims it is fixed.
+   - The `record_history` backfill (invite_lounge.rs:1797-1801) stores any number as `friend_code` when no request exists. This twin is not covered.
+2. **Low findings:**
+   - `Request::restart_at` still carries `direct`; the caller overwrites it.
+   - The `note_repost` guard lives in the callers instead of the shared function.
+   - `REQUEST_COPY_LIMIT = 5` has no derivation.
+   - The min-id bound is computed twice, in `request_answered` and `answers_request`.
+   - The README credits two tests for "needs check-in and nein", but they only assert no invite.
+   - README list formatting.
+3. **Hook:** commits 86ae2201 and c64783ea use the heading "Ursache (four layers):", but the hook expects `Ursache:`. Fixing that needs a message-only rewrite of the branch, the allowed lease-protected exception, with a tree-hash proof.
+
+## Decision needed from the user
+
+The friend-code rule. Recommendation: a stored code belongs only to its request. A new request without a code uses the linked Steam account (`known_code`) or asks for the code with the hint, and never reuses a code from an earlier request or from chat. A `WaitingForCode` request also expires with the request window. This one rule closes all three paths of finding 1.
+
+After the decision, the next step needs the user's explicit approval for further gate rounds. Then: one fixer pass, then a gate round.
