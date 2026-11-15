@@ -238,8 +238,16 @@ impl Request {
         }
     }
 
-    fn restart_at(&mut self, message_id: u64, created_at: i64) {
-        *self = Self::new(message_id, created_at, self.direct, Phase::Pending);
+    fn restart_at(&mut self, message_id: u64, created_at: i64, direct: bool) {
+        *self = Self::new(message_id, created_at, direct, Phase::Pending);
+    }
+
+    fn first_id(&self) -> u64 {
+        self.reposts
+            .iter()
+            .chain(&self.earlier)
+            .copied()
+            .fold(self.message_id, u64::min)
     }
 
     fn ids(&self) -> Vec<u64> {
@@ -621,25 +629,27 @@ impl InviteLoungeWatcher {
         if is_offer(&event.content) || kind.is_none() && friend_code(&event.content).is_none() {
             return Ok(None);
         }
+        let linked = match kind {
+            Some(_) if friend_code(&event.content).is_none() => {
+                self.store.known_code(event.author_id).await?
+            }
+            _ => None,
+        };
         loop {
             let previous = self.store.load(event.author_id).await?;
             let mut next = previous.clone().unwrap_or_default();
             if event.message_id <= next.last_seen {
                 return Ok(None);
             }
-            let code = friend_code(&event.content);
             if previous.is_none() {
                 next.last_hint_at = self.store.last_hint_at(event.author_id).await?;
-            }
-            if code.is_none() && next.friend_code.is_none() && kind == Some(RequestKind::Direct) {
-                next.friend_code = self.store.known_code(event.author_id).await?;
             }
             let hint_before = (next.hint_sent, next.last_hint_at);
             let wants_hint = update_state(
                 &mut next,
                 &event,
                 kind,
-                code,
+                linked.clone(),
                 existing_hint.unwrap_or(false),
                 now,
                 (self.clock_millis)(),
@@ -750,7 +760,7 @@ impl InviteLoungeWatcher {
             if let Some(code) = new_code {
                 next.friend_code = Some(code.to_string());
             }
-            if repost && accepts_repost(&next, event) {
+            if repost {
                 note_repost(&mut next, event);
             }
 
@@ -1066,6 +1076,9 @@ impl InviteLoungeWatcher {
                 return Ok(());
             };
             let mut claimed = previous.clone();
+            if answer_pending(&previous) {
+                return Ok(());
+            }
             let Some(head) = claimed
                 .outbox
                 .first_mut()
@@ -1383,7 +1396,7 @@ impl InviteLoungeWatcher {
         if !self.allows_actions(request.created_at).await? {
             return Ok(());
         }
-        if previous.status.check_at.is_some_and(|at| now < at) {
+        if previous.status.check_at.is_some_and(|at| now < at) || answer_pending(&previous) {
             return Ok(());
         }
         if let Some(wait) = previous.status.wait {
@@ -1567,11 +1580,7 @@ impl InviteLoungeWatcher {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
         let request_ids = request.ids();
-        let first = request_ids
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(request.message_id);
+        let first = request.first_id();
         let mut before = None;
         loop {
             let page = self.port.history(channel_id, before).await?;
@@ -1580,7 +1589,7 @@ impl InviteLoungeWatcher {
             }
             if page
                 .iter()
-                .any(|message| answers_request(message, &request_ids, user_id, bot_id))
+                .any(|message| answers_request(message, first, &request_ids, user_id, bot_id))
             {
                 return Ok(true);
             }
@@ -1779,10 +1788,7 @@ impl InviteLoungeWatcher {
             {
                 continue;
             }
-            let code = friend_code(&message.content);
-            if code.is_none()
-                && request_kind(&message.content, self.port.bot_id().unwrap_or(0)).is_none()
-            {
+            if !hints.contains(&message.message_id) {
                 continue;
             }
             loop {
@@ -1794,19 +1800,12 @@ impl InviteLoungeWatcher {
                 if message.message_id <= observed.last_seen {
                     break;
                 }
-                if observed.request.is_none() {
-                    if let Some(code) = code.as_ref() {
-                        observed.friend_code = Some(code.clone());
-                    }
-                }
-                if hints.contains(&message.message_id) {
-                    observed.last_hint_at = Some(
-                        observed
-                            .last_hint_at
-                            .unwrap_or(message.created_at)
-                            .max(message.created_at),
-                    );
-                }
+                observed.last_hint_at = Some(
+                    observed
+                        .last_hint_at
+                        .unwrap_or(message.created_at)
+                        .max(message.created_at),
+                );
                 if self
                     .store
                     .compare_exchange(message.author_id, previous.as_ref(), &observed)
@@ -1960,13 +1959,13 @@ fn update_state(
     state: &mut LoungeState,
     event: &LoungeMessage,
     kind: Option<RequestKind>,
-    code: Option<String>,
+    linked: Option<String>,
     existing_hint: bool,
     now: i64,
     now_millis: i64,
 ) -> bool {
     state.last_seen = event.message_id;
-    if kind.is_none() && !open_request_in(state, event.channel_id) {
+    if kind.is_none() && !takes_plain_code(state, event.channel_id, now) {
         tracing::info!(
             user_id = event.author_id,
             message_id = event.message_id,
@@ -1974,23 +1973,20 @@ fn update_state(
         );
         return false;
     }
+    let code = friend_code(&event.content);
     let request_before = state.request.as_ref().map(|request| request.message_id);
-    let has_message_code = code.is_some();
     let code_changed = code
         .as_ref()
         .is_some_and(|code| state.friend_code.as_ref() != Some(code));
     if kind == Some(RequestKind::Room)
-        && has_message_code
+        && code.is_some()
         && !code_changed
         && !state.status.asked()
-        && accepts_repost(state, event)
+        && note_repost(state, event)
     {
-        note_repost(state, event);
         return false;
     }
-    if let Some(code) = code {
-        state.friend_code = Some(code);
-    }
+    let mut restart = code_changed;
     if let Some(kind) = kind {
         let direct = kind == RequestKind::Direct;
         let arrived_during_dispatch = state
@@ -2006,13 +2002,14 @@ fn update_state(
                 && (direct || request.phase == Phase::WaitingForCode)
         });
         if replace {
-            let continuing_direct = state
-                .request
-                .as_ref()
+            let open = open_request(state, event.channel_id, now);
+            let continuing_direct = open
                 .is_some_and(|request| request.direct && request.phase == Phase::WaitingForCode);
-            let phase = if has_message_code
-                || ((direct || continuing_direct) && state.friend_code.is_some())
-            {
+            let carried = open
+                .filter(|request| request.phase != Phase::WaitingForCode)
+                .and(state.friend_code.clone());
+            state.friend_code = code.clone().or(carried).or(linked);
+            let phase = if state.friend_code.is_some() {
                 Phase::Pending
             } else {
                 Phase::WaitingForCode
@@ -2026,20 +2023,23 @@ fn update_state(
             if !continuing_direct && state.friend_code.is_some() {
                 state.hint_sent = false;
             }
+            restart = false;
         }
     } else if let Some(request) = state
         .request
         .as_mut()
         .filter(|request| request.phase == Phase::WaitingForCode)
     {
-        if state.friend_code.is_some() {
+        if let Some(code) = code.clone() {
+            state.friend_code = Some(code);
             request.phase = Phase::Pending;
             request.message_id = event.message_id;
             request.created_at = event.created_at;
         }
+        restart = false;
     }
-    if code_changed {
-        restart_for_new_code(state, event, kind == Some(RequestKind::Direct));
+    if let Some(code) = code.filter(|_| restart) {
+        restart_for_new_code(state, event, code, kind == Some(RequestKind::Direct), now);
     }
     if state.request.as_ref().map(|request| request.message_id) != request_before {
         note_dropped_answers(
@@ -2067,34 +2067,54 @@ fn update_state(
     needs_hint
 }
 
-fn open_request_in(state: &LoungeState, channel_id: u64) -> bool {
-    state.request.as_ref().is_some_and(|request| {
-        matches!(
-            request.phase,
-            Phase::WaitingForCode | Phase::Pending | Phase::Dispatching
-        )
-    }) && state
-        .status
-        .channel_id
-        .is_none_or(|request_channel| request_channel == channel_id)
+fn open_request(state: &LoungeState, channel_id: u64, now: i64) -> Option<&Request> {
+    state.request.as_ref().filter(|request| {
+        state.status.channel_id == Some(channel_id)
+            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
+            && matches!(
+                request.phase,
+                Phase::WaitingForCode | Phase::Pending | Phase::Dispatching
+            )
+    })
 }
 
-fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage, direct: bool) {
+fn awaits_corrected_code(state: &LoungeState, now: i64) -> bool {
+    state.status.notices.contains(&Notice::InvalidCode)
+        && state.request.as_ref().is_some_and(|request| {
+            request.phase == Phase::Attempted
+                && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
+        })
+}
+
+fn takes_plain_code(state: &LoungeState, channel_id: u64, now: i64) -> bool {
+    open_request(state, channel_id, now).is_some()
+        || (state.status.channel_id == Some(channel_id) && awaits_corrected_code(state, now))
+}
+
+fn restart_for_new_code(
+    state: &mut LoungeState,
+    event: &LoungeMessage,
+    code: String,
+    direct: bool,
+    now: i64,
+) {
+    let correcting = awaits_corrected_code(state, now);
     let Some(request) = state.request.as_mut().filter(|request| {
-        matches!(request.phase, Phase::Pending | Phase::Dispatching)
+        (correcting || matches!(request.phase, Phase::Pending | Phase::Dispatching))
             && request.message_id != event.message_id
     }) else {
         return;
     };
     let old = request.message_id;
-    request.restart_at(event.message_id, event.created_at);
-    request.direct = direct;
+    request.restart_at(event.message_id, event.created_at, direct);
+    state.friend_code = Some(code);
     state.dispatch_started_at_millis = None;
 
     tracing::info!(
         user_id = event.author_id,
         old_message_id = old,
         message_id = event.message_id,
+        correcting,
         "Invite-Lounge startet die Bitte mit dem neuen Freundescode neu"
     );
 }
@@ -2116,7 +2136,6 @@ fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
         && status.wait.is_none()
         && !status.invite_now
         && status.check_in_at.is_none()
-        && status.held_answers.is_empty()
         && check_in_window(now.saturating_sub(request.created_at))
 }
 
@@ -2224,6 +2243,7 @@ fn forget_request(state: &mut LoungeState) {
         );
     }
     state.status = RequestStatus::default();
+    state.friend_code = None;
     state.last_result = Some("Bitte gelöscht; still beendet".into());
 }
 
@@ -2248,6 +2268,10 @@ fn queue_held_answer(state: &mut LoungeState, user_id: u64, held: HeldAnswer) {
     );
 }
 
+fn answer_pending(state: &LoungeState) -> bool {
+    !state.status.held_answers.is_empty()
+}
+
 fn queue_has_room(queue: &[HeldAnswer], message_id: u64) -> bool {
     queue.len() < ANSWER_QUEUE_LIMIT || queue.iter().any(|queued| queued.message_id == message_id)
 }
@@ -2265,7 +2289,10 @@ fn accepts_repost(state: &LoungeState, event: &LoungeMessage) -> bool {
         })
 }
 
-fn note_repost(state: &mut LoungeState, event: &LoungeMessage) {
+fn note_repost(state: &mut LoungeState, event: &LoungeMessage) -> bool {
+    if !accepts_repost(state, event) {
+        return false;
+    }
     if let Some(request) = state
         .request
         .as_mut()
@@ -2273,6 +2300,7 @@ fn note_repost(state: &mut LoungeState, event: &LoungeMessage) {
     {
         keep_bounded(&mut request.reposts, event.message_id);
     }
+    true
 }
 
 fn keep_bounded(ids: &mut Vec<u64>, id: u64) {
@@ -2501,11 +2529,11 @@ fn apply_answer(
 
 fn answers_request(
     message: &LoungeMessage,
+    first: u64,
     request_ids: &[u64],
     user_id: u64,
     bot_id: u64,
 ) -> bool {
-    let first = request_ids.iter().copied().min().unwrap_or(u64::MAX);
     message.message_id > first
         && message.author_id != user_id
         && message.author_id != bot_id

@@ -78,9 +78,47 @@ Clusters group the duplicates. Finding numbers refer to `gate-r4.log`.
 
 New tests: `neuer_code_waehrend_des_versands_startet_die_bitte_neu`, `schlichter_neuer_code_bei_direkter_bitte_laedt_nicht_von_selbst`, `zahl_in_einem_anderen_kanal_aendert_die_offene_bitte_nicht`, `raumbitte_im_versand_mit_neuem_code_laedt_nicht_von_selbst`, `direkte_bitte_mit_neuem_code_im_laufenden_versand_bleibt_direkt`, `hinweisfreigabe_gibt_die_sperrzeit_auch_nach_neuer_bitte_frei`, `hilfe_an_einer_kopie_der_bitte_zaehlt`, `hilfe_an_der_geloeschten_ersten_bitte_zaehlt_nach_dem_folgen`, `geloeschte_kopien_werden_der_reihe_nach_verfolgt_und_zuletzt_verworfen`, `kopien_der_bitte_bleiben_begrenzt_und_ohne_doppelte`, `geloeschte_wartende_bitte_wird_beim_abgleich_still_verworfen`, `hinweisfreigabe_haelt_trotz_zwischenzeitlicher_schreibung`, `verlaufsfehler_vor_dem_hinweis_verliert_die_bitte_nicht`, `abgelaufene_leihe_wendet_kein_zweites_urteil_an`, `broker_antwort_ohne_zielnachricht_wird_nicht_ohne_bezug_gepostet`, `geloeschte_bitte_im_versand_folgt_der_neu_geposteten` (replaces the Deferred test).
 
-Independent Opus review of 86ae2201 (one pass, before the final gate): one blocking finding, fixed in the follow-up commit. A changed code from a non-request message in any lounge channel restarted the request there, so a match number in #frag-die-community invited a direct request's member at once and moved a room check-in under an unrelated message. On main the same mechanism moved only a `Pending` room request. Class fixed: a non-request message changes code or request only in the request's channel, for every open phase. Also fixed: the restart takes `direct` from the new message, so a stray number in the request's own channel never invites without a "nein"; README overclaims (always, test credit for the SQL window, finish no-op reason); the reviewer's NITs on `poll_due` (L twin), the dropped `note_repost` return (M) and `release_hint` after a new request (E).
+Independent Opus review of 86ae2201, now c70faf7d (one pass, before the final gate): one blocking finding, fixed in the follow-up commit. A changed code from a non-request message in any lounge channel restarted the request there, so a match number in #frag-die-community invited a direct request's member at once and moved a room check-in under an unrelated message. On main the same mechanism moved only a `Pending` room request. Class fixed: a non-request message changes code or request only in the request's channel, for every open phase. Also fixed: the restart takes `direct` from the new message, so a stray number in the request's own channel never invites without a "nein"; README overclaims (always, test credit for the SQL window, finish no-op reason); the reviewer's NITs on `poll_due` (L twin), the dropped `note_repost` return (M) and `release_hint` after a new request (E).
 
 
 
 Checks: dl-community 355 passed (4 DB-harness tests need `CENTRAL_TEST_DSN`), invite lounge with Postgres on ionos 134 passed; dl-discord, dl-broker, dl-bridges green; dl-bot only the 8 DB-harness `build_publisher` tests fail without `CENTRAL_TEST_DSN`. fmt clean, no clippy warning on branch lines.
+
+## 5. Round 5 (final round) and the user decision of 2026-11-16
+
+Round 5 ended BLOCK: 40 blocking lines (26 `[hook]` restatements) and 15 NITs (gate-r5.log). The user decided the friend-code rule ("FIX IT") and approved at most two more rounds (6 and 7) with one fix between them.
+
+### Classification of the real round-5 findings
+
+| Finding | Cause | Class | Fix |
+|---|---|---|---|
+| corrected code after `InvalidCode` dropped | regression (856e7939, now 204dec89) | a guard that narrows accepted inputs must list the inputs it now refuses | `awaits_corrected_code` keeps that request open for a correction; `restart_for_new_code` restarts it as a room request with the new code |
+| stale `WaitingForCode` completed by a stray number | instance | "is the request open" written without the request window | one predicate `open_request` (phase, `is_fresh`, exact channel) for plain codes and for `continuing_direct`, the twin that let a stale direct request make a new room request direct |
+| `record_history` stores any number as `friend_code` | instance | every `friend_code` writer that stores a code no request owns | backfill writes no code; a new request takes the message code, its own open request's code, the linked account, or none; `forget_request` clears it |
+| `restart_at` carries `direct` the caller overwrites | regression (35e0a042, now ff234601) | rule kept in the caller instead of the shared function | `Request::restart_at` takes `direct` |
+| `note_repost` guard in the callers | regression (856e7939) | same | `note_repost` checks `accepts_repost` and returns whether it noted |
+| `REQUEST_COPY_LIMIT = 5` underived | spec | bound without stated reason and overrun mode | README states purpose and effect on staff detection |
+| min-id bound computed twice | instance | one bound computed in two places | `Request::first_id`, passed to `answers_request` |
+| README credits tests for paths they do not run | doc overclaim | test claims beyond the assertions | README states what each test asserts; `korrigierter_code_nach_ungueltigem_code_gehoert_zur_bitte` runs restart, check-in, "nein" and the invite |
+| list formatting | NIT | | fixed |
+| hook: heading `Ursache (four layers):` | spec | hook expects `Ursache:` | message-only rewrite below |
+
+Decision 4 ("ja" ends the request, no "nicht angenommen") had one path no finding named: a "ja" held through a Brain error let `follow_steam` settle `NotAccepted` and `deliver_outbox` send it. `answer_pending` now pauses the Steam follow-up, the invite and notice delivery while an answer is held. Alp replay: `alps_verlauf_ohne_antwort_keine_anfrage_und_nach_ja_keine_absage`.
+
+### Message-only rewrite (lease-protected, own unmerged branch)
+
+`git filter-branch --msg-filter` replaced `Ursache (four layers):` with `Ursache:`, updated with `--force-with-lease` against 2b339d08. Every tree is unchanged:
+
+| Old commit | New commit | Tree (both) |
+|---|---|---|
+| 86ae2201 | c70faf7d | 7ba5f6c5 |
+| c64783ea | ffb4f78d | 638fbdad |
+| 35e0a042 | ff234601 | 12d66848 |
+| 856e7939 | 204dec89 | 17f60bc5 |
+| 2b339d08 | e6c0c494 | 84418eef |
+
+Older references to the old SHAs in this folder mean the new commit with the same tree.
+
+### Checks of fix pass 6
+With Postgres on ionos (`test-db-run`): invite lounge 145 passed, dl-bot 374 passed. Without a DSN: dl-community 366 passed (the 4 failures are DB-harness tests), dl-bridges 58, dl-discord 74. `cargo fmt --check -p dl-community` clean; clippy reports nothing in the lounge files.
 
