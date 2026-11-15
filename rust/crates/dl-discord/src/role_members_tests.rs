@@ -85,7 +85,11 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
             socket.write_all(response.as_bytes()).await.unwrap();
         }
     });
-    let mut adapter = DiscordAdapter::new("test-only");
+    let mut adapter = DiscordAdapter::new(
+        "test-only",
+        reqwest::Client::new(),
+        std::time::Duration::from_secs(5),
+    );
     Arc::get_mut(&mut adapter).unwrap().http = Arc::new(
         serenity::http::HttpBuilder::new("test-only")
             .proxy(format!("http://{address}"))

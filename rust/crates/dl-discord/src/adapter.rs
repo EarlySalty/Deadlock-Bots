@@ -8,6 +8,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::dm_gate::{DmError, DmIntent};
 use crate::invite_tracker::{InviteSnapshotHealth, InviteTracker};
@@ -25,6 +26,8 @@ use serenity::builder::CreateAttachment;
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
+    rest_client: reqwest::Client,
+    request_limit: Duration,
     /// Gateway-Cache. WICHTIG: serenity erlaubt keine Cache-Injektion und legt
     /// beim Client-Build einen EIGENEN Cache an. Dieser hier wird nach dem Build
     /// via [`Self::link_cache`] an genau diesen serenity-Cache gekoppelt — sonst
@@ -50,9 +53,11 @@ pub struct ReactedUser {
 }
 
 impl DiscordAdapter {
-    pub fn new(token: &str) -> Arc<Self> {
+    pub fn new(token: &str, rest_client: reqwest::Client, request_limit: Duration) -> Arc<Self> {
         Arc::new(Self {
-            http: Arc::new(Http::new(token)),
+            http: Arc::new(bounded_http(token, rest_client.clone())),
+            rest_client,
+            request_limit,
             cache: OnceLock::new(),
             bot_user_id: Arc::new(OnceLock::new()),
             gateway_ready: Arc::new(AtomicBool::new(false)),
@@ -63,6 +68,14 @@ impl DiscordAdapter {
             invite_tracker: OnceLock::new(),
             dm_gate: OnceLock::new(),
         })
+    }
+
+    pub fn rest_http(&self, token: &str) -> Http {
+        bounded_http(token, self.rest_client.clone())
+    }
+
+    pub fn request_limit(&self) -> Duration {
+        self.request_limit
     }
 
     /// Koppelt den Adapter an serenitys vom Gateway befüllten Client-Cache.
@@ -1432,13 +1445,23 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
     })
 }
 
+fn bounded_http(token: &str, client: reqwest::Client) -> Http {
+    serenity::http::HttpBuilder::new(token)
+        .client(client)
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
-        let adapter = DiscordAdapter::new("test-token");
+        let adapter = DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let shared_id = adapter.bot_user_id_cell();
         assert_eq!(shared_id.get(), None);
 
@@ -1674,7 +1697,11 @@ mod tests {
 
     #[tokio::test]
     async fn invite_snapshot_without_linked_tracker_is_not_current() {
-        let adapter = DiscordAdapter::new("test-token");
+        let adapter = DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
 
         assert!(matches!(
             adapter.ensure_invite_snapshot_current(42).await,

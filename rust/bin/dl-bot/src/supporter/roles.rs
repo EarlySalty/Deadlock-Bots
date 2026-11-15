@@ -53,12 +53,8 @@ pub async fn fetch_members(
 ) -> Result<Vec<MemberSnapshot>, String> {
     let supporter_role = RoleId::new(SUPPORTER_ROLE_ID);
     let booster_role = RoleId::new(BOOSTER_ROLE_ID);
-    let members = tokio::time::timeout(
-        limits.request,
-        crate::guild_members::fetch_all(http, GuildId::new(guild_id)),
-    )
-    .await
-    .map_err(|_| "Zeitlimit für die Mitgliederliste überschritten".to_string())??;
+    let members =
+        crate::guild_members::fetch_all(http, GuildId::new(guild_id), limits.request).await?;
     Ok(members
         .into_iter()
         .filter(|member| !member.user.bot)
@@ -205,7 +201,11 @@ mod tests {
         let (http, server) = discord(app).await;
         let serversync = crate::serversync::ServerSyncService::new(
             db.pool().clone(),
-            dl_discord::DiscordAdapter::new("test"),
+            dl_discord::DiscordAdapter::new(
+                "test",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            ),
             "test".to_string(),
             1,
             limits(),

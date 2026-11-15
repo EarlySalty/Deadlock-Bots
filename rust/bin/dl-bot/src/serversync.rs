@@ -1113,7 +1113,11 @@ impl ServerSyncService {
         );
         Arc::new(Self {
             pool,
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            adapter: dl_discord::DiscordAdapter::new(
+                "test-token",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            ),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
             http_client: dl_bridges::http::client(http_limits).expect("Testclient"),
@@ -1185,12 +1189,12 @@ impl ServerSyncService {
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
-        let members = tokio::time::timeout(
+        let members = crate::guild_members::fetch_all(
+            &self.adapter.http,
+            GuildId::new(self.guild_id),
             self.http_limits.request,
-            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)),
         )
         .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))?
         .map_err(ServerSyncError::internal)?;
         let mut assignments: Vec<MemberRoleAssignment> = members
             .into_iter()
@@ -1715,12 +1719,12 @@ impl ServerSyncService {
     }
 
     async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
-        let fetched = tokio::time::timeout(
+        let fetched = crate::guild_members::fetch_all(
+            &self.adapter.http,
+            GuildId::new(self.guild_id),
             self.http_limits.request,
-            crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)),
         )
         .await
-        .map_err(|error| ServerSyncError::internal(error.to_string()))?
         .map_err(ServerSyncError::internal)?;
         let mut members: Vec<WelcomeTeamMember> = fetched
             .into_iter()

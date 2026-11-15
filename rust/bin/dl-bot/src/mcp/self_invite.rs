@@ -622,7 +622,11 @@ mod tests {
         )
         .expect("State")
         .with_public_source(
-            dl_discord::DiscordAdapter::new("fixture-bot"),
+            dl_discord::DiscordAdapter::new(
+                "fixture-bot",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            ),
             db.pool().clone(),
             1,
         );

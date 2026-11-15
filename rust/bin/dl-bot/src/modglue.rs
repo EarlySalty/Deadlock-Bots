@@ -2645,7 +2645,12 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
         role_id: u64,
     ) -> Vec<(u64, String, String, String)> {
         let role = serenity::all::RoleId::new(role_id);
-        match crate::guild_members::fetch_all(&self.adapter.http, GuildId::new(self.guild_id)).await
+        match crate::guild_members::fetch_all(
+            &self.adapter.http,
+            GuildId::new(self.guild_id),
+            self.adapter.request_limit(),
+        )
+        .await
         {
             Ok(members) => members
                 .iter()
@@ -3430,7 +3435,12 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             }
         }
 
-        let members = crate::guild_members::fetch_all(&self.adapter.http, guild).await?;
+        let members = crate::guild_members::fetch_all(
+            &self.adapter.http,
+            guild,
+            self.adapter.request_limit(),
+        )
+        .await?;
         Ok(members
             .into_iter()
             .filter(|member| member.roles.contains(&role))
@@ -4965,7 +4975,11 @@ mod tests {
     }
 
     fn public_test_adapter() -> Arc<DiscordAdapter> {
-        let adapter = dl_discord::DiscordAdapter::new("test-token");
+        let adapter = dl_discord::DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let mut guild = serenity::all::Guild::default();
         guild.id = GuildId::new(1);
         let mut role = serenity::all::Role::default();
@@ -6792,7 +6806,11 @@ mod tests {
             (Some(-3600), Permissions::all(), true),
             (None, Permissions::VIEW_CHANNEL, false),
         ] {
-            let adapter = DiscordAdapter::new("test-token");
+            let adapter = DiscordAdapter::new(
+                "test-token",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            );
             let cache = Arc::new(serenity::all::Cache::new());
             let mut guild = serenity::all::Guild::default();
             guild.id = GuildId::new(1);
@@ -6829,7 +6847,11 @@ mod tests {
 
     #[tokio::test]
     async fn dm_lesezugriff_nur_fuer_aufgeloeste_servermitglieder() {
-        let adapter = DiscordAdapter::new("test-token");
+        let adapter = DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let cache = Arc::new(serenity::all::Cache::new());
         let mut guild = serenity::all::Guild::default();
         guild.id = GuildId::new(crate::serversync::GUILD_ID);
@@ -7762,7 +7784,11 @@ mod tests {
         guild_id: u64,
         channels: Vec<serenity::all::GuildChannel>,
     ) -> Arc<DiscordAdapter> {
-        let adapter = DiscordAdapter::new("test-token");
+        let adapter = DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let cache = Arc::new(serenity::all::Cache::new());
         let mut guild = serenity::all::Guild::default();
         guild.id = GuildId::new(guild_id);
@@ -7799,7 +7825,11 @@ mod tests {
         use dl_community::faq::FaqPort as _;
 
         let faq = FaqGlue {
-            adapter: DiscordAdapter::new("test-token"),
+            adapter: DiscordAdapter::new(
+                "test-token",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            ),
         };
 
         assert_eq!(faq.channel_category(0, 1).await, None);
@@ -7810,7 +7840,11 @@ mod tests {
         use dl_community::faq::FaqPort as _;
 
         let faq = FaqGlue {
-            adapter: DiscordAdapter::new("test-token"),
+            adapter: DiscordAdapter::new(
+                "test-token",
+                reqwest::Client::new(),
+                std::time::Duration::from_secs(5),
+            ),
         };
 
         assert!(!faq.private_faq_channel_owned_by_user(0, 1, 2).await);
