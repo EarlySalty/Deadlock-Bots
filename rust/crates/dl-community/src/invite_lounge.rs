@@ -624,6 +624,7 @@ impl InviteLoungeWatcher {
             let mut next = previous.clone();
             queue_held_answer(
                 &mut next,
+                event.author_id,
                 HeldAnswer::fresh(event.message_id, content.clone()),
             );
             if self
@@ -1778,7 +1779,7 @@ fn forget_request(state: &mut LoungeState) -> Option<u64> {
     Some(request.message_id)
 }
 
-fn queue_held_answer(state: &mut LoungeState, held: HeldAnswer) {
+fn queue_held_answer(state: &mut LoungeState, user_id: u64, held: HeldAnswer) {
     state.last_seen = state.last_seen.max(held.message_id);
     let queue = &mut state.status.held_answers;
     if queue
@@ -1792,7 +1793,14 @@ fn queue_held_answer(state: &mut LoungeState, held: HeldAnswer) {
     }
     if queue.len() < ANSWER_QUEUE_LIMIT {
         queue.push(held);
+        return;
     }
+    tracing::warn!(
+        user_id,
+        message_id = held.message_id,
+        queued = queue.len(),
+        "Invite-Lounge verwirft Antwort, weil schon zu viele Antworten auf ein Brain-Urteil warten"
+    );
 }
 
 fn retry_held_answer(state: &mut LoungeState, user_id: u64, now_millis: i64) -> bool {

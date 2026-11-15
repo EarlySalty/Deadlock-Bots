@@ -1,6 +1,6 @@
 use super::status::{
-    notice_backoff, HeldAnswer, Notice, RequestStatus, SteamOutcome, SteamWait, CHECK_IN_SECONDS,
-    RETRY_SECONDS,
+    notice_backoff, HeldAnswer, Notice, RequestStatus, SteamOutcome, SteamWait, ANSWER_QUEUE_LIMIT,
+    CHECK_IN_SECONDS, RETRY_SECONDS,
 };
 use super::*;
 use crate::answer_support::test_brain::{check_in_reply, ScriptedBrain, ScriptedReply};
@@ -100,6 +100,7 @@ impl LoungeStore for MemoryStore {
                     .request
                     .as_ref()
                     .is_some_and(|request| request.phase == Phase::Pending)
+                    || !state.status.held_answers.is_empty()
             })
             .map(|(id, _)| *id)
             .collect())
@@ -2910,4 +2911,60 @@ async fn veraltete_bitte_im_versand_nimmt_keine_antwort_mehr_an() {
     assert!(check_in_texts(&brain).is_empty());
     assert!(stored(&store).await.status.held_answers.is_empty());
     assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn gehaltene_antwort_im_versand_wird_beim_naechsten_takt_gewertet() {
+    let (mut watcher, store, _, invite, brain) = setup_check_ins(vec![
+        Err(BrainError::Backend("Brain weg".into())),
+        check_in_reply(InviteCheckInOutcome::Arrived),
+    ]);
+    let clock = moving_clock(&mut watcher);
+    store
+        .states
+        .lock()
+        .await
+        .insert(USER, open_request_state(Phase::Dispatching, None));
+    let at = NOW + ONE_HOUR + 60;
+    clock.store(at * 1000, Ordering::SeqCst);
+    watcher
+        .handle_message(message(5, at, "hab ich schon"), at, Some(false))
+        .await
+        .expect("Antwort wird gehalten");
+    assert_eq!(stored(&store).await.status.held_answers.len(), 1);
+    clock.store(at * 1000 + notice_backoff(1), Ordering::SeqCst);
+    watcher.poll_due(at + 61).await.expect("Abfrage läuft");
+    assert_eq!(check_in_texts(&brain), ["hab ich schon", "hab ich schon"]);
+    let state = stored(&store).await;
+    assert!(state.status.held_answers.is_empty());
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[test]
+fn volle_antwortschlange_nimmt_keine_weitere_antwort_auf() {
+    let mut state = open_request_state(Phase::Pending, None);
+    for message_id in 10..10 + ANSWER_QUEUE_LIMIT as u64 {
+        queue_held_answer(
+            &mut state,
+            USER,
+            HeldAnswer::fresh(message_id, "nein".into()),
+        );
+    }
+    let overflow = 10 + ANSWER_QUEUE_LIMIT as u64;
+    queue_held_answer(
+        &mut state,
+        USER,
+        HeldAnswer::fresh(overflow, "hallo?".into()),
+    );
+    assert_eq!(state.status.held_answers.len(), ANSWER_QUEUE_LIMIT);
+    assert!(state
+        .status
+        .held_answers
+        .iter()
+        .all(|held| held.message_id != overflow));
+    assert_eq!(state.last_seen, overflow);
 }
