@@ -6,75 +6,314 @@ const RULE: &str = "A migration sets lock_timeout or statement_timeout only with
     resets it with RESET <name> after its last session-level SET; sqlx runs each migration in \
     its own transaction on a pooled connection, so a session-level SET outlives the migration.";
 
-fn without_comments(sql: &str) -> String {
-    let mut rest = sql;
-    let mut kept = String::new();
-    while let Some(open) = rest.find("/*") {
-        kept.push_str(&rest[..open]);
-        rest = rest[open..]
-            .find("*/")
-            .map_or("", |close| &rest[open + close + 2..]);
+#[derive(Clone, Debug, PartialEq)]
+enum Token {
+    Word(String),
+    Text(String),
+    Body(String),
+    Symbol(char),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Event {
+    Set(Option<String>),
+    Reset(String),
+    ResetAll,
+}
+
+fn skip_block_comment(chars: &[char], mut at: usize) -> usize {
+    let mut depth = 0usize;
+    while at < chars.len() {
+        if chars[at] == '/' && chars.get(at + 1) == Some(&'*') {
+            depth += 1;
+            at += 2;
+        } else if chars[at] == '*' && chars.get(at + 1) == Some(&'/') {
+            depth = depth.saturating_sub(1);
+            at += 2;
+            if depth == 0 {
+                return at;
+            }
+        } else {
+            at += 1;
+        }
     }
-    kept.push_str(rest);
-    kept.lines()
-        .map(|line| line.find("--").map_or(line, |at| &line[..at]))
-        .collect::<Vec<_>>()
-        .join("\n")
+    at
 }
 
-fn statement_starts(lowered: &str) -> Vec<usize> {
-    let mut starts = vec![0];
-    starts.extend(lowered.match_indices(';').map(|(at, _)| at + 1));
-    starts
+fn read_quoted(chars: &[char], mut at: usize, quote: char, escapes: bool) -> (String, usize) {
+    let mut text = String::new();
+    at += 1;
+    while at < chars.len() {
+        let c = chars[at];
+        if escapes && c == '\\' {
+            text.extend(chars.get(at + 1));
+            at += 2;
+        } else if c == quote && chars.get(at + 1) == Some(&quote) {
+            text.insert(text.len(), quote);
+            at += 2;
+        } else if c == quote {
+            return (text, at + 1);
+        } else {
+            text.insert(text.len(), c);
+            at += 1;
+        }
+    }
+    (text, at)
 }
 
-fn session_set_statements(lowered: &str, name: &str) -> Vec<usize> {
-    let session_sets = [format!("set {name}"), format!("set session {name}")];
-    statement_starts(lowered)
-        .into_iter()
-        .filter_map(|start| {
-            let statement = lowered.get(start..)?.trim_start();
-            let offset = lowered.len() - statement.len();
-            session_sets
-                .iter()
-                .any(|set| {
-                    statement.starts_with(set.as_str())
-                        && !statement[set.len()..]
-                            .starts_with(|c: char| c == '_' || c.is_ascii_alphanumeric())
-                })
-                .then_some(offset)
+fn dollar_tag(chars: &[char], at: usize) -> Option<String> {
+    let mut end = at + 1;
+    while end < chars.len() && (chars[end] == '_' || chars[end].is_ascii_alphanumeric()) {
+        end += 1;
+    }
+    let tag: String = chars[at + 1..end].iter().collect();
+    let valid = !tag.starts_with(|c: char| c.is_ascii_digit());
+    (valid && chars.get(end) == Some(&'$')).then(|| format!("${tag}$"))
+}
+
+fn read_dollar_body(chars: &[char], at: usize, tag: &str) -> (String, usize) {
+    let open = tag.chars().count();
+    let rest: String = chars[at + open..].iter().collect();
+    match rest.find(tag) {
+        Some(close) => {
+            let body = rest[..close].to_owned();
+            let end = at + open * 2 + body.chars().count();
+            (body, end)
+        }
+        None => (rest, chars.len()),
+    }
+}
+
+fn is_word_char(c: char) -> bool {
+    c == '_' || c == '$' || c.is_alphanumeric()
+}
+
+fn line_end(chars: &[char], at: usize) -> usize {
+    chars[at..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(chars.len(), |offset| at + offset)
+}
+
+fn word_end(chars: &[char], at: usize) -> usize {
+    chars[at..]
+        .iter()
+        .position(|c| !is_word_char(*c))
+        .map_or(chars.len(), |offset| at + offset)
+}
+
+fn escape_string_prefix(found: &[Token], chars: &[char], at: usize) -> bool {
+    matches!(found.last(), Some(Token::Word(word)) if word == "e")
+        && at > 0
+        && matches!(chars[at - 1], 'e' | 'E')
+}
+
+fn tokens(sql: &str) -> Vec<Token> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let c = chars[at];
+        let next = chars.get(at + 1).copied();
+        let (token, end) = if c.is_whitespace() {
+            (None, at + 1)
+        } else if c == '-' && next == Some('-') {
+            (None, line_end(&chars, at))
+        } else if c == '/' && next == Some('*') {
+            (None, skip_block_comment(&chars, at))
+        } else if c == '\'' {
+            let escapes = escape_string_prefix(&found, &chars, at);
+            if escapes {
+                found.truncate(found.len() - 1);
+            }
+            let (text, end) = read_quoted(&chars, at, '\'', escapes);
+            (Some(Token::Text(text.to_lowercase())), end)
+        } else if c == '"' {
+            let (text, end) = read_quoted(&chars, at, '"', false);
+            (Some(Token::Word(text.to_lowercase())), end)
+        } else if let Some(tag) = (c == '$').then(|| dollar_tag(&chars, at)).flatten() {
+            let (body, end) = read_dollar_body(&chars, at, &tag);
+            (Some(Token::Body(body)), end)
+        } else if is_word_char(c) {
+            let end = word_end(&chars, at);
+            let text: String = chars[at..end].iter().collect();
+            (Some(Token::Word(text.to_lowercase())), end)
+        } else {
+            (Some(Token::Symbol(c)), at + 1)
+        };
+        found.extend(token);
+        at = end;
+    }
+    found
+}
+
+fn word(token: Option<&Token>) -> Option<&str> {
+    match token {
+        Some(Token::Word(word)) => Some(word.as_str()),
+        _ => None,
+    }
+}
+
+fn set_statement_event(statement: &[Token]) -> Option<Event> {
+    let rest = match word(statement.get(1)) {
+        Some("local") => return None,
+        Some("session") => statement.get(2..)?,
+        _ => statement.get(1..)?,
+    };
+    let name = word(rest.first())?.to_owned();
+    let value = rest.get(2..).unwrap_or_default();
+    if matches!(value, [Token::Word(word)] if word == "default") {
+        return Some(Event::Reset(name));
+    }
+    Some(Event::Set(Some(name)))
+}
+
+fn statement_event(statement: &[Token]) -> Option<Event> {
+    match word(statement.first())? {
+        "set" => set_statement_event(statement),
+        "reset" => match word(statement.get(1))? {
+            "all" => Some(Event::ResetAll),
+            name => Some(Event::Reset(name.to_owned())),
+        },
+        _ => None,
+    }
+}
+
+fn call_arguments(tokens: &[Token]) -> Vec<Vec<Token>> {
+    let mut arguments = vec![Vec::new()];
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            Token::Symbol('(' | '[') => depth += 1,
+            Token::Symbol(')' | ']') if depth == 0 => break,
+            Token::Symbol(')' | ']') => depth -= 1,
+            Token::Symbol(',') if depth == 0 => {
+                arguments.extend([Vec::new()]);
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(argument) = arguments.last_mut() {
+            argument.extend([token.clone()]);
+        }
+    }
+    arguments
+}
+
+fn named(argument: &[Token]) -> (Option<&str>, &[Token]) {
+    match argument {
+        [Token::Word(name), Token::Symbol('='), Token::Symbol('>'), value @ ..]
+        | [Token::Word(name), Token::Symbol(':'), Token::Symbol('='), value @ ..] => {
+            (Some(name.as_str()), value)
+        }
+        value => (None, value),
+    }
+}
+
+fn without_cast(value: &[Token]) -> &[Token] {
+    match value {
+        [inner @ .., Token::Symbol(':'), Token::Symbol(':'), Token::Word(_)] => inner,
+        value => value,
+    }
+}
+
+fn is_true(value: &[Token]) -> bool {
+    match without_cast(value) {
+        [Token::Word(word)] => word == "true",
+        [Token::Text(text)] => matches!(text.as_str(), "true" | "t" | "on" | "yes" | "y" | "1"),
+        _ => false,
+    }
+}
+
+fn set_config_event(arguments: &[Vec<Token>]) -> Option<Event> {
+    let mut name = None;
+    let mut local = false;
+    for (index, argument) in arguments.iter().enumerate() {
+        let (key, value) = named(argument);
+        match (key, index) {
+            (Some("setting_name"), _) | (None, 0) => name = Some(without_cast(value).to_vec()),
+            (Some("is_local"), _) | (None, 2) => local = is_true(value),
+            _ => {}
+        }
+    }
+    if local {
+        return None;
+    }
+    match name.as_deref() {
+        Some([Token::Text(name)]) => Some(Event::Set(Some(name.clone()))),
+        _ => Some(Event::Set(None)),
+    }
+}
+
+fn set_config_events(statement: &[Token]) -> Vec<Event> {
+    statement
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| {
+            word(pair.first()) == Some("set_config") && pair[1] == Token::Symbol('(')
+        })
+        .filter_map(|(at, _)| set_config_event(&call_arguments(&statement[at + 2..])))
+        .collect()
+}
+
+fn body_events(text: &str) -> Vec<Event> {
+    tokens(text)
+        .split(|token| *token == Token::Symbol(';'))
+        .flat_map(|statement| {
+            let mut found = nested_sets(statement);
+            found.extend(set_config_events(statement));
+            found.extend(
+                statement
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, token)| word(Some(token)) == Some("set"))
+                    .filter_map(|(at, _)| set_statement_event(&statement[at..])),
+            );
+            found
         })
         .collect()
 }
 
-fn session_set_config_calls(lowered: &str, name: &str) -> Vec<usize> {
-    lowered
-        .match_indices("set_config")
-        .filter_map(|(at, _)| {
-            let call = &lowered[at..];
-            let end = call.find(')')?;
-            let compact: String = call[..=end]
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            (compact.starts_with(&format!("set_config('{name}',")) && compact.ends_with(",false)"))
-                .then_some(at)
+fn nested_sets(statement: &[Token]) -> Vec<Event> {
+    statement
+        .iter()
+        .filter_map(|token| match token {
+            Token::Body(text) | Token::Text(text) => Some(body_events(text)),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| matches!(event, Event::Set(_)))
+        .collect()
+}
+
+fn events(sql: &str) -> Vec<Event> {
+    tokens(sql)
+        .split(|token| *token == Token::Symbol(';'))
+        .flat_map(|statement| {
+            let mut found = nested_sets(statement);
+            found.extend(set_config_events(statement));
+            found.extend(statement_event(statement));
+            found
         })
         .collect()
+}
+
+fn resets(event: &Event, name: &str) -> bool {
+    match event {
+        Event::Reset(reset) => reset == name,
+        Event::ResetAll => true,
+        Event::Set(_) => false,
+    }
 }
 
 fn leaks(sql: &str) -> bool {
-    let lowered = without_comments(sql)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
+    let events = events(sql);
     TIMEOUTS.iter().any(|name| {
-        let last_set = session_set_statements(&lowered, name)
-            .into_iter()
-            .chain(session_set_config_calls(&lowered, name))
-            .max();
-        last_set.is_some_and(|at| !lowered[at..].contains(&format!("reset {name}")))
+        let last_set = events.iter().rposition(|event| match event {
+            Event::Set(set) => set.as_deref().is_none_or(|set| set == *name),
+            _ => false,
+        });
+        last_set.is_some_and(|at| !events[at..].iter().any(|event| resets(event, name)))
     })
 }
 
@@ -187,6 +426,86 @@ fn leak_detection_covers_every_form() {
         (
             "set_config then reset",
             "SELECT set_config('lock_timeout', '5s', false); RESET lock_timeout;",
+            false,
+        ),
+        (
+            "set_config with a call as value",
+            "SELECT set_config('lock_timeout', format('%ss', 5), false); SELECT 1;",
+            true,
+        ),
+        (
+            "set_config with named arguments",
+            "SELECT set_config(setting_name => 'lock_timeout', new_value => '5s', is_local => false);",
+            true,
+        ),
+        (
+            "set_config with named local flag",
+            "SELECT set_config(is_local => true, setting_name => 'lock_timeout', new_value => '5s');",
+            false,
+        ),
+        (
+            "set_config with a cast flag",
+            "SELECT set_config('lock_timeout', '5s', false::boolean);",
+            true,
+        ),
+        (
+            "set_config local with a cast",
+            "SELECT set_config('lock_timeout', '5s', true::boolean);",
+            false,
+        ),
+        (
+            "set_config with a computed name",
+            "SELECT set_config(current_setting('x.name'), '5s', false);",
+            true,
+        ),
+        (
+            "qualified set_config",
+            "SELECT pg_catalog.set_config('lock_timeout', '5s', false);",
+            true,
+        ),
+        (
+            "reset inside a string",
+            "SET lock_timeout = '2s'; SELECT 'reset lock_timeout';",
+            true,
+        ),
+        (
+            "reset inside a function body",
+            "SET lock_timeout = '2s'; CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ RESET lock_timeout $$;",
+            true,
+        ),
+        (
+            "comment marker inside a string",
+            "SELECT '--'; SET lock_timeout = '2s'; SELECT 1;",
+            true,
+        ),
+        (
+            "block comment marker inside a string",
+            "SELECT '/*'; SET lock_timeout = '2s'; SELECT '*/';",
+            true,
+        ),
+        (
+            "escaped quote in an escape string",
+            "SELECT E'it\\'s -- '; SET lock_timeout = '2s';",
+            true,
+        ),
+        (
+            "set inside a do block",
+            "DO $body$ BEGIN SET lock_timeout = '2s'; END $body$;",
+            true,
+        ),
+        (
+            "set to default",
+            "SET lock_timeout = '2s'; SET lock_timeout TO DEFAULT;",
+            false,
+        ),
+        (
+            "reset all",
+            "SET lock_timeout = '2s'; RESET ALL;",
+            false,
+        ),
+        (
+            "nested block comment",
+            "/* outer /* inner */ SET lock_timeout = '2s'; */ SELECT 1;",
             false,
         ),
     ];
