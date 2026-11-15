@@ -585,7 +585,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let Some(discord_token) = env("DISCORD_TOKEN") else {
         anyhow::bail!("DISCORD_TOKEN fehlt — dl-bot kann ohne Bot-Token nichts ausrichten");
     };
-    let adapter = dl_discord::DiscordAdapter::new(&discord_token);
+    let http_limits = dl_bridges::http::HttpLimits::from_bridges(&operating.runtime.bridges);
+    let discord_rest_client =
+        dl_bridges::http::client(http_limits).context("HTTP-Client für Discord-REST")?;
+    let adapter =
+        dl_discord::DiscordAdapter::new(&discord_token, discord_rest_client, http_limits.request);
     adapter.link_dm_gate(central_pool.clone());
     // Application-ID auf dem REST-Http-Client setzen — sonst scheitern
     // Interaction-Followups nach einem Defer (POST /webhooks/{app_id}/{token})
@@ -618,7 +622,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
-    let http_limits = dl_bridges::http::HttpLimits::from_bridges(&operating.runtime.bridges);
     let supporter_config = supporter::SupporterConfig::new(
         &operating.runtime.community,
         &operating.services.steam_api_url,
@@ -2051,7 +2054,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
         let mut voice_worker_client = dl_discord::gateway::build_voice_worker_client(
-            &voice_worker_token,
+            adapter.rest_http(&voice_worker_token),
             recording_worker_manager.clone(),
             recording_worker_readiness.clone(),
             dl_server_as_code::DEFAULT_GUILD_ID,

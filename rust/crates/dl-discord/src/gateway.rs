@@ -826,7 +826,7 @@ pub async fn build_client(
         adapter.invite_snapshot_health(),
     ));
     adapter.link_invite_tracker(invite_tracker.clone());
-    serenity::Client::builder(token, intents)
+    serenity::client::ClientBuilder::new_with_http(adapter.rest_http(token), intents)
         .register_songbird_with(songbird_manager)
         .event_handler(Handler {
             adapter,
@@ -842,14 +842,13 @@ pub async fn build_client(
         .await
 }
 
-/// Baut die zweite, auf Voice-Aufnahme beschränkte Gateway-Identität.
 pub async fn build_voice_worker_client(
-    token: &str,
+    http: serenity::http::Http,
     manager: Arc<Songbird>,
     readiness: Arc<AtomicBool>,
     guild_id: u64,
 ) -> serenity::Result<serenity::Client> {
-    serenity::Client::builder(token, voice_worker_intents())
+    serenity::client::ClientBuilder::new_with_http(http, voice_worker_intents())
         .register_songbird_with(manager)
         .event_handler(VoiceWorkerHandler {
             readiness,

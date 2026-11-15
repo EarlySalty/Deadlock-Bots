@@ -1241,7 +1241,11 @@ mod tests {
 
         let service = Arc::new(
             TurnierProposalService::from_env(
-                DiscordAdapter::new("unused"),
+                DiscordAdapter::new(
+                    "unused",
+                    reqwest::Client::new(),
+                    std::time::Duration::from_secs(5),
+                ),
                 None,
                 dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
                 |_| None,
@@ -1274,7 +1278,11 @@ mod tests {
 
         let service = Arc::new(
             TurnierProposalService::from_env(
-                DiscordAdapter::new("unused"),
+                DiscordAdapter::new(
+                    "unused",
+                    reqwest::Client::new(),
+                    std::time::Duration::from_secs(5),
+                ),
                 None,
                 dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
                 |_| None,

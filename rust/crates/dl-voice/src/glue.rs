@@ -3362,7 +3362,11 @@ mod tests {
     }
 
     fn test_adapter_with_overwrites(overwrites: Vec<PermissionOverwrite>) -> Arc<DiscordAdapter> {
-        let adapter = DiscordAdapter::new("test-token");
+        let adapter = DiscordAdapter::new(
+            "test-token",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let cache = Arc::new(Cache::new());
         let mut channel = GuildChannel::default();
         channel.id = ChannelId::new(42);

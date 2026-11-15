@@ -1361,7 +1361,11 @@ mod tests {
     #[tokio::test]
     async fn brain_zugang_prueft_rechte_an_der_http_grenze() {
         use serenity::all::{Cache, Guild, GuildId, Permissions, Role, RoleId};
-        let adapter = dl_discord::DiscordAdapter::new("synthetic-bot");
+        let adapter = dl_discord::DiscordAdapter::new(
+            "synthetic-bot",
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(5),
+        );
         let cache = Arc::new(Cache::new());
         let mut guild = Guild::default();
         guild.id = GuildId::new(1);
