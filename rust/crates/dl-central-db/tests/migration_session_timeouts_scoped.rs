@@ -6,34 +6,73 @@ const RULE: &str = "A migration sets lock_timeout or statement_timeout only with
     resets it with RESET <name> after its last session-level SET; sqlx runs each migration in \
     its own transaction on a pooled connection, so a session-level SET outlives the migration.";
 
+fn without_comments(sql: &str) -> String {
+    let mut rest = sql;
+    let mut kept = String::new();
+    while let Some(open) = rest.find("/*") {
+        kept.push_str(&rest[..open]);
+        rest = rest[open..]
+            .find("*/")
+            .map_or("", |close| &rest[open + close + 2..]);
+    }
+    kept.push_str(rest);
+    kept.lines()
+        .map(|line| line.find("--").map_or(line, |at| &line[..at]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn statement_starts(lowered: &str) -> Vec<usize> {
     let mut starts = vec![0];
     starts.extend(lowered.match_indices(';').map(|(at, _)| at + 1));
     starts
 }
 
+fn session_set_statements(lowered: &str, name: &str) -> Vec<usize> {
+    let session_sets = [format!("set {name}"), format!("set session {name}")];
+    statement_starts(lowered)
+        .into_iter()
+        .filter_map(|start| {
+            let statement = lowered.get(start..)?.trim_start();
+            let offset = lowered.len() - statement.len();
+            session_sets
+                .iter()
+                .any(|set| {
+                    statement.starts_with(set.as_str())
+                        && !statement[set.len()..]
+                            .starts_with(|c: char| c == '_' || c.is_ascii_alphanumeric())
+                })
+                .then_some(offset)
+        })
+        .collect()
+}
+
+fn session_set_config_calls(lowered: &str, name: &str) -> Vec<usize> {
+    lowered
+        .match_indices("set_config")
+        .filter_map(|(at, _)| {
+            let call = &lowered[at..];
+            let end = call.find(')')?;
+            let compact: String = call[..=end]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            (compact.starts_with(&format!("set_config('{name}',")) && compact.ends_with(",false)"))
+                .then_some(at)
+        })
+        .collect()
+}
+
 fn leaks(sql: &str) -> bool {
-    let lowered = sql
+    let lowered = without_comments(sql)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
     TIMEOUTS.iter().any(|name| {
-        let session_sets = [format!("set {name}"), format!("set session {name}")];
-        let last_set = statement_starts(&lowered)
+        let last_set = session_set_statements(&lowered, name)
             .into_iter()
-            .filter_map(|start| {
-                let statement = lowered.get(start..)?.trim_start();
-                let offset = lowered.len() - statement.len();
-                session_sets
-                    .iter()
-                    .any(|set| {
-                        statement.starts_with(set.as_str())
-                            && !statement[set.len()..]
-                                .starts_with(|c: char| c == '_' || c.is_ascii_alphanumeric())
-                    })
-                    .then_some(offset)
-            })
+            .chain(session_set_config_calls(&lowered, name))
             .max();
         last_set.is_some_and(|at| !lowered[at..].contains(&format!("reset {name}")))
     })
@@ -120,6 +159,36 @@ fn leak_detection_covers_every_form() {
             false,
         ),
         ("similar name", "SET lock_timeout_extra TO 1;", false),
+        (
+            "comment before set",
+            "-- keep locks short\nSET lock_timeout TO '5s';\nSELECT 1;",
+            true,
+        ),
+        (
+            "block comment before set",
+            "/* keep\nlocks short */ SET lock_timeout TO '5s'; SELECT 1;",
+            true,
+        ),
+        (
+            "commented out set",
+            "-- SET lock_timeout TO '5s';\nSELECT 1;",
+            false,
+        ),
+        (
+            "set_config for the session",
+            "SELECT set_config('lock_timeout', '5s', false); SELECT 1;",
+            true,
+        ),
+        (
+            "set_config for the transaction",
+            "SELECT set_config( 'statement_timeout' , '1s' , true ); SELECT 1;",
+            false,
+        ),
+        (
+            "set_config then reset",
+            "SELECT set_config('lock_timeout', '5s', false); RESET lock_timeout;",
+            false,
+        ),
     ];
     for (label, sql, expected) in cases {
         assert_eq!(leaks(sql), *expected, "{label}");
