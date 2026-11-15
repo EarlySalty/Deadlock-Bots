@@ -153,17 +153,9 @@ impl DiscordAdapter {
             .await
         {
             Ok(_) => Ok(true),
-            Err(err) if Self::is_unknown_message(&err) => Ok(false),
+            Err(err) if Self::is_http_404(&err) => Ok(false),
             Err(err) => Err(err.to_string()),
         }
-    }
-
-    fn is_unknown_message(err: &serenity::Error) -> bool {
-        matches!(
-            err,
-            serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
-                if resp.status_code.as_u16() == 404 && resp.error.code == 10008
-        )
     }
 
     /// Vollständig geladener und verbundener Guild-Cache, sonst unbekannt.

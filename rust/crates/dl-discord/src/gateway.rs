@@ -33,18 +33,22 @@ const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", 
 // MemberJoin). Sie sind keine Nachricht dieses Mitglieds. Inhalt darf leer sein:
 // Sticker, Anhänge und Weiterleitungen bleiben reguläre Nutzernachrichten.
 fn is_user_message(message: &Message) -> bool {
-    !message.author.bot
-        && message.webhook_id.is_none()
-        && matches!(
-            message.kind,
-            MessageType::Regular | MessageType::InlineReply
-        )
+    is_member_post(
+        message.author.bot,
+        message.webhook_id.is_some(),
+        message.kind,
+    )
+}
+
+fn is_member_post(bot: bool, webhook: bool, kind: MessageType) -> bool {
+    !bot && !webhook && matches!(kind, MessageType::Regular | MessageType::InlineReply)
 }
 
 fn message_edit(event: &MessageUpdateEvent) -> Option<MessageEdit> {
-    let author = event.author.as_ref().filter(|author| !author.bot)?;
+    let author = event.author.as_ref()?;
     let content = event.content.clone()?;
-    if event.webhook_id.is_some_and(|webhook| webhook.is_some()) {
+    let webhook = event.webhook_id.is_some_and(|webhook| webhook.is_some());
+    if !is_member_post(author.bot, webhook, event.kind?) {
         return None;
     }
     Some(MessageEdit {
@@ -923,6 +927,14 @@ mod tests {
         assert_eq!(edit.content, "Kann mich wer einladen? 123456789");
         assert!(super::message_edit(&update_event(true, Some("Bot-Text"))).is_none());
         assert!(super::message_edit(&update_event(false, None)).is_none());
+        let mut system = update_event(false, Some("Text"));
+        system.kind = Some(serenity::all::MessageType::PinsAdd);
+        assert!(super::message_edit(&system).is_none());
+        system.kind = None;
+        assert!(super::message_edit(&system).is_none());
+        let mut webhook = update_event(false, Some("Text"));
+        webhook.webhook_id = Some(Some(serenity::all::WebhookId::new(123)));
+        assert!(super::message_edit(&webhook).is_none());
     }
 
     #[test]

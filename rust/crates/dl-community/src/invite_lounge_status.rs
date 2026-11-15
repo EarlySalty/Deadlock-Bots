@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
 pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
-pub(super) const CHECK_IN_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
-pub(super) const ANSWER_RETRY_MILLIS: i64 = 60_000;
+pub(super) const ANSWER_MAX_ATTEMPTS: u32 = 8;
+pub(super) const ANSWER_QUEUE_LIMIT: usize = 5;
 pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
 pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
 const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
@@ -148,19 +148,9 @@ impl OutboxEntry {
         let first = self.first_attempt_at_millis.unwrap_or(now_millis);
         now_millis.saturating_sub(first) < NOTICE_MAX_AGE_MILLIS
     }
-
-    pub(super) fn remembers_check_in(&self) -> bool {
-        matches!(
-            self.update,
-            InviteLoungeUpdate::CheckIn
-                | InviteLoungeUpdate::CheckInAnswer {
-                    outcome: InviteCheckInOutcome::Unclear
-                }
-        )
-    }
 }
 
-fn notice_backoff(attempts: u32) -> i64 {
+pub(super) fn notice_backoff(attempts: u32) -> i64 {
     let shift = attempts.saturating_sub(1).min(6);
     (NOTICE_BACKOFF_MILLIS << shift).min(NOTICE_MAX_BACKOFF_MILLIS)
 }
@@ -183,7 +173,27 @@ pub(super) enum SteamWait {
 pub(super) struct HeldAnswer {
     pub(super) message_id: u64,
     pub(super) content: String,
+    #[serde(default)]
     pub(super) retry_at_millis: i64,
+    #[serde(default)]
+    pub(super) attempts: u32,
+}
+
+impl HeldAnswer {
+    pub(super) fn fresh(message_id: u64, content: String) -> Self {
+        Self {
+            message_id,
+            content,
+            retry_at_millis: 0,
+            attempts: 0,
+        }
+    }
+
+    pub(super) fn retry_later(&mut self, now_millis: i64) -> bool {
+        self.attempts = self.attempts.saturating_add(1);
+        self.retry_at_millis = now_millis.saturating_add(notice_backoff(self.attempts));
+        self.attempts < ANSWER_MAX_ATTEMPTS
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,12 +208,10 @@ pub(super) struct RequestStatus {
     pub(super) check_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) check_in_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) held_answer: Option<HeldAnswer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) held_answers: Vec<HeldAnswer>,
 }
 
 impl RequestStatus {
@@ -361,7 +369,7 @@ pub(super) fn check_in_step(invited: bool, answered: bool) -> CheckIn {
 }
 
 pub(super) fn check_in_window(age: i64) -> bool {
-    (CHECK_IN_SECONDS..CHECK_IN_MAX_AGE_SECONDS).contains(&age)
+    age >= CHECK_IN_SECONDS
 }
 
 #[cfg(test)]
@@ -565,13 +573,32 @@ mod tests {
     fn nachfrage_nach_dreissig_minuten_nur_ohne_antwort_und_ohne_einladung() {
         assert!(!check_in_window(CHECK_IN_SECONDS - 1));
         assert!(check_in_window(CHECK_IN_SECONDS));
-        assert!(check_in_window(3600));
-        assert!(!check_in_window(CHECK_IN_MAX_AGE_SECONDS));
+        assert!(check_in_window(7 * 24 * 60 * 60));
         assert_eq!(check_in_step(false, false), CheckIn::Ask);
         assert_eq!(check_in_step(false, true), CheckIn::Skip);
         assert_eq!(check_in_step(true, false), CheckIn::AlreadyInvited);
         assert_eq!(check_in_step(true, true), CheckIn::AlreadyInvited);
         assert_eq!(Notice::CheckIn.update(), InviteLoungeUpdate::CheckIn);
+    }
+
+    #[test]
+    fn gehaltene_antwort_wartet_wachsend_und_endet_nach_begrenzten_versuchen() {
+        let mut held = HeldAnswer::fresh(5, "nein".into());
+        assert_eq!(held.retry_at_millis, 0);
+        let mut waits = Vec::new();
+        let mut now = 1_000;
+        while held.retry_later(now) {
+            waits.push(held.retry_at_millis - now);
+            now = held.retry_at_millis;
+        }
+        assert_eq!(held.attempts, ANSWER_MAX_ATTEMPTS);
+        assert_eq!(
+            waits.len(),
+            usize::try_from(ANSWER_MAX_ATTEMPTS - 1).unwrap_or(0)
+        );
+        assert_eq!(waits.first(), Some(&NOTICE_BACKOFF_MILLIS));
+        assert!(waits.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(waits.iter().all(|wait| *wait <= NOTICE_MAX_BACKOFF_MILLIS));
     }
 
     #[test]
@@ -597,8 +624,6 @@ mod tests {
             false,
         );
         assert_eq!(answer.key, "invite-lounge:55:answer:60");
-        assert!(answer.remembers_check_in());
-        assert!(!entry.remembers_check_in());
         let mut entry = entry;
         assert!(entry.ready(0));
         entry.claim(1_000);

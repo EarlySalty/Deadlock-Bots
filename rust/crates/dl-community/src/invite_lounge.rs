@@ -14,11 +14,10 @@ mod status;
 use status::{
     after_invite, after_progress, check_in_step, check_in_window, classify_invite_reply,
     steam_outcome, CheckIn, HeldAnswer, Notice, OutboxEntry, RequestStatus, SteamProgress,
-    SteamWait, Step, ANSWER_RETRY_MILLIS,
+    SteamWait, Step, ANSWER_QUEUE_LIMIT,
 };
 
 pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
-pub const CHECK_IN_CHANNEL_ID: u64 = 1_464_736_918_951_432_222;
 pub const COMMUNITY_CATEGORY_ID: u64 = 1_289_721_245_281_292_289;
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
@@ -230,7 +229,7 @@ struct LoungeState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoticeResult {
-    Delivered(Option<u64>),
+    Delivered,
     Dropped,
     Gone,
     Retry,
@@ -300,7 +299,7 @@ impl LoungeStore for PgLoungeStore {
     }
 
     async fn pending_users(&self) -> Result<Vec<u64>, String> {
-        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND v::jsonb #>> '{request,phase}' = 'Pending'")
+        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND (v::jsonb #>> '{request,phase}' = 'Pending' OR jsonb_array_length(COALESCE(v::jsonb #> '{status,held_answers}', '[]'::jsonb)) > 0)")
             .bind(STATE_KV_NS).fetch_all(&self.pool).await.map_err(|err| err.to_string())?;
         user_ids(keys)
     }
@@ -502,16 +501,13 @@ impl InviteLoungeWatcher {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
         let kind = request_kind(&event.content, bot_id);
-        if is_offer(&event.content) {
-            return Ok(None);
-        }
-        if kind != Some(RequestKind::Direct) && friend_code(&event.content).is_none() {
-            if let Some(user_id) = self.record_answer(&event).await? {
+        if kind != Some(RequestKind::Direct) {
+            if let Some(user_id) = self.record_answer(&event, now).await? {
                 return Ok(Some(user_id));
             }
-            if kind.is_none() {
-                return Ok(None);
-            }
+        }
+        if is_offer(&event.content) || kind.is_none() && friend_code(&event.content).is_none() {
+            return Ok(None);
         }
         loop {
             let previous = self.store.load(event.author_id).await?;
@@ -609,71 +605,110 @@ impl InviteLoungeWatcher {
             .is_some_and(|since| created_at >= since))
     }
 
-    async fn record_answer(&self, event: &LoungeMessage) -> Result<Option<u64>, String> {
-        let Some(state) = self.store.load(event.author_id).await? else {
-            return Ok(None);
-        };
-        if !answer_open(&state, event.channel_id, event.message_id) {
-            return Ok(None);
-        }
+    async fn record_answer(&self, event: &LoungeMessage, now: i64) -> Result<Option<u64>, String> {
         let Some(content) = answer_text(&event.content) else {
             return Ok(None);
         };
-        let held = HeldAnswer {
-            message_id: event.message_id,
-            content,
-            retry_at_millis: 0,
-        };
-        self.settle_answer(event.author_id, &state, held).await
-    }
-
-    async fn settle_answer(
-        &self,
-        user_id: u64,
-        state: &LoungeState,
-        held: HeldAnswer,
-    ) -> Result<Option<u64>, String> {
-        let Some(channel_id) = state.status.channel_id else {
-            return Ok(None);
-        };
-        let outcome = self.judge_answer(user_id, channel_id, &held.content).await;
-        let invited = match outcome {
-            Some(_) => self.already_invited(state).await,
-            None => false,
-        };
+        let code = friend_code(&event.content);
         loop {
-            let Some(previous) = self.store.load(user_id).await? else {
+            let Some(previous) = self.store.load(event.author_id).await? else {
                 return Ok(None);
             };
-            if !answer_open(&previous, channel_id, held.message_id) {
+            if !answer_open(&previous, event.channel_id, event.message_id, now) {
+                note_ignored_answer(&previous, event, now);
+                return Ok(None);
+            }
+            if code.is_some() && code != previous.friend_code {
                 return Ok(None);
             }
             let mut next = previous.clone();
-            match outcome {
-                Some(outcome) => {
-                    apply_answer(&mut next, &held, outcome, invited);
+            queue_held_answer(
+                &mut next,
+                HeldAnswer::fresh(event.message_id, content.clone()),
+            );
+            if self
+                .store
+                .compare_exchange(event.author_id, Some(&previous), &next)
+                .await?
+            {
+                return Ok(Some(event.author_id));
+            }
+        }
+    }
+
+    async fn settle_answers(&self, user_id: u64, now: i64) -> Result<(), String> {
+        loop {
+            let Some(state) = self.store.load(user_id).await? else {
+                return Ok(());
+            };
+            let Some(held) = state.status.held_answers.first().cloned() else {
+                return Ok(());
+            };
+            if held.retry_at_millis > (self.clock_millis)() {
+                return Ok(());
+            }
+            let Some(channel_id) = state.status.channel_id else {
+                return Ok(());
+            };
+            let outcome = if answer_open(&state, channel_id, held.message_id, now) {
+                self.judge_answer(user_id, channel_id, &held.content).await
+            } else {
+                None
+            };
+            let invited = match outcome {
+                Some(_) => self.already_invited(&state).await,
+                None => false,
+            };
+            if !self
+                .store_answer(user_id, channel_id, &held, outcome, invited, now)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn store_answer(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        held: &HeldAnswer,
+        outcome: Option<dl_brain::InviteCheckInOutcome>,
+        invited: bool,
+        now: i64,
+    ) -> Result<bool, String> {
+        loop {
+            let Some(previous) = self.store.load(user_id).await? else {
+                return Ok(false);
+            };
+            if previous.status.held_answers.first() != Some(held) {
+                return Ok(true);
+            }
+            let mut next = previous.clone();
+            let open = answer_open(&previous, channel_id, held.message_id, now);
+            let settled = match (open, outcome) {
+                (false, _) => {
+                    next.status.held_answers.remove(0);
+                    true
+                }
+                (true, Some(outcome)) => {
+                    apply_answer(&mut next, held, outcome, invited);
                     tracing::info!(
                         user_id,
                         message_id = held.message_id,
                         ?outcome,
                         "Invite-Lounge wertet Antwort des Mitglieds aus"
                     );
+                    true
                 }
-                None => {
-                    hold_answer(&mut next, held.clone(), (self.clock_millis)());
-                    tracing::warn!(
-                        user_id,
-                        message_id = held.message_id,
-                        "Invite-Lounge hält Antwort ohne Brain-Urteil für einen neuen Versuch"
-                    );
-                }
-            }
+                (true, None) => retry_held_answer(&mut next, user_id, (self.clock_millis)()),
+            };
             if self
                 .store
                 .compare_exchange(user_id, Some(&previous), &next)
                 .await?
             {
-                return Ok(Some(user_id));
+                return Ok(settled);
             }
         }
     }
@@ -819,7 +854,7 @@ impl InviteLoungeWatcher {
                 .bot_replied_since(channel_id, entry.request_message_id, user_id, since)
                 .await
             {
-                Ok(Some(message_id)) => return NoticeResult::Delivered(Some(message_id)),
+                Ok(Some(_)) => return NoticeResult::Delivered,
                 Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(%error, user_id, key = %entry.key, "Invite-Lounge: Zustellung nicht prüfbar");
@@ -846,9 +881,7 @@ impl InviteLoungeWatcher {
         };
         let channel_id = entry.channel_id.unwrap_or(INVITE_LOUNGE_CHANNEL_ID);
         match self.converse(user_id, channel_id, task).await {
-            Some(dl_brain::ConversationReply::Delivered { message_id, .. }) => {
-                NoticeResult::Delivered(message_id)
-            }
+            Some(dl_brain::ConversationReply::Delivered { .. }) => NoticeResult::Delivered,
             Some(dl_brain::ConversationReply::Rejected) => NoticeResult::Dropped,
             _ => NoticeResult::Retry,
         }
@@ -1004,6 +1037,12 @@ impl InviteLoungeWatcher {
     }
 
     async fn dispatch_due(&self, user_id: u64, now: i64) -> Result<(), String> {
+        let now = now.max((self.clock_millis)() / 1000);
+        self.settle_answers(user_id, now).await?;
+        self.dispatch_request(user_id, now).await
+    }
+
+    async fn dispatch_request(&self, user_id: u64, now: i64) -> Result<(), String> {
         let Some(previous) = self.store.load(user_id).await? else {
             return Ok(());
         };
@@ -1014,21 +1053,12 @@ impl InviteLoungeWatcher {
         else {
             return Ok(());
         };
-        let now = now.max((self.clock_millis)() / 1000);
         if !is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS) {
             self.expire(user_id, &previous).await?;
             return Ok(());
         }
         if !self.allows_actions(request.created_at).await? {
             return Ok(());
-        }
-        if let Some(held) = previous.status.held_answer.clone() {
-            if held.retry_at_millis <= (self.clock_millis)() {
-                return self
-                    .settle_answer(user_id, &previous, held)
-                    .await
-                    .map(|_| ());
-            }
         }
         if let Some(wait) = previous.status.wait {
             if previous.status.check_at.is_some_and(|at| now < at) {
@@ -1468,6 +1498,7 @@ pub fn spawn(
         let mut dispatches = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                biased;
                 event = messages.recv() => match event {
                     Ok(event) => {
                         let message = LoungeMessage::from(event);
@@ -1662,7 +1693,7 @@ fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
         && status.wait.is_none()
         && !status.invite_now
         && status.check_in_at.is_none()
-        && status.held_answer.is_none()
+        && status.held_answers.is_empty()
         && check_in_window(now.saturating_sub(request.created_at))
 }
 
@@ -1681,18 +1712,39 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
     state.status.claim(notice)
 }
 
-fn answer_open(state: &LoungeState, channel_id: u64, message_id: u64) -> bool {
+fn answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
     let held = state
         .status
-        .held_answer
-        .as_ref()
-        .is_some_and(|held| held.message_id == message_id);
+        .held_answers
+        .iter()
+        .any(|held| held.message_id == message_id);
     state.request.as_ref().is_some_and(|request| {
         matches!(request.phase, Phase::Pending | Phase::Dispatching)
+            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
             && message_id > request.message_id
             && (message_id > state.last_seen || held)
             && state.status.channel_id == Some(channel_id)
     })
+}
+
+fn note_ignored_answer(state: &LoungeState, event: &LoungeMessage, now: i64) {
+    let Some(request) = state
+        .request
+        .as_ref()
+        .filter(|request| is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS))
+    else {
+        return;
+    };
+    if event.message_id <= state.last_seen {
+        return;
+    }
+    tracing::info!(
+        user_id = event.author_id,
+        message_id = event.message_id,
+        phase = ?request.phase,
+        same_channel = state.status.channel_id == Some(event.channel_id),
+        "Invite-Lounge wertet Nachricht des Mitglieds nicht als Antwort"
+    );
 }
 
 fn take_edited_code(
@@ -1726,10 +1778,44 @@ fn forget_request(state: &mut LoungeState) -> Option<u64> {
     Some(request.message_id)
 }
 
-fn hold_answer(state: &mut LoungeState, mut held: HeldAnswer, now_millis: i64) {
+fn queue_held_answer(state: &mut LoungeState, held: HeldAnswer) {
     state.last_seen = state.last_seen.max(held.message_id);
-    held.retry_at_millis = now_millis.saturating_add(ANSWER_RETRY_MILLIS);
-    state.status.held_answer = Some(held);
+    let queue = &mut state.status.held_answers;
+    if queue
+        .iter()
+        .any(|queued| queued.message_id == held.message_id)
+    {
+        return;
+    }
+    for queued in queue.iter_mut() {
+        queued.retry_at_millis = 0;
+    }
+    if queue.len() < ANSWER_QUEUE_LIMIT {
+        queue.push(held);
+    }
+}
+
+fn retry_held_answer(state: &mut LoungeState, user_id: u64, now_millis: i64) -> bool {
+    let Some(head) = state.status.held_answers.first_mut() else {
+        return true;
+    };
+    if head.retry_later(now_millis) {
+        tracing::warn!(
+            user_id,
+            message_id = head.message_id,
+            attempts = head.attempts,
+            "Invite-Lounge hält Antwort ohne Brain-Urteil für einen neuen Versuch"
+        );
+        return false;
+    }
+    let dropped = state.status.held_answers.remove(0);
+    tracing::warn!(
+        user_id,
+        message_id = dropped.message_id,
+        attempts = dropped.attempts,
+        "Invite-Lounge gibt Antwort ohne Brain-Urteil auf"
+    );
+    true
 }
 
 fn queue_notice(state: &mut LoungeState, notice: Option<Notice>, invited: bool) {
@@ -1770,35 +1856,24 @@ fn settle_notice(state: &mut LoungeState, position: usize, result: NoticeResult,
         return;
     }
     let removed = state.outbox.remove(position);
-    if result == NoticeResult::Gone {
-        if state
-            .request
-            .as_ref()
-            .is_some_and(|request| request.message_id == removed.request_message_id)
-        {
-            forget_request(state);
-        }
-        state
-            .outbox
-            .retain(|entry| entry.request_message_id != removed.request_message_id);
-        tracing::info!(key = %removed.key, "Invite-Lounge verwirft Meldung zu gelöschter Bitte");
-        return;
-    }
     match result {
-        NoticeResult::Delivered(Some(message_id))
-            if removed.remembers_check_in()
-                && state
-                    .request
-                    .as_ref()
-                    .is_some_and(|request| request.message_id == removed.request_message_id) =>
-        {
-            state.status.check_in_message_id = Some(message_id);
-        }
-        NoticeResult::Delivered(_) => {}
+        NoticeResult::Delivered => {}
         NoticeResult::Dropped => {
             tracing::warn!(key = %removed.key, "Invite-Lounge: Meldung vom Broker abgelehnt");
         }
-        NoticeResult::Gone => {}
+        NoticeResult::Gone => {
+            if state
+                .request
+                .as_ref()
+                .is_some_and(|request| request.message_id == removed.request_message_id)
+            {
+                forget_request(state);
+            }
+            state
+                .outbox
+                .retain(|entry| entry.request_message_id != removed.request_message_id);
+            tracing::info!(key = %removed.key, "Invite-Lounge verwirft Meldung zu gelöschter Bitte");
+        }
         NoticeResult::Retry => {
             tracing::warn!(key = %removed.key, attempts = removed.attempts, "Invite-Lounge: Meldung nach sieben Tagen ohne Zustellung aufgegeben");
         }
@@ -1817,7 +1892,10 @@ fn apply_answer(
     invited: bool,
 ) {
     state.last_seen = state.last_seen.max(held.message_id);
-    state.status.held_answer = None;
+    state
+        .status
+        .held_answers
+        .retain(|queued| queued.message_id != held.message_id);
     let asked = state.status.asked();
     let Some(request) = state.request.as_mut() else {
         return;
@@ -1829,6 +1907,7 @@ fn apply_answer(
             state.status.wait = None;
             state.status.check_at = None;
             state.status.invite_now = false;
+            state.status.held_answers.clear();
             state
                 .outbox
                 .retain(|entry| entry.request_message_id != request_id);
