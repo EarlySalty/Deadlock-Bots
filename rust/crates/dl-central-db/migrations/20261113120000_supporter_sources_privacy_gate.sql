@@ -1,4 +1,4 @@
-SET lock_timeout TO '5s';
+SET LOCAL lock_timeout TO '5s';
 
 CREATE OR REPLACE FUNCTION core.supporter_sources_privacy_gate() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$

@@ -1,4 +1,4 @@
-SET lock_timeout TO '5s';
+SET LOCAL lock_timeout TO '5s';
 
 CREATE TABLE IF NOT EXISTS core.supporter_sources (
     discord_id BIGINT NOT NULL CHECK (discord_id > 0),

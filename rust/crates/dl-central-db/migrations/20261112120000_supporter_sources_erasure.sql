@@ -1,4 +1,4 @@
-SET lock_timeout TO '5s';
+SET LOCAL lock_timeout TO '5s';
 
 UPDATE core.privacy_field_registry
    SET erasure_action = 'delete_row_on_user_delete',
