@@ -3866,7 +3866,7 @@ async fn neuer_code_waehrend_des_versands_startet_die_bitte_neu() {
 }
 
 #[tokio::test]
-async fn neuer_code_bei_direkter_bitte_im_steam_warten_geht_an_den_neuen_code() {
+async fn schlichter_neuer_code_bei_direkter_bitte_laedt_nicht_von_selbst() {
     let (watcher, store, _, invite) = setup();
     let mut state = open_request_state(Phase::Pending, Some(SteamWait::Delivery));
     if let Some(request) = state.request.as_mut() {
@@ -3878,19 +3878,14 @@ async fn neuer_code_bei_direkter_bitte_im_steam_warten_geht_an_den_neuen_code() 
         .handle_message(message(2, at, "mein Code ist 987654321"), at, Some(false))
         .await
         .expect("Neuer Code wird gelesen");
-    let codes: Vec<String> = invite
-        .calls
-        .lock()
-        .await
-        .iter()
-        .map(|call| call.2.clone())
-        .collect();
-    assert_eq!(codes, ["987654321"]);
+    assert!(invite.calls.lock().await.is_empty());
     let state = stored(&store).await;
     assert_eq!(state.friend_code.as_deref(), Some("987654321"));
+    assert_eq!(state.status.wait, None);
     let request = state.request.expect("Bitte vorhanden");
     assert_eq!(request.message_id, 2);
-    assert!(request.direct);
+    assert_eq!(request.phase, Phase::Pending);
+    assert!(!request.direct);
 }
 
 #[tokio::test]
@@ -3989,11 +3984,11 @@ fn geloeschte_kopien_werden_der_reihe_nach_verfolgt_und_zuletzt_verworfen() {
 fn kopien_der_bitte_bleiben_begrenzt_und_ohne_doppelte() {
     let mut state = open_request_state(Phase::Pending, None);
     for id in [2, 3, 3, 4, 5, 6, 7, 1] {
-        assert!(note_repost(
-            &mut state,
-            &message(id, NOW + 10, "x 123456789")
-        ));
+        let copy = message(id, NOW + 10, "x 123456789");
+        assert!(accepts_repost(&state, &copy));
+        note_repost(&mut state, &copy);
     }
+
     let request = state.request.expect("Bitte bleibt");
     assert_eq!(request.reposts, vec![3, 4, 5, 6, 7]);
 }
@@ -4116,7 +4111,7 @@ async fn zahl_in_einem_anderen_kanal_aendert_die_offene_bitte_nicht() {
 }
 
 #[tokio::test]
-async fn raumbitte_im_versand_mit_neuem_code_laedt_erst_nach_einem_nein() {
+async fn raumbitte_im_versand_mit_neuem_code_laedt_nicht_von_selbst() {
     let (watcher, store, _, invite) = setup();
     let mut state = open_request_state(Phase::Dispatching, None);
     state.status = RequestStatus::for_channel(CHECK_IN_CHANNEL_ID);
@@ -4163,4 +4158,28 @@ async fn direkte_bitte_mit_neuem_code_im_laufenden_versand_bleibt_direkt() {
     assert_eq!(request.message_id, 2);
     assert!(request.direct);
     assert_eq!(state.friend_code.as_deref(), Some("987654321"));
+}
+
+#[tokio::test]
+async fn hinweisfreigabe_gibt_die_sperrzeit_auch_nach_neuer_bitte_frei() {
+    let (watcher, store, port, _) = setup();
+    port.reply_fails.store(true, Ordering::SeqCst);
+    let recorded = watcher
+        .record_message(message(1, NOW, IMPERSONAL_REQUEST), NOW, None)
+        .await
+        .expect("Bitte wird angelegt")
+        .expect("Bitte gespeichert");
+    let hint = recorded.hint.expect("Hinweis beansprucht");
+    let previous = stored(&store).await;
+    assert_eq!(previous.last_hint_at, Some(NOW));
+    let mut reset = previous.clone();
+    reset.hint_sent = false;
+    assert!(store
+        .compare_exchange(USER, Some(&previous), &reset)
+        .await
+        .expect("Schreiben läuft"));
+    watcher.send_hint(hint).await.expect("Hinweis endet");
+    let state = stored(&store).await;
+    assert!(!state.hint_sent);
+    assert_eq!(state.last_hint_at, None);
 }

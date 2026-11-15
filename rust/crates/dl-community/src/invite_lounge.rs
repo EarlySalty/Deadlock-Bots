@@ -1306,12 +1306,16 @@ impl InviteLoungeWatcher {
             let Some(previous) = self.store.load(user_id).await? else {
                 return Ok(());
             };
-            if (previous.hint_sent, previous.last_hint_at) != claimed {
+            let mut released = previous.clone();
+            if previous.hint_sent == claimed.0 {
+                released.hint_sent = hint_sent;
+            }
+            if previous.last_hint_at == claimed.1 {
+                released.last_hint_at = last_hint_at;
+            }
+            if released == previous {
                 return Ok(());
             }
-            let mut released = previous.clone();
-            released.hint_sent = hint_sent;
-            released.last_hint_at = last_hint_at;
             if self
                 .store
                 .compare_exchange(user_id, Some(&previous), &released)
@@ -1703,12 +1707,14 @@ impl InviteLoungeWatcher {
     #[cfg(test)]
     async fn poll_due(&self, now: i64) -> Result<(), String> {
         for user_id in self.due_users().await? {
-            if let Err(err) = self.dispatch_due(user_id, now).await {
-                tracing::warn!(%err, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
-            }
-            if let Err(err) = self.deliver_outbox(user_id).await {
-                tracing::warn!(%err, user_id, "Invite-Lounge-Meldung konnte nicht zugestellt werden");
-            }
+            self.run_recorded(
+                Recorded {
+                    user_id,
+                    hint: None,
+                },
+                now,
+            )
+            .await;
         }
         Ok(())
     }
@@ -1976,8 +1982,9 @@ fn update_state(
         && has_message_code
         && !code_changed
         && !state.status.asked()
-        && note_repost(state, event)
+        && accepts_repost(state, event)
     {
+        note_repost(state, event);
         return false;
     }
     if let Some(code) = code {
@@ -2080,7 +2087,7 @@ fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage, direct: 
     };
     let old = request.message_id;
     request.restart_at(event.message_id, event.created_at);
-    request.direct |= direct;
+    request.direct = direct;
     state.dispatch_started_at_millis = None;
 
     tracing::info!(
@@ -2250,19 +2257,24 @@ fn takes_answer_code(state: &LoungeState, message_id: u64) -> bool {
         && queue_has_room(&state.status.held_answers, message_id)
 }
 
-fn note_repost(state: &mut LoungeState, event: &LoungeMessage) -> bool {
-    let same_channel = state.status.channel_id == Some(event.channel_id);
-    let Some(request) = state.request.as_mut().filter(|request| {
-        same_channel
-            && !request.direct
-            && matches!(request.phase, Phase::Pending | Phase::Dispatching)
-    }) else {
-        return false;
-    };
-    if !request.ids().contains(&event.message_id) {
+fn accepts_repost(state: &LoungeState, event: &LoungeMessage) -> bool {
+    state.status.channel_id == Some(event.channel_id)
+        && state.request.as_ref().is_some_and(|request| {
+            !request.direct && matches!(request.phase, Phase::Pending | Phase::Dispatching)
+        })
+}
+
+fn note_repost(state: &mut LoungeState, event: &LoungeMessage) {
+    if !accepts_repost(state, event) {
+        return;
+    }
+    if let Some(request) = state
+        .request
+        .as_mut()
+        .filter(|request| !request.ids().contains(&event.message_id))
+    {
         keep_bounded(&mut request.reposts, event.message_id);
     }
-    true
 }
 
 fn keep_bounded(ids: &mut Vec<u64>, id: u64) {

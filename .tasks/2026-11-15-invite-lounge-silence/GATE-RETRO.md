@@ -42,12 +42,12 @@ Clusters group the duplicates. Finding numbers refer to `gate-r4.log`.
 
 | Findings | Reason |
 |---|---|
-| NIT 111, 112, 118, 132, 135 (live config, external branch, OFFENE-URSACHEN claims) | Facts outside the clone; checked at deploy time. Live `brain_api_timeout_ms` is read during the live proof and the README number corrected then. |
+| NIT 111, 112, 118, 132, 135 (live config, external branch, OFFENE-URSACHEN claims) | Facts outside the clone; checked at deploy time. The README no longer states live numbers; it states the derivation from the configured Brain timeout. |
 | NIT 113 (release hint on transport error may double a hint) | Speculative; one extra hint within 24 h, no reachable harm. |
 | NIT 115, 117, 119, 141 (rollback hazard of new fields on main binary) | Only on a rollback. README "Rollback" names the concrete step: before a main binary runs, clear or rewrite the rows that carry `held_answers`, `reposts`, `earlier` or an outbox `answer`. |
 | NIT 116 | Same as I, fixed there. |
 | NIT 121 (`retry_held_answer` empty-queue branch) | Defensive, harmless. |
-| NIT 122, 124 (test `LEASE` literal) | Test parameter only; derived anyway in the H fix. |
+| NIT 122, 124 (test `LEASE` literal) | Test parameter only; kept as a literal (see 4.7). |
 | NIT 123 (privacy eraser does not list the namespace) | Real, and partly new on this branch (`held_answers`, outbox `answer` carry member text; Fable). Not half-fixed here: the eraser gap covers `friend_code` on main too. Filed in claude-config OFFENE-URSACHEN (6b25202), README "Privacy". |
 | NIT 126, 133 (test naming, repeated `moving_clock`) | Style only. |
 | NIT 127, 129, 134, 137 (test precision, fake fidelity) | No rule is unguarded by them; test-only. |
@@ -65,34 +65,22 @@ Clusters group the duplicates. Finding numbers refer to `gate-r4.log`.
 
 ## 4. Fix pass as done
 
-1. **A.** Any changed code on a `Pending` or `Dispatching` request restarts it at the new message (`restart_for_new_code`) and clears the claim token; `finish_dispatch` matches the token, so the late finish of the old call is a no-op. `dispatch_active` is the one "active" predicate for the replace rule.
+1. **A.** Any changed code on a `Pending` or `Dispatching` request restarts it at the new message (`restart_for_new_code`) with a fresh status and clears the claim token; `finish_dispatch` matches the token, so the late finish of the old call is a no-op. The restart is direct only when the new message is a direct request; a plain new code needs check-in and "nein". A non-request message from another channel changes neither code nor request (`outside_request_channel`). `dispatch_active` is the one "active" predicate for the replace rule.
 2. **C/D/J/K.** `repost: Option<Repost>` replaced by `reposts` and `earlier` (last five each, no duplicates). Staff checks match any id; `on_gone` follows the newest repost in every phase; `GoneOutcome::Deferred` and the dead `drop_deleted` guard are gone.
 3. **B.** `reread_waiting_request` hands a 404 to `drop_deleted`.
-4. **E.** `release_hint` reloads and resets only while its own claim stands, retrying on conflict.
-5. **F.** `hint_in_history` runs in the dispatch task; an error there means "no earlier hint" and never drops the request.
+4. **E.** `release_hint` reloads, restores each hint field that still holds its claimed value, and retries on conflict.
+5. **F.** `hint_in_history` runs in the dispatch task; an error there means "no earlier hint" and never drops the request. Class "Discord REST before the state write in `record_message`": no member left; the remaining `?` calls there are Postgres store calls (`actions_since`, `load`, `last_hint_at`, `known_code`, `record_answer`), and `channel_category` reads the cache.
 6. **G.** `reply_body` sets `fail_if_not_exists: true`.
 7. **H.** No new numbers. README states each bound's derivation and overrun mode (cut-off, lease, active window). The test `LEASE` literal stays (test parameter, NIT 122).
 8. **I.** `waiting_users(created_since)` filters by request age in SQL.
-9. **L/M/N.** `run_recorded` shared by `spawn_recorded` and the test `handle_message`; `queue_has_room` and `dispatched_since_request` helpers; dead returns dropped; `dispatch_request` reads the clock after its load.
+9. **L/M/N.** `run_recorded` shared by `spawn_recorded`, the tick and the test helpers `handle_message` and `poll_due`; `queue_has_room`, `dispatched_since_request` and `accepts_repost` helpers; `note_repost`, `queue_held_answer` and `forget_request` return nothing; `dispatch_request` reads the clock after its load.
 10. **O/P.** README rewritten without claims beyond the tests; the fix commit carries a four-layer block with a searched twin list.
 
-New tests: `neuer_code_waehrend_des_versands_startet_die_bitte_neu`, `neuer_code_bei_direkter_bitte_im_steam_warten_geht_an_den_neuen_code`, `hilfe_an_einer_kopie_der_bitte_zaehlt`, `hilfe_an_der_geloeschten_ersten_bitte_zaehlt_nach_dem_folgen`, `geloeschte_kopien_werden_der_reihe_nach_verfolgt_und_zuletzt_verworfen`, `kopien_der_bitte_bleiben_begrenzt_und_ohne_doppelte`, `geloeschte_wartende_bitte_wird_beim_abgleich_still_verworfen`, `hinweisfreigabe_haelt_trotz_zwischenzeitlicher_schreibung`, `verlaufsfehler_vor_dem_hinweis_verliert_die_bitte_nicht`, `abgelaufene_leihe_wendet_kein_zweites_urteil_an`, `broker_antwort_ohne_zielnachricht_wird_nicht_ohne_bezug_gepostet`, `geloeschte_bitte_im_versand_folgt_der_neu_geposteten` (replaces the Deferred test).
+New tests: `neuer_code_waehrend_des_versands_startet_die_bitte_neu`, `schlichter_neuer_code_bei_direkter_bitte_laedt_nicht_von_selbst`, `zahl_in_einem_anderen_kanal_aendert_die_offene_bitte_nicht`, `raumbitte_im_versand_mit_neuem_code_laedt_nicht_von_selbst`, `direkte_bitte_mit_neuem_code_im_laufenden_versand_bleibt_direkt`, `hinweisfreigabe_gibt_die_sperrzeit_auch_nach_neuer_bitte_frei`, `hilfe_an_einer_kopie_der_bitte_zaehlt`, `hilfe_an_der_geloeschten_ersten_bitte_zaehlt_nach_dem_folgen`, `geloeschte_kopien_werden_der_reihe_nach_verfolgt_und_zuletzt_verworfen`, `kopien_der_bitte_bleiben_begrenzt_und_ohne_doppelte`, `geloeschte_wartende_bitte_wird_beim_abgleich_still_verworfen`, `hinweisfreigabe_haelt_trotz_zwischenzeitlicher_schreibung`, `verlaufsfehler_vor_dem_hinweis_verliert_die_bitte_nicht`, `abgelaufene_leihe_wendet_kein_zweites_urteil_an`, `broker_antwort_ohne_zielnachricht_wird_nicht_ohne_bezug_gepostet`, `geloeschte_bitte_im_versand_folgt_der_neu_geposteten` (replaces the Deferred test).
 
-Independent Opus review of 86ae2201 (one pass, before the final gate): one blocking finding, fixed in the follow-up commit. A changed code from a non-request message in any lounge channel restarted the request there, so a match number in #frag-die-community invited a direct request's member at once and moved a room check-in under an unrelated message. On main the same mechanism moved only a `Pending` room request. Class fixed: a non-request message changes code or request only in the request's channel, for every open phase. Also fixed: a direct request that restarts a room request keeps `direct`; README overclaims (always, test credit for the SQL window, finish no-op reason). Kept as NITs: `#[cfg(test)] poll_due` composes dispatch and outbox on its own; `release_hint` after a new code resets `hint_sent` leaves `last_hint_at` set (same outcome as base).
+Independent Opus review of 86ae2201 (one pass, before the final gate): one blocking finding, fixed in the follow-up commit. A changed code from a non-request message in any lounge channel restarted the request there, so a match number in #frag-die-community invited a direct request's member at once and moved a room check-in under an unrelated message. On main the same mechanism moved only a `Pending` room request. Class fixed: a non-request message changes code or request only in the request's channel, for every open phase. Also fixed: the restart takes `direct` from the new message, so a stray number in the request's own channel never invites without a "nein"; README overclaims (always, test credit for the SQL window, finish no-op reason); the reviewer's NITs on `poll_due` (L twin), the dropped `note_repost` return (M) and `release_hint` after a new request (E).
+
 
 
 Checks: dl-community 355 passed (4 DB-harness tests need `CENTRAL_TEST_DSN`), invite lounge with Postgres on ionos 134 passed; dl-discord, dl-broker, dl-bridges green; dl-bot only the 8 DB-harness `build_publisher` tests fail without `CENTRAL_TEST_DSN`. fmt clean, no clippy warning on branch lines.
 
-## 5. Original fix plan (before Fable)
-
-
-1. **A, code belongs to its request.** In `update_state`, a new friend code outside an accepted answer either restarts the request at the new message (any Pending request, direct or room, with or without Steam wait, and a stale Dispatching) or, while an invite call is active, is not stored and is logged. One predicate `dispatch_active(state, now_millis)` decides "active" for `update_state` and `on_gone`. Tests: new code in active Dispatching (room and direct) keeps the old code; new code on a direct request in a Steam wait restarts as a direct request and invites the new code.
-2. **C/D/J/K, request identity.** Replace `repost: Option<Repost>` with the list of the request's other message ids (reposts still visible plus earlier anchors that were deleted), bounded. Staff checks (`request_answered`, `answers_request`) match any id of the request. `on_gone` follows the newest remaining repost and keeps the deleted anchor in the list; `finish_dispatch` recognises its request by any id, so `Deferred` is no longer needed and `drop_deleted` loses its dead guard. The field is new on this branch and not deployed, so no stored row carries the old shape.
-3. **B.** `reread_waiting_request` hands `Ok(None)` to the same gone path (`drop_deleted`).
-4. **E.** `release_hint` reloads and resets the hint fields only while the claim it made still stands, retrying on CAS conflict.
-5. **F.** The history check moves into the dispatch task (`send_hint`); an error there counts as "no hint known".
-6. **G.** `reply_body` sets `fail_if_not_exists: true`: a broker reply whose target is gone fails instead of posting standalone. The lounge notice then retries, its existence check sees the deletion and `on_gone` decides.
-7. **H.** Derive bounds in one place: cut-off = Brain timeout for the Brain call plus the same budget for the unbounded Discord/DB steps around it; lease = cut-off plus a named tail for the closing CAS; active dispatch = bridge timeout plus the same tail. README states each derivation and the failure mode when exceeded.
-8. **I.** `waiting_users` filters by request age in SQL.
-9. **L/M/N.** One shared `run_recorded` for production and tests; one queue-room helper; one "dispatched since request" helper; drop unused returns; read the clock after the load in `dispatch_request`.
-10. **O/P.** README rewritten for A to I without absolute claims beyond what tests show; fix commit gets a four-layer Ursache block whose twin list comes from search (`grep` for `message_id ==`, `request.message_id`, `message_content(`, `compare_exchange(.*claimed`, `.await?` in `record_message`).
