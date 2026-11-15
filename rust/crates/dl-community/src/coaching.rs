@@ -134,7 +134,7 @@ impl WebsiteClient {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.base_url))
-            .header("X-Internal-Token", &self.token)
+            .header(dl_core::internal_tokens::HEADER, &self.token)
             .header("X-Bot-Token", &self.token)
     }
 

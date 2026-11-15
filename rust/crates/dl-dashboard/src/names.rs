@@ -7,12 +7,9 @@
 //! Dadurch bleiben frühere Mitglieder auch nach einem Bot-Neustart erkennbar.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::PgPool;
-
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Löst mehrere User-IDs gebündelt zu Anzeigenamen auf.
 #[async_trait::async_trait]
@@ -240,11 +237,7 @@ pub struct BrokerNameResolver {
 }
 
 impl BrokerNameResolver {
-    pub fn new(base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .expect("reqwest-Client bauen");
+    pub fn new(base: impl Into<String>, http: reqwest::Client) -> Self {
         Self {
             http,
             base: base.into().trim_end_matches('/').to_string(),

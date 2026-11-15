@@ -252,7 +252,7 @@ pub async fn fetch_viewer_activity(
 ) -> anyhow::Result<ViewerActivityDay> {
     let wire: ViewerActivityWire = client
         .get(url.clone())
-        .header("X-Internal-Token", token)
+        .header(dl_core::internal_tokens::HEADER, token)
         .query(&[
             ("twitch_user_id", consent.twitch_user_id.clone()),
             ("day", requested_day.to_string()),
@@ -411,7 +411,7 @@ async fn fetch_page<W: serde::de::DeserializeOwned>(
     let page = client
         .get(url.clone())
         .query(&query)
-        .header("X-Internal-Token", token)
+        .header(dl_core::internal_tokens::HEADER, token)
         .send()
         .await?
         .error_for_status()?

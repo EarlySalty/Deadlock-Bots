@@ -175,6 +175,8 @@ trait InviteEventPort: Send + Sync {
         code: &str,
         user_id: u64,
     ) -> Result<String, String>;
+
+    fn dispatch_window(&self) -> std::time::Duration;
 }
 
 #[async_trait::async_trait]
@@ -187,6 +189,10 @@ impl InviteEventPort for dl_bridges::steam::SteamBotClient {
         user_id: u64,
     ) -> Result<String, String> {
         self.invite_from_bot(bot_id, guild_id, code, user_id).await
+    }
+
+    fn dispatch_window(&self) -> std::time::Duration {
+        self.invite_wait()
     }
 }
 
@@ -523,7 +529,7 @@ impl InviteLoungeWatcher {
                 code,
                 existing_hint.unwrap_or(false),
                 now,
-                (self.clock_millis)(),
+                DispatchClock::new((self.clock_millis)(), self.invite.dispatch_window()),
             );
             if wants_hint
                 && existing_hint.is_none()
@@ -1409,6 +1415,25 @@ enum RequestKind {
     Room,
 }
 
+#[derive(Clone, Copy)]
+struct DispatchClock {
+    now_millis: i64,
+    window_millis: i64,
+}
+
+impl DispatchClock {
+    fn new(now_millis: i64, window: std::time::Duration) -> Self {
+        Self {
+            now_millis,
+            window_millis: i64::try_from(window.as_millis()).unwrap_or(i64::MAX),
+        }
+    }
+
+    fn still_running(self, started_millis: i64) -> bool {
+        self.now_millis.saturating_sub(started_millis) < self.window_millis
+    }
+}
+
 fn update_state(
     state: &mut LoungeState,
     event: &LoungeMessage,
@@ -1416,7 +1441,7 @@ fn update_state(
     code: Option<String>,
     existing_hint: bool,
     now: i64,
-    now_millis: i64,
+    dispatch: DispatchClock,
 ) -> bool {
     state.last_seen = event.message_id;
     let request_before = state.request.as_ref().map(|request| request.message_id);
@@ -1439,7 +1464,7 @@ fn update_state(
             let active_dispatch = request.phase == Phase::Dispatching
                 && state
                     .dispatch_started_at_millis
-                    .is_some_and(|started| now_millis.saturating_sub(started) < 120_000);
+                    .is_some_and(|started| dispatch.still_running(started));
             !active_dispatch
                 && !arrived_during_dispatch
                 && (direct || request.phase == Phase::WaitingForCode)

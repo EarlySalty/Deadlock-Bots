@@ -29,7 +29,7 @@ use serde_json::{json, Map, Value};
 pub use idempotency::{IdempotencyConfig, IdempotencyStore};
 pub use port::{ChannelInfoPort, DiscordPort, PortError};
 
-pub const TOKEN_HEADER: &str = "X-Internal-Token";
+pub const TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 pub const IDEMPOTENCY_HEADER: &str = "X-Idempotency-Key";
 pub const REQUEST_ID_HEADER: &str = "X-Request-Id";
 

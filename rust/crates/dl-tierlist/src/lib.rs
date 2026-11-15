@@ -28,6 +28,7 @@ pub use refresh::refresh_loop;
 pub use settings::SESSION_COOKIE;
 
 pub const DEADLOCK_API_BASE: &str = "https://api.deadlock-api.com/v1";
+pub const DEADLOCK_API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct TierlistApp {
     pub pool: PgPool,
@@ -42,11 +43,12 @@ pub struct TierlistApp {
 pub type SharedApp = Arc<TierlistApp>;
 
 impl TierlistApp {
-    pub fn new(pool: PgPool, dashboard: DashboardClient, api_base: impl Into<String>) -> SharedApp {
-        let api = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("reqwest-Client bauen");
+    pub fn new(
+        pool: PgPool,
+        dashboard: DashboardClient,
+        api: reqwest::Client,
+        api_base: impl Into<String>,
+    ) -> SharedApp {
         Arc::new(Self {
             pool,
             dashboard,

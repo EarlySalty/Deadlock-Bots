@@ -92,7 +92,7 @@ async fn fetch_bot_fingerprint(
     };
     let mut response = http
         .get(url)
-        .header("X-Internal-Token", token)
+        .header(dl_core::internal_tokens::HEADER, token)
         .send()
         .await
         .ok()?;

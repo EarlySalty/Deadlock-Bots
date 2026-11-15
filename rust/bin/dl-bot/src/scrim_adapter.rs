@@ -30,7 +30,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::RwLock;
 
 pub const COMPONENTS_V2: u64 = 32_768;
-const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
+const INTERNAL_TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 const SCRIMREQ_PREFIX: &str = "scrimreq:v1:";
 pub const SCRIMREPL_PREFIX: &str = "scrimrepl:v1:";
 const RUNTIME_CACHE_TTL: Duration = Duration::from_secs(2);
@@ -38,7 +38,16 @@ const RELAY_LEASE_OWNER: &str = "dlbots:scrim_adapter";
 const RELAY_EVENT_SOURCE: &str = "dl_bots";
 const RELAY_COMMAND_SCOPE: &str = "scrim_relay";
 const REPLACEMENT_RELAY_COMMAND_SCOPE: &str = "scrim_replacement_relay";
-const RELAY_LEASE_SECONDS: i64 = 30;
+const RELAY_LEASE_MARGIN_SECONDS: i64 = 30;
+
+fn relay_lease_seconds(request_limit: Duration) -> i64 {
+    let request = request_limit
+        .as_secs()
+        .saturating_add(u64::from(request_limit.subsec_nanos() > 0));
+    i64::try_from(request)
+        .unwrap_or(i64::MAX)
+        .saturating_add(RELAY_LEASE_MARGIN_SECONDS)
+}
 const LAGEBILD_LEASE_OWNER: &str = "dlbots:lagebild_api";
 const LAGEBILD_REFRESH_SCOPE: &str = "lagebild_refresh";
 const LAGEBILD_CORRECTION_SCOPE: &str = "lagebild_correction";
@@ -533,6 +542,7 @@ fn actor_display_header_value(value: &str) -> Result<String, String> {
 #[derive(Clone)]
 pub struct TurnierScrimClient {
     http: reqwest::Client,
+    lease_seconds: i64,
     base_url: String,
     token: Option<String>,
 }
@@ -544,8 +554,8 @@ impl TurnierScrimClient {
     ) -> Result<Self, dl_bridges::http::HttpSetupError> {
         Ok(Self {
             http: dl_bridges::http::internal_client(limits)?,
-            base_url: dl_core::internal_tokens::present(&lookup, "TURNIER_INTERNAL_API_BASE_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:8900".to_string())
+            lease_seconds: relay_lease_seconds(limits.request),
+            base_url: dl_core::internal_tokens::turnier_api_base(&lookup)
                 .trim_end_matches('/')
                 .to_string(),
             token: dl_core::internal_tokens::turnier_api_token(&lookup),
@@ -733,6 +743,7 @@ async fn relay_match_request_response(
         &request.idempotency,
         &payload,
         relay_payload_conflict_receipt(),
+        client.lease_seconds,
     )
     .await?
     {
@@ -850,6 +861,7 @@ async fn relay_replacement_request_response(
         &request.idempotency,
         &payload,
         replacement_payload_conflict_receipt(),
+        client.lease_seconds,
     )
     .await?
     {
@@ -935,6 +947,7 @@ async fn begin_relay_command(
     idempotency: &str,
     payload: &Value,
     payload_conflict_receipt: ActionReceipt,
+    lease_seconds: i64,
 ) -> Result<RelayCommandState, String> {
     let payload_hash = sha256_json(payload);
     let mut tx = pool
@@ -958,7 +971,7 @@ async fn begin_relay_command(
     .bind(&payload_hash)
     .bind(payload)
     .bind(RELAY_LEASE_OWNER)
-    .bind(RELAY_LEASE_SECONDS)
+    .bind(lease_seconds)
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Scrim-Relay-Ingress konnte nicht gespeichert werden: {error}"))?;
@@ -979,7 +992,7 @@ async fn begin_relay_command(
     .bind(&payload_hash)
     .bind(payload)
     .bind(RELAY_LEASE_OWNER)
-    .bind(RELAY_LEASE_SECONDS)
+    .bind(lease_seconds)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| format!("Scrim-Relay-Receipt konnte nicht gespeichert werden: {error}"))?;
@@ -1025,10 +1038,10 @@ async fn begin_relay_command(
                     .map_err(|error| format!("Scrim-Relay-Replay-Receipt ist unlesbar: {error}"))?;
                 RelayCommandState::Replay(receipt)
             } else {
-                reclaim_or_wait_relay_command(&mut tx, row.get("id"), &state).await?
+                reclaim_or_wait_relay_command(&mut tx, row.get("id"), &state, lease_seconds).await?
             }
         } else {
-            reclaim_or_wait_relay_command(&mut tx, row.get("id"), &state).await?
+            reclaim_or_wait_relay_command(&mut tx, row.get("id"), &state, lease_seconds).await?
         }
     };
     tx.commit()
@@ -1057,6 +1070,7 @@ async fn reclaim_or_wait_relay_command(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     id: i64,
     state: &str,
+    lease_seconds: i64,
 ) -> Result<RelayCommandState, String> {
     let reclaimed = sqlx::query_scalar::<_, i64>(
         r#"
@@ -1078,7 +1092,7 @@ async fn reclaim_or_wait_relay_command(
     )
     .bind(id)
     .bind(RELAY_LEASE_OWNER)
-    .bind(RELAY_LEASE_SECONDS)
+    .bind(lease_seconds)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|error| format!("Scrim-Relay-Receipt konnte nicht reclaimed werden: {error}"))?;
@@ -1103,7 +1117,7 @@ async fn reclaim_or_wait_relay_command(
     )
     .bind(id)
     .bind(RELAY_LEASE_OWNER)
-    .bind(RELAY_LEASE_SECONDS)
+    .bind(lease_seconds)
     .bind(RELAY_EVENT_SOURCE)
     .execute(&mut **tx)
     .await
@@ -1876,6 +1890,25 @@ async fn correct_lagebild(
 mod tests {
     const RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 
+    #[test]
+    fn relay_lease_outlasts_every_request_limit() {
+        for limit in [
+            Duration::ZERO,
+            Duration::from_millis(1500),
+            Duration::from_secs(15),
+            Duration::from_secs(120),
+            Duration::MAX,
+        ] {
+            let lease = relay_lease_seconds(limit);
+            assert!(
+                u128::try_from(lease).is_ok_and(|lease| lease * 1000 > limit.as_millis())
+                    || lease == i64::MAX,
+                "{limit:?} -> {lease}"
+            );
+        }
+        assert_eq!(relay_lease_seconds(Duration::from_secs(15)), 45);
+    }
+
     use super::*;
     use serde_json::json;
     use sqlx::Row;
@@ -2540,16 +2573,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let client = TurnierScrimClient {
-            http: reqwest::Client::builder()
-                .timeout(RELAY_TIMEOUT)
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .expect("client"),
-            base_url: format!("http://{address}"),
-            token: Some("relay-token".to_string()),
-        };
+        let client = test_relay_client(address, RELAY_TIMEOUT).expect("client");
         let request = match_request_response_request(BridgeInteraction {
             custom_id: "scrimreq:v1:none:31:2".to_string(),
             interaction_id: 44,
@@ -2606,16 +2630,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let client = TurnierScrimClient {
-            http: reqwest::Client::builder()
-                .timeout(RELAY_TIMEOUT)
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .expect("client"),
-            base_url: format!("http://{address}"),
-            token: Some("relay-token".to_string()),
-        };
+        let client = test_relay_client(address, RELAY_TIMEOUT).expect("client");
         let request = replacement_request_relay_request(BridgeInteraction {
             custom_id: "scrimrepl:v1:77:decline".to_string(),
             interaction_id: 44,
@@ -2706,15 +2721,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let handler = RelayInteractionHandler::new(
-            TurnierScrimClient {
-                http: reqwest::Client::builder()
-                    .timeout(RELAY_TIMEOUT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .no_proxy()
-                    .build()?,
-                base_url: format!("http://{address}"),
-                token: Some("relay-token".to_string()),
-            },
+            test_relay_client(address, RELAY_TIMEOUT)?,
             db.pool().clone(),
         );
         let interaction = relay_interaction(44, 555, 1);
@@ -2953,15 +2960,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let handler = RelayInteractionHandler::new(
-            TurnierScrimClient {
-                http: reqwest::Client::builder()
-                    .timeout(Duration::from_millis(50))
-                    .redirect(reqwest::redirect::Policy::none())
-                    .no_proxy()
-                    .build()?,
-                base_url: format!("http://{address}"),
-                token: Some("relay-token".to_string()),
-            },
+            test_relay_client(address, Duration::from_millis(50))?,
             db.pool().clone(),
         );
 
@@ -3214,6 +3213,7 @@ mod tests {
             &request.idempotency,
             &payload,
             relay_payload_conflict_receipt(),
+            RELAY_LEASE_MARGIN_SECONDS,
         )
         .await?;
         sqlx::query(
@@ -3231,15 +3231,7 @@ mod tests {
         .execute(db.pool())
         .await?;
         let handler = RelayInteractionHandler::new(
-            TurnierScrimClient {
-                http: reqwest::Client::builder()
-                    .timeout(RELAY_TIMEOUT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .no_proxy()
-                    .build()?,
-                base_url: format!("http://{address}"),
-                token: Some("relay-token".to_string()),
-            },
+            test_relay_client(address, RELAY_TIMEOUT)?,
             db.pool().clone(),
         );
 
@@ -3261,15 +3253,7 @@ mod tests {
         let db = dl_central_db::testing::test_pool().await?;
         seed_match_request(db.pool()).await?;
         let handler = RelayInteractionHandler::new(
-            TurnierScrimClient {
-                http: reqwest::Client::builder()
-                    .timeout(Duration::from_millis(50))
-                    .redirect(reqwest::redirect::Policy::none())
-                    .no_proxy()
-                    .build()?,
-                base_url: "http://127.0.0.1:9".to_string(),
-                token: Some("relay-token".to_string()),
-            },
+            test_relay_client_at("http://127.0.0.1:9".to_string(), Duration::from_millis(50))?,
             db.pool().clone(),
         );
 
@@ -3329,19 +3313,25 @@ mod tests {
         })
     }
 
+    fn test_relay_client_at(
+        base_url: String,
+        timeout: Duration,
+    ) -> Result<TurnierScrimClient, dl_bridges::http::HttpSetupError> {
+        TurnierScrimClient::from_lookup(
+            |key| match key {
+                "TURNIER_INTERNAL_API_BASE_URL" => Some(base_url.clone()),
+                "TURNIER_INTERNAL_API_TOKEN" => Some("relay-token".to_string()),
+                _ => None,
+            },
+            dl_bridges::http::HttpLimits::default().with_request(timeout),
+        )
+    }
+
     fn test_relay_client(
         address: SocketAddr,
         timeout: Duration,
-    ) -> Result<TurnierScrimClient, reqwest::Error> {
-        Ok(TurnierScrimClient {
-            http: reqwest::Client::builder()
-                .timeout(timeout)
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()?,
-            base_url: format!("http://{address}"),
-            token: Some("relay-token".to_string()),
-        })
+    ) -> Result<TurnierScrimClient, dl_bridges::http::HttpSetupError> {
+        test_relay_client_at(format!("http://{address}"), timeout)
     }
 
     fn json_contains_substring(value: &Value, needle: &str) -> bool {

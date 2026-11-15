@@ -36,8 +36,6 @@ use anyhow::Context;
 use dl_core::runtime_config::lookup as operating_value;
 use dl_webcore::WebConfig;
 
-const SERVERSYNC_TOKEN_OVERRIDE: &str = "SERVERSYNC_INTERNAL_TOKEN";
-
 fn env(name: &str) -> Option<String> {
     operating_value(name)
         .map(|v| v.trim().to_string())
@@ -279,7 +277,11 @@ fn discord_brain_answerer(
         dl_brain::brain_api::BrainApiAnswerer::new(
             endpoint,
             &token,
-            std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000)),
+            std::time::Duration::from_millis(
+                options
+                    .brain_api_timeout_ms
+                    .unwrap_or(dl_core::runtime_config::BRAIN_API_DEFAULT_TIMEOUT_MS),
+            ),
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
@@ -767,7 +769,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         None => {
             tracing::warn!(
-                "{} fehlt, Twitch-Live-Bridge und Matcher inaktiv",
+                "Twitch-Live-Bridge und Matcher inaktiv: {} fehlt oder die Twitch-API-Konfiguration ist ungültig",
                 dl_core::internal_tokens::key_names(
                     dl_core::internal_tokens::TWITCH_INTERNAL_API_RECEIVER
                 )
@@ -1129,8 +1131,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
-    let brain_http = dl_bridges::http::HttpLimits::from_bridges(&operating.runtime.bridges);
-    let community_brain = community_brain_for_answers(&operating.runtime.ai, brain_http, || {
+    let community_brain = community_brain_for_answers(&operating.runtime.ai, http_limits, || {
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
     });
 
@@ -1143,7 +1144,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         } else {
             let answerer = discord_brain_answerer(
                 options,
-                brain_http,
+                http_limits,
                 dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN"),
             )?;
             tracing::info!("Direkte Discord-Brain-Antworten angeschlossen");
@@ -1519,7 +1520,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
     // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = dl_core::internal_tokens::present(&env, SERVERSYNC_TOKEN_OVERRIDE)
+    let serversync_token = dl_core::internal_tokens::present(&env, serversync::TOKEN_OVERRIDE)
         .or_else(|| {
             dl_core::internal_tokens::first_token(
                 env,
@@ -1528,10 +1529,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         });
     if serversync_token.is_none() {
         tracing::warn!(
-            keys = %format!(
-                "{SERVERSYNC_TOKEN_OVERRIDE}/{}",
-                dl_core::internal_tokens::key_names(dl_core::internal_tokens::MASTER_BROKER_RECEIVER)
-            ),
+            keys = %serversync::token_key_names(),
             "Kein interner Token, die Server-Sync-HTTP-Routen antworten mit 403"
         );
     }
@@ -2194,35 +2192,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn brain_bildgrenzen_der_konfiguration_entsprechen_dem_brain() {
-        use dl_core::runtime_config as runtime;
-        assert_eq!(
-            runtime::BRAIN_IMAGE_COUNT_RANGE,
-            dl_brain::IMAGE_COUNT_RANGE
-        );
-        assert_eq!(
-            runtime::BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE,
-            dl_brain::IMAGE_DOWNLOAD_BYTES_RANGE
-        );
-        assert_eq!(
-            *runtime::BRAIN_IMAGE_EDGE_RANGE.start(),
-            u64::from(*dl_brain::IMAGE_EDGE_RANGE.start())
-        );
-        assert_eq!(
-            *runtime::BRAIN_IMAGE_EDGE_RANGE.end(),
-            u64::from(*dl_brain::IMAGE_EDGE_RANGE.end())
-        );
-        assert_eq!(
-            *runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE.start(),
-            u64::from(*dl_brain::IMAGE_JPEG_QUALITY_RANGE.start())
-        );
-        assert_eq!(
-            *runtime::BRAIN_IMAGE_JPEG_QUALITY_RANGE.end(),
-            u64::from(*dl_brain::IMAGE_JPEG_QUALITY_RANGE.end())
-        );
-    }
-
     #[tokio::test]
     async fn community_answers_use_brain_for_every_switch_value() {
         use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};

@@ -140,7 +140,7 @@ pub async fn send(config: &Config, pending: &crate::state::Pending, token: &str)
             "{}/internal/master/v1/discord/send-message",
             config.broker_origin
         ))
-        .header("X-Internal-Token", token_header)
+        .header(dl_core::internal_tokens::HEADER, token_header)
         .header("X-Idempotency-Key", &pending.key)
         .json(&serde_json::json!({ "channel_id": config.channel_id, "content": pending.content }))
         .send()

@@ -8,13 +8,9 @@
 //! - [`decide_access`] ist die **reine** Entscheidung (Owner/Admin/Rolle →
 //!   Zugriffsstufe), ohne Netzwerk und damit vollständig testbar.
 
-use std::time::Duration;
-
 use serde_json::Value;
 
 use crate::config::{AccessLevel, DashboardConfig};
-
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Rohe Zugriffs-Fakten eines Mitglieds (wie der Broker sie liefert).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,11 +89,7 @@ pub struct BrokerMemberLookup {
 }
 
 impl BrokerMemberLookup {
-    pub fn new(base: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(HTTP_TIMEOUT)
-            .build()
-            .expect("reqwest-Client bauen");
+    pub fn new(base: impl Into<String>, http: reqwest::Client) -> Self {
         Self {
             http,
             base: base.into().trim_end_matches('/').to_string(),

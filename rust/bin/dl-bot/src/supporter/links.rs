@@ -15,7 +15,7 @@ use crate::serversync::support_publish::{
     SUPPORT_TIER_BUTTON_PREFIX,
 };
 
-const INTERNAL_TOKEN_HEADER: &str = "X-Internal-Token";
+const INTERNAL_TOKEN_HEADER: &str = dl_core::internal_tokens::HEADER;
 const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
 const TIP_PATH: &str = "/supporter/v1/tip";
 const PORTAL_PATH: &str = "/supporter/v1/portal";
@@ -170,7 +170,7 @@ impl HttpSupporterLinks {
         if let Some(missing) = FundingSource::missing_config(self) {
             tracing::warn!(
                 missing,
-                "Server-Unterstützer: Abo, Einmalig und Verwalten antworten „noch nicht freigeschaltet“, das Monatsziel wird nicht abgeglichen"
+                "Server-Unterstützer: Abo, Einmalig und Verwalten antworten „noch nicht freigeschaltet“, der Monatsstand wird nicht abgeglichen"
             );
         }
         if self.twitch_base.is_some() && self.twitch_token.is_none() {

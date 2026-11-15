@@ -75,6 +75,7 @@ struct Inner {
     rate: Mutex<HashMap<String, Vec<f64>>>,
     /// 30-Sekunden-Cache der öffentlichen Guild-Stats (Wert, Zeitpunkt).
     guild_stats_cache: Mutex<Option<(Value, f64)>>,
+    broker_http: reqwest::Client,
 }
 
 struct LoginState {
@@ -143,6 +144,7 @@ impl DashboardApp {
         let sessions =
             SessionStore::persistent(pool.clone(), cfg.session_ttl_secs, now_unix_f64()).await?;
         let data_dir = cfg.data_dir.clone();
+        let broker_http = dl_bridges::http::internal_client(cfg.http_limits)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 cfg,
@@ -158,6 +160,7 @@ impl DashboardApp {
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),
+                broker_http,
             }),
         })
     }
@@ -165,8 +168,15 @@ impl DashboardApp {
     /// Produktions-Konstruktor: Lookup und Namensauflösung gehen über den
     /// Master-Broker.
     pub async fn from_config(cfg: DashboardConfig, pool: PgPool) -> Result<Self, DashboardDbError> {
-        let lookup = Arc::new(BrokerMemberLookup::new(cfg.broker_base.clone()));
-        let names = Arc::new(BrokerNameResolver::new(cfg.broker_base.clone()));
+        let broker_http = dl_bridges::http::internal_client(cfg.http_limits)?;
+        let lookup = Arc::new(BrokerMemberLookup::new(
+            cfg.broker_base.clone(),
+            broker_http.clone(),
+        ));
+        let names = Arc::new(BrokerNameResolver::new(
+            cfg.broker_base.clone(),
+            broker_http,
+        ));
         let lagebild_enabled = dl_squads::lagebild::enabled(dl_core::runtime_config::lookup);
         let ai = if lagebild_enabled {
             build_scrim_lagebild_ai()
@@ -210,6 +220,10 @@ impl DashboardApp {
 
     pub(crate) fn broker_base(&self) -> &str {
         &self.cfg().broker_base
+    }
+
+    pub(crate) fn broker_http(&self) -> &reqwest::Client {
+        &self.inner.broker_http
     }
 
     /// Frischer (≤30 s) Guild-Stats-Cache-Wert, sonst `None`.
@@ -2162,7 +2176,7 @@ fn coerce_u64(value: &Value) -> Option<u64> {
 
 fn header_token(headers: &HeaderMap) -> Option<&str> {
     headers
-        .get("X-Internal-Token")
+        .get(dl_core::internal_tokens::HEADER)
         .and_then(|v| v.to_str().ok())
 }
 
@@ -2382,7 +2396,7 @@ mod tests {
         let mut request = axum::http::Request::builder()
             .method("POST")
             .uri(uri)
-            .header("X-Internal-Token", token)
+            .header(dl_core::internal_tokens::HEADER, token)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .expect("request");
@@ -3344,6 +3358,7 @@ mod visual_brain_route_tests {
                     .unwrap(),
             );
         }
+        let broker_http = dl_bridges::http::internal_client(cfg.http_limits).expect("Testclient");
         let app = DashboardApp {
             inner: Arc::new(Inner {
                 oauth: OAuthClient::new(
@@ -3358,13 +3373,20 @@ mod visual_brain_route_tests {
                 cfg,
                 pool,
                 sessions,
-                lookup: Arc::new(BrokerMemberLookup::new("http://127.0.0.1:1")),
-                names: Arc::new(BrokerNameResolver::new("http://127.0.0.1:1")),
+                lookup: Arc::new(BrokerMemberLookup::new(
+                    "http://127.0.0.1:1",
+                    broker_http.clone(),
+                )),
+                names: Arc::new(BrokerNameResolver::new(
+                    "http://127.0.0.1:1",
+                    broker_http.clone(),
+                )),
                 ai: None,
                 lagebild_enabled: true,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),
+                broker_http,
             }),
         };
         let routes = router(app);

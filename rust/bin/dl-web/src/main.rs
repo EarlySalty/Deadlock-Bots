@@ -34,7 +34,10 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
     dl_ai::usage::initialize(central_pool.clone(), "dl-web").map_err(anyhow::Error::msg)?;
 
+    let http_limits =
+        dl_bridges::http::HttpLimits::from_bridges(&operating.snapshot().runtime.bridges);
     let dashboard = DashboardClient::new(
+        dl_bridges::http::client(http_limits)?,
         web_cfg.dashboard_base.clone(),
         web_cfg.relay_token.clone(),
         web_cfg.twitch_token.clone(),
@@ -44,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
     let tierlist = dl_tierlist::TierlistApp::new(
         central_pool.clone(),
         dashboard.clone(),
+        dl_bridges::http::client(
+            http_limits.with_request(dl_tierlist::DEADLOCK_API_REQUEST_TIMEOUT),
+        )?,
         dl_tierlist::DEADLOCK_API_BASE,
     );
     let tierlist_addr = format!("{}:{}", web_cfg.tierlist_host, cfg.ports.tierlist_public);

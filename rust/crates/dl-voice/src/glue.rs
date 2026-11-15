@@ -343,8 +343,8 @@ async fn recent_raw_bot_messages(
         "{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={}",
         limit.min(100)
     );
-    let response = dl_bridges::http::current_client()
-        .map_err(|err| err.to_string())?
+    let response = adapter
+        .rest_client()
         .get(url)
         .header(reqwest::header::AUTHORIZATION, adapter.http.token())
         .send()
@@ -481,7 +481,7 @@ async fn send_router_message_payload(
     files: Vec<RouterPanelFile>,
 ) -> Result<RouterDiscordResponse, String> {
     let payload_text = serde_json::to_string(&body).map_err(|err| err.to_string())?;
-    let client = dl_bridges::http::current_client().map_err(|err| err.to_string())?;
+    let client = adapter.rest_client();
     let request = match method {
         "POST" => client.post(url),
         "PATCH" => client.patch(url),

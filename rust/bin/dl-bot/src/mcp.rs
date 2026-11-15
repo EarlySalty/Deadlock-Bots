@@ -60,8 +60,9 @@ impl McpState {
     ) -> Result<Self> {
         let http = dl_bridges::http::client(http_limits).context("MCP: HTTP-Client")?;
         let auth_token = auth_token
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
+            .as_deref()
+            .and_then(dl_core::internal_tokens::token_value)
+            .map(str::to_owned)
             .context("MCP: interner Auth-Token aus Infisical fehlt")?;
         Ok(Self {
             http,
@@ -575,6 +576,7 @@ async fn discord_call(
 ) -> Result<Value> {
     let url = format!("{}{path}", st.discord_api);
     let mut attempt: u32 = 0;
+    let mut rate_limit_waited = Duration::ZERO;
     loop {
         attempt += 1;
         let m = reqwest::Method::from_bytes(method.as_bytes()).context("HTTP-Methode")?;
@@ -608,20 +610,26 @@ async fn discord_call(
             let retry = body_json
                 .get("retry_after")
                 .and_then(|v| v.as_f64())
-                .or(hdr_retry)
-                .unwrap_or(1.0);
+                .or(hdr_retry);
             if attempt > 8 {
                 bail!("Rate-Limit: zu viele Versuche ({url})");
             }
-            let wait = Duration::from_secs_f64(retry.max(0.0));
-            if wait > st.http_limits.request {
+            let Some(wait) =
+                dl_bridges::http::rate_limit_wait(retry, rate_limit_waited, st.http_limits.request)
+            else {
                 bail!(
-                    "Rate-Limit: Discord verlangt {:.1} s Pause, mehr als das Zeitlimit von {} ms ({method} {path})",
-                    retry,
+                    "Rate-Limit: Discord verlangt {} s Pause, zusammen mehr als das Zeitlimit von {} ms ({method} {path})",
+                    retry.map_or_else(|| "unbekannt".to_string(), |s| format!("{s:.1}")),
                     st.http_limits.request.as_millis()
                 );
-            }
-            tracing::warn!(path, retry, attempt, "MCP: Discord 429, warte");
+            };
+            rate_limit_waited += wait;
+            tracing::warn!(
+                path,
+                wait_ms = wait.as_millis(),
+                attempt,
+                "MCP: Discord 429, warte"
+            );
             tokio::time::sleep(wait).await;
             continue;
         }

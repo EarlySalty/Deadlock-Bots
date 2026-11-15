@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serenity::all::{GuildId, Http, PermissionOverwrite, PermissionOverwriteType, Role};
 use sqlx::PgPool;
@@ -7,7 +9,21 @@ use crate::model::{
     CategorySpec, ChannelKind, ChannelSpec, GuildModel, OverwriteKey, PermissionOverwriteSpec,
     RoleSpec, TargetKind,
 };
-use crate::Result;
+use crate::{Result, ServerAsCodeError};
+
+async fn within<T>(
+    limit: Duration,
+    operation: &'static str,
+    call: impl std::future::Future<Output = serenity::Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(limit, call)
+        .await
+        .map_err(|_| ServerAsCodeError::DiscordDeadline {
+            operation,
+            limit_ms: limit.as_millis(),
+        })?
+        .map_err(Into::into)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotImportReport {
@@ -24,15 +40,20 @@ pub async fn import_live_guild_snapshot(
     pool: &PgPool,
     http: &Http,
     guild_id: u64,
+    request_limit: Duration,
 ) -> Result<SnapshotImportReport> {
-    let model = fetch_live_guild_model(http, guild_id).await?;
+    let model = fetch_live_guild_model(http, guild_id, request_limit).await?;
     db::persist_snapshot_model(pool, &model, "serenity_http").await
 }
 
-pub async fn fetch_live_guild_model(http: &Http, guild_id: u64) -> Result<GuildModel> {
+pub async fn fetch_live_guild_model(
+    http: &Http,
+    guild_id: u64,
+    request_limit: Duration,
+) -> Result<GuildModel> {
     let guild_id = GuildId::new(guild_id);
-    let channels = guild_id.channels(http).await?;
-    let roles = http.get_guild_roles(guild_id).await?;
+    let channels = within(request_limit, "Kanäle", guild_id.channels(http)).await?;
+    let roles = within(request_limit, "Rollen", http.get_guild_roles(guild_id)).await?;
     let mut model = GuildModel::new(guild_id.get());
 
     for channel in channels.values() {

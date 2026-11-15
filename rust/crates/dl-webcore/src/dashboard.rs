@@ -5,8 +5,6 @@
 //! Tierlist-Session-Check. Alle Aufrufe: POST JSON, `X-Internal-Token`,
 //! 20-Sekunden-Timeout, Nicht-200 → None (mit Warn-Log).
 
-use std::time::Duration;
-
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,11 +37,12 @@ pub struct DashboardClient {
 }
 
 impl DashboardClient {
-    pub fn new(base: String, relay_token: Option<String>, twitch_token: Option<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .expect("reqwest-Client bauen");
+    pub fn new(
+        http: reqwest::Client,
+        base: String,
+        relay_token: Option<String>,
+        twitch_token: Option<String>,
+    ) -> Self {
         Self {
             http,
             base: base.trim_end_matches('/').to_string(),
@@ -53,7 +52,7 @@ impl DashboardClient {
     }
 
     async fn post(&self, token: Option<&str>, path: &str, payload: Value) -> Option<Value> {
-        let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        let Some(token) = token.and_then(dl_core::internal_tokens::token_value) else {
             tracing::warn!(path, "kein Dashboard-Internal-Token konfiguriert");
             return None;
         };
@@ -61,7 +60,7 @@ impl DashboardClient {
         let response = match self
             .http
             .post(&url)
-            .header("X-Internal-Token", token)
+            .header(dl_core::internal_tokens::HEADER, token)
             .json(&payload)
             .send()
             .await

@@ -133,6 +133,10 @@ pub struct SteamBotClient {
 }
 
 impl SteamBotClient {
+    pub fn invite_wait(&self) -> Duration {
+        self.waits.invite
+    }
+
     pub fn from_env(
         lookup: impl Fn(&str) -> Option<String>,
         bridges: &BridgeOptions,
@@ -185,7 +189,7 @@ impl SteamBotClient {
 
         let mut request = self.http.post(&url).json(&payload).timeout(timeout);
         if let Some(token) = &self.token {
-            request = request.header("X-Internal-Token", token);
+            request = request.header(dl_core::internal_tokens::HEADER, token);
         }
         match request.send().await {
             Ok(response) if response.status() == reqwest::StatusCode::OK => {
@@ -1152,11 +1156,11 @@ pub(crate) mod tests {
             client
                 .invite_from_bot(99, 7, "123456789", 42)
                 .await
-                .unwrap(),
+                .expect("Testaufbau"),
             response
         );
         assert_eq!(
-            received.lock().unwrap().as_slice(),
+            received.lock().expect("Testaufbau").as_slice(),
             &[json!({
                 "kind": "slash_command",
                 "interaction": {
@@ -1166,7 +1170,7 @@ pub(crate) mod tests {
             })]
         );
         assert!(client.invite_from_bot(0, 7, "123456789", 42).await.is_err());
-        assert_eq!(received.lock().unwrap().len(), 1);
+        assert_eq!(received.lock().expect("Testaufbau").len(), 1);
         server.abort();
     }
 

@@ -231,6 +231,10 @@ impl InviteEventPort for RecordingInvite {
         self.sends.fetch_add(1, Ordering::SeqCst);
         Ok("🎮 Ihr seid schon Steam-Freunde, ich hab die Einladung direkt angestoßen.\nAntwort von Steam: OK".into())
     }
+
+    fn dispatch_window(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(dl_core::runtime_config::STEAM_INVITE_DEFAULT_TIMEOUT_MS)
+    }
 }
 
 fn setup() -> (
@@ -2051,6 +2055,48 @@ async fn langsamer_direkter_versand_speichert_ergebnis_ohne_späte_antwort() {
         Phase::Attempted
     );
     assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn laufender_versand_bleibt_bis_zum_konfigurierten_steam_limit_aktiv() {
+    let started = NOW * 1000;
+    let window = i64::try_from(dl_core::runtime_config::STEAM_INVITE_DEFAULT_TIMEOUT_MS)
+        .expect("Standard passt in i64");
+    for (offset, replaced) in [(150_000, false), (window - 1, false), (window, true)] {
+        let (mut watcher, store, _, invite) = setup();
+        let now_millis = started + offset;
+        watcher.clock_millis = Arc::new(move || now_millis);
+        let state = LoungeState {
+            last_seen: 1,
+            friend_code: Some("123456789".into()),
+            request: Some(Request {
+                message_id: 1,
+                created_at: NOW,
+                direct: true,
+                phase: Phase::Dispatching,
+            }),
+            dispatch_started_at_millis: Some(started),
+            ..Default::default()
+        };
+        store.states.lock().await.insert(USER, state);
+        let now = now_millis / 1000;
+        watcher
+            .record_message(
+                message(2, now, "Kannst du mich einladen?"),
+                now,
+                Some(false),
+            )
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        let request = store
+            .load(USER)
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
+            .and_then(|state| state.request)
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        assert_eq!(request.message_id == 2, replaced, "{offset}");
+        assert!(invite.calls.lock().await.is_empty());
+    }
 }
 
 #[test]

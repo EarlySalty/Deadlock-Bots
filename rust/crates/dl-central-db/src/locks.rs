@@ -27,6 +27,19 @@ pub async fn lock_user_privacy(
     Ok(())
 }
 
+pub async fn lock_users_privacy(
+    tx: &mut Transaction<'_, Postgres>,
+    user_ids: &[i64],
+) -> Result<(), sqlx::Error> {
+    let mut ordered = user_ids.to_vec();
+    ordered.sort_unstable();
+    ordered.dedup();
+    for user_id in ordered {
+        lock_user_privacy(tx, user_id).await?;
+    }
+    Ok(())
+}
+
 /// Sperrt den User und prueft den Privacy-Grabstein unter demselben Lock.
 pub async fn lock_user_privacy_and_is_opted_out(
     tx: &mut Transaction<'_, Postgres>,
