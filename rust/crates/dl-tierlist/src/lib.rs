@@ -28,7 +28,6 @@ pub use refresh::refresh_loop;
 pub use settings::SESSION_COOKIE;
 
 pub const DEADLOCK_API_BASE: &str = "https://api.deadlock-api.com/v1";
-pub const DEADLOCK_API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct TierlistApp {
     pub pool: PgPool,

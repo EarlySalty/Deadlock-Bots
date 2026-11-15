@@ -13,6 +13,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dl_core::runtime_config::{
+    MATCHER_DEFAULT_MAX_AI_PER_SCAN, MATCHER_DEFAULT_SCAN_INTERVAL_HOURS,
+};
 use dl_discord::{
     BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec,
 };
@@ -357,8 +360,16 @@ impl MatcherConfig {
             fuzzy_floor: get("STREAMER_LINK_FUZZY_FLOOR")
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.62),
-            max_ai_per_scan: int("STREAMER_LINK_MAX_AI_PER_SCAN", 40).max(0) as u64,
-            scan_interval_hours: int("STREAMER_LINK_SCAN_INTERVAL_HOURS", 6).max(0) as u64,
+            max_ai_per_scan: int(
+                "STREAMER_LINK_MAX_AI_PER_SCAN",
+                MATCHER_DEFAULT_MAX_AI_PER_SCAN as i64,
+            )
+            .max(0) as u64,
+            scan_interval_hours: int(
+                "STREAMER_LINK_SCAN_INTERVAL_HOURS",
+                MATCHER_DEFAULT_SCAN_INTERVAL_HOURS as i64,
+            )
+            .max(0) as u64,
             state_path: PathBuf::from(
                 get("STREAMER_LINK_STATE_PATH")
                     .unwrap_or_else(|| "data/streamer_link_state.json".to_string()),

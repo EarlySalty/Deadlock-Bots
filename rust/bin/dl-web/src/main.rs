@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
         central_pool.clone(),
         dashboard.clone(),
         dl_bridges::http::client(
-            http_limits.with_request(dl_tierlist::DEADLOCK_API_REQUEST_TIMEOUT),
+            http_limits.with_request(operating.snapshot().runtime.web.deadlock_api_limit()),
         )?,
         dl_tierlist::DEADLOCK_API_BASE,
     );

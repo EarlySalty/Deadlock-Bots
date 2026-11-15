@@ -161,7 +161,7 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 nullable,
                 writable: columns[4] == "edit",
                 restart_required: true,
-                help: replace(columns[5]),
+                help: with_bounds(&replace(columns[5]), min.as_deref(), max.as_deref()),
                 min,
                 max,
                 length,
@@ -195,6 +195,15 @@ fn integer_to_wire(value: &Value) -> Value {
         Value::String(value.to_string())
     }
 }
+fn with_bounds(help: &str, min: Option<&str>, max: Option<&str>) -> String {
+    [("{min}", min), ("{max}", max)]
+        .into_iter()
+        .fold(help.to_owned(), |text, (marker, value)| match value {
+            Some(value) => text.replace(marker, value),
+            None => text,
+        })
+}
+
 fn wide<T>(value: T) -> i64
 where
     i64: TryFrom<T>,
@@ -258,7 +267,10 @@ pub fn catalog_bounds(path: &str) -> Option<(i64, i64)> {
             wide(runtime::SUPPORTER_TIER_MIN_EUR),
             wide(runtime::SUPPORTER_TIER_MAX_EUR),
         ),
-        "runtime.bridges.http_connect_timeout_ms" | "runtime.bridges.http_request_timeout_ms" => {
+        "runtime.bridges.http_connect_timeout_ms"
+        | "runtime.bridges.http_request_timeout_ms"
+        | "runtime.web.deadlock_api_timeout_ms"
+        | "runtime.moderation.evidence_download_timeout_ms" => {
             range_bounds(&runtime::HTTP_TIMEOUT_MS_RANGE)
         }
         "runtime.bridges.steam_rank_timeout_ms"
@@ -772,6 +784,31 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
         assert!(checked >= 8, "{checked}");
     }
 
+    #[test]
+    fn grenzen_in_der_hilfe_kommen_nur_aus_den_platzhaltern() {
+        for line in crate::admin_settings::SPEC
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let help = line.split('\t').nth(5).unwrap_or_default();
+            for marker in ["Erlaubt sind ", "Zulässig sind "] {
+                for claim in help.split(marker).skip(1) {
+                    assert!(
+                        claim.starts_with("{min} bis {max}") || claim.starts_with("Werte ab {min}"),
+                        "{line}"
+                    );
+                }
+            }
+        }
+        for field in fields(crate::admin_settings::SPEC, &[1]) {
+            assert!(
+                !field.help.contains("{min}") && !field.help.contains("{max}"),
+                "{}",
+                field.path
+            );
+        }
+    }
+
     fn loads_with(path: &str, value: Value) -> bool {
         let range = crate::runtime_config::HTTP_TIMEOUT_MS_RANGE;
         let companion = match path {
@@ -780,6 +817,9 @@ runtime.moderation.analyze_flag_threshold\tOption<f64>\tTest\tSchwelle\tedit\tTe
             }
             "runtime.bridges.http_request_timeout_ms" => {
                 Some(("runtime.bridges.http_connect_timeout_ms", *range.start()))
+            }
+            "runtime.moderation.evidence_download_timeout_ms" => {
+                Some(("runtime.bridges.http_request_timeout_ms", *range.end()))
             }
             _ => None,
         };

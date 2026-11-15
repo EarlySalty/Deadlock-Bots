@@ -6,6 +6,7 @@ use std::{
     net::IpAddr,
     ops::RangeInclusive,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 pub const STRIPE_MIN_CHARGE_EUR_CENTS: i64 = 50;
@@ -36,11 +37,21 @@ pub const HTTP_DEFAULT_REQUEST_TIMEOUT_MS: u64 =
     STEAM_BOT_STRIPE_TIMEOUT_MS + HTTP_DEFAULT_CONNECT_TIMEOUT_MS;
 const _: () = assert!(HTTP_DEFAULT_REQUEST_TIMEOUT_MS > STEAM_BOT_STRIPE_TIMEOUT_MS);
 const _: () = assert!(*HTTP_TIMEOUT_MS_RANGE.end() >= HTTP_DEFAULT_REQUEST_TIMEOUT_MS);
+pub const MODERATION_EVIDENCE_DEFAULT_TIMEOUT_MS: u64 = 5_000;
+pub const DEADLOCK_API_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const _: () = assert!(
+    MODERATION_EVIDENCE_DEFAULT_TIMEOUT_MS >= *HTTP_TIMEOUT_MS_RANGE.start()
+        && MODERATION_EVIDENCE_DEFAULT_TIMEOUT_MS <= *HTTP_TIMEOUT_MS_RANGE.end()
+        && DEADLOCK_API_DEFAULT_TIMEOUT_MS >= *HTTP_TIMEOUT_MS_RANGE.start()
+        && DEADLOCK_API_DEFAULT_TIMEOUT_MS <= *HTTP_TIMEOUT_MS_RANGE.end()
+);
 pub const MODERATION_THRESHOLD_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_FUZZY_FLOOR_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
 pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1_000;
 pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=YEAR_SECONDS / HOUR_SECONDS;
+pub const MATCHER_DEFAULT_MAX_AI_PER_SCAN: u64 = 40;
+pub const MATCHER_DEFAULT_SCAN_INTERVAL_HOURS: u64 = 6;
 pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
 pub const BRAIN_IMAGE_COUNT_RANGE: RangeInclusive<usize> = 1..=4;
 pub const BRAIN_IMAGE_DOWNLOAD_BYTES_RANGE: RangeInclusive<u64> = 1..=512 * 1024 * 1024;
@@ -69,6 +80,14 @@ pub const PORT_RANGE: RangeInclusive<u16> = 1..=u16::MAX;
 pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=usize::MAX;
 pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
 pub const BROKER_SECONDS_RANGE: RangeInclusive<f64> = 0.001..=YEAR_SECONDS as f64;
+pub const BROKER_IDEMPOTENCY_DEFAULT_TTL_SECONDS: u64 = 10 * MINUTE_SECONDS;
+pub const BROKER_INFLIGHT_MIN_TTL_SECONDS: u64 = 5 * MINUTE_SECONDS;
+pub const BROKER_WAITER_DEFAULT_TIMEOUT_SECONDS: u64 = 15;
+const _: () = assert!(
+    BROKER_WAITER_DEFAULT_TIMEOUT_SECONDS as f64 >= *BROKER_SECONDS_RANGE.start()
+        && BROKER_IDEMPOTENCY_DEFAULT_TTL_SECONDS as f64 <= *BROKER_SECONDS_RANGE.end()
+        && BROKER_INFLIGHT_MIN_TTL_SECONDS as f64 <= *BROKER_SECONDS_RANGE.end()
+);
 pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=HOUR_SECONDS as f64;
 pub const TWITCH_DEFAULT_TIMEOUT_SECONDS: f64 = 10.0;
 const _: () = assert!(
@@ -214,7 +233,18 @@ section!(WebOptions {
     tierlist_host: IpAddr => "TIERLIST_PUBLIC_HOST",
     static_dir: PathBuf => "DL_STATIC_DIR",
     tierlist_refresh: bool => "DL_TIERLIST_REFRESH",
+} internal {
+    deadlock_api_timeout_ms: u64,
 });
+
+impl WebOptions {
+    pub fn deadlock_api_limit(&self) -> Duration {
+        Duration::from_millis(
+            self.deadlock_api_timeout_ms
+                .unwrap_or(DEADLOCK_API_DEFAULT_TIMEOUT_MS),
+        )
+    }
+}
 
 section!(CommunityOptions {
     steam_voice_nudge: bool => "DL_STEAM_VOICE_NUDGE_ENABLED",
@@ -269,7 +299,18 @@ section!(ModerationOptions {
     timeout_minutes: i64 => "MOD_TIMEOUT_MINUTES",
     behavior_proposal_timeout_minutes: i64 => "MOD_BEHAVIOR_PROPOSAL_TIMEOUT_MINUTES",
     ai_moderator: bool => "AI_MODERATOR_ENABLE",
+} internal {
+    evidence_download_timeout_ms: u64,
 });
+
+impl ModerationOptions {
+    pub fn evidence_download_limit(&self) -> Duration {
+        Duration::from_millis(
+            self.evidence_download_timeout_ms
+                .unwrap_or(MODERATION_EVIDENCE_DEFAULT_TIMEOUT_MS),
+        )
+    }
+}
 
 section!(AiOptions {
     openai_base_url: String => "OPENAI_BASE_URL",
@@ -410,6 +451,8 @@ impl RuntimeConfig {
             || [
                 self.bridges.http_connect_timeout_ms,
                 self.bridges.http_request_timeout_ms,
+                self.web.deadlock_api_timeout_ms,
+                self.moderation.evidence_download_timeout_ms,
             ]
             .into_iter()
             .flatten()
@@ -422,6 +465,15 @@ impl RuntimeConfig {
                     .bridges
                     .http_request_timeout_ms
                     .unwrap_or(HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+            || self
+                .moderation
+                .evidence_download_timeout_ms
+                .is_some_and(|ms| {
+                    ms > self
+                        .bridges
+                        .http_request_timeout_ms
+                        .unwrap_or(HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+                })
             || [
                 self.bridges.steam_rank_timeout_ms,
                 self.bridges.steam_rankcheck_timeout_ms,
@@ -1208,12 +1260,11 @@ mod supporter_bound_tests {
         } else {
             format!("runtime.community.{key}\t")
         };
-        crate::admin_settings::SPEC
-            .lines()
-            .find(|line| line.starts_with(&prefix))
-            .and_then(|line| line.split('\t').nth(5))
+        crate::settings_catalog::fields(crate::admin_settings::SPEC, &[])
+            .into_iter()
+            .find(|field| format!("{}\t", field.path) == prefix)
             .expect("Katalogzeile")
-            .to_string()
+            .help
     }
 
     #[test]
@@ -1268,6 +1319,24 @@ mod supporter_bound_tests {
         }
         assert!(catalog_help("bridges.steam_invite_timeout_ms")
             .contains(&format!("je bis zu {STEAM_INVITE_TASK_WAIT_MS}")));
+        assert!(catalog_help("bridges.matcher_max_ai_per_scan")
+            .starts_with(&format!("Standard ist {MATCHER_DEFAULT_MAX_AI_PER_SCAN}.")));
+        assert!(
+            catalog_help("bridges.matcher_scan_interval_hours").starts_with(&format!(
+                "Standard ist {MATCHER_DEFAULT_SCAN_INTERVAL_HOURS}."
+            ))
+        );
+        assert!(MATCHER_MAX_AI_PER_SCAN_RANGE.contains(&MATCHER_DEFAULT_MAX_AI_PER_SCAN));
+        assert!(MATCHER_SCAN_INTERVAL_HOURS_RANGE.contains(&MATCHER_DEFAULT_SCAN_INTERVAL_HOURS));
+        assert!(catalog_help("start.presence_status")
+            .contains(&format!("Höchstens {PRESENCE_STATUS_MAX_CHARS} Zeichen.")));
+        assert!(catalog_help("web.deadlock_api_timeout_ms")
+            .starts_with(&format!("Standard ist {DEADLOCK_API_DEFAULT_TIMEOUT_MS}.")));
+        assert!(
+            catalog_help("moderation.evidence_download_timeout_ms").starts_with(&format!(
+                "Standard ist {MODERATION_EVIDENCE_DEFAULT_TIMEOUT_MS}."
+            ))
+        );
     }
 
     #[test]

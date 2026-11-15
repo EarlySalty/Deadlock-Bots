@@ -1375,6 +1375,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 Arc::new(modglue::ModGlue {
                     adapter: adapter.clone(),
                     tags: tag_service.clone(),
+                    evidence_download_limit: operating.runtime.moderation.evidence_download_limit(),
                 }),
                 dl_moderation::moderation_system::ModerationSystemConfig {
                     scan_channel_ids: moderation_scan_channel_ids.clone(),

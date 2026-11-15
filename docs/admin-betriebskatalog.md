@@ -2,7 +2,7 @@
 
 ## Umfang
 
-`#betrieb` verwendet einen versionierten, serverseitigen Einstellungskatalog statt einer eigenen kurzen Feldliste im Browser. Der Discord-Katalog klassifiziert 220 Felder: 167 sind betrieblich änderbar, 53 betreffen geschützte Infrastruktur. Die Steam-Seite erweitert die bisherigen Betriebswerte um den vollständigen typisierten Steam-Katalog; kontobezogene Einträge werden für die tatsächlich konfigurierten Konto-IDs erzeugt.
+`#betrieb` verwendet einen versionierten, serverseitigen Einstellungskatalog statt einer eigenen kurzen Feldliste im Browser. Der Discord-Katalog ordnet jedes Feld ein: Es ist entweder betrieblich änderbar oder betrifft geschützte Infrastruktur. Die aktuelle Aufteilung steht in `rust/crates/dl-core/src/settings_catalog.tsv` (Spalte `edit` oder `protected`). Die Steam-Seite erweitert die bisherigen Betriebswerte um den vollständigen typisierten Steam-Katalog; kontobezogene Einträge werden für die tatsächlich konfigurierten Konto-IDs erzeugt.
 
 Das ist die Konfiguration der an dieser Seite angebundenen Discord- und Steam-Dienste. Eigenständige Twitch-/Brain-Dienstkonfigurationen und bislang fest programmierte Konstanten anderer Repositories werden dadurch nicht automatisch zu Dashboard-Einstellungen. Die Discord-seitigen Brain-Schalter und KI-Anwendungsfälle sind enthalten.
 

@@ -7,6 +7,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use dl_core::runtime_config::{
+    BROKER_IDEMPOTENCY_DEFAULT_TTL_SECONDS, BROKER_INFLIGHT_MIN_TTL_SECONDS,
+    BROKER_WAITER_DEFAULT_TIMEOUT_SECONDS,
+};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -29,7 +33,7 @@ impl IdempotencyConfig {
         };
         let ttl = positive(
             "MASTER_BROKER_IDEMPOTENCY_TTL_SECONDS",
-            Duration::from_secs(600),
+            Duration::from_secs(BROKER_IDEMPOTENCY_DEFAULT_TTL_SECONDS),
         );
         Self {
             ttl,
@@ -39,11 +43,11 @@ impl IdempotencyConfig {
                 .unwrap_or(1024),
             inflight_ttl: positive(
                 "MASTER_BROKER_IDEMPOTENCY_INFLIGHT_TTL_SECONDS",
-                ttl.max(Duration::from_secs(300)),
+                ttl.max(Duration::from_secs(BROKER_INFLIGHT_MIN_TTL_SECONDS)),
             ),
             waiter_timeout: positive(
                 "MASTER_BROKER_IDEMPOTENCY_WAITER_TIMEOUT_SECONDS",
-                Duration::from_secs(15),
+                Duration::from_secs(BROKER_WAITER_DEFAULT_TIMEOUT_SECONDS),
             ),
         }
     }
@@ -228,15 +232,23 @@ mod tests {
     fn unbrauchbare_zeitwerte_fallen_auf_den_standard() {
         for value in ["inf", "1e300", "NaN", "-5", "0", "x"] {
             let config = IdempotencyConfig::from_env(|_| Some(value.to_string()));
-            assert_eq!(config.ttl, Duration::from_secs(600), "{value}");
-            assert_eq!(config.inflight_ttl, Duration::from_secs(600), "{value}");
-            assert_eq!(config.waiter_timeout, Duration::from_secs(15), "{value}");
+            let ttl = Duration::from_secs(BROKER_IDEMPOTENCY_DEFAULT_TTL_SECONDS);
+            assert_eq!(config.ttl, ttl, "{value}");
+            assert_eq!(config.inflight_ttl, ttl, "{value}");
+            assert_eq!(
+                config.waiter_timeout,
+                Duration::from_secs(BROKER_WAITER_DEFAULT_TIMEOUT_SECONDS),
+                "{value}"
+            );
         }
         let config = IdempotencyConfig::from_env(|key| {
             (key == "MASTER_BROKER_IDEMPOTENCY_TTL_SECONDS").then(|| "120.5".to_string())
         });
         assert_eq!(config.ttl, Duration::from_millis(120_500));
-        assert_eq!(config.inflight_ttl, Duration::from_secs(300));
+        assert_eq!(
+            config.inflight_ttl,
+            Duration::from_secs(BROKER_INFLIGHT_MIN_TTL_SECONDS)
+        );
     }
 
     #[tokio::test]

@@ -88,7 +88,7 @@ impl BotConfigStore {
         )
         .map_err(|error| match error {
             EditError::Catalog(_) => EditError::Invalid(BotConfigError::Validation(
-                "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
+                "concierge.timeout_seconds liegt außerhalb des erlaubten Bereichs",
             )),
             other => other,
         })

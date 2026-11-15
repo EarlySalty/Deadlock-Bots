@@ -21,7 +21,6 @@ const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
     &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
-const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 10;
 const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
@@ -191,6 +190,7 @@ fn private_channel_overwrites_are_owner_only(
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
+    pub evidence_download_limit: Duration,
 }
 
 #[cfg(test)]
@@ -1898,22 +1898,20 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
         let client = self.adapter.rest_client();
         let mut files = Vec::new();
         for url in image_urls.iter().take(MODERATION_EVIDENCE_IMAGE_LIMIT) {
-            let response = match tokio::time::timeout(
-                MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT,
-                client.get(url).send(),
-            )
-            .await
-            {
-                Ok(Ok(response)) => response,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "Moderation: Beweisbild nicht geladen");
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!("Moderation: Beweisbild nicht rechtzeitig geladen");
-                    continue;
-                }
-            };
+            let response =
+                match tokio::time::timeout(self.evidence_download_limit, client.get(url).send())
+                    .await
+                {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "Moderation: Beweisbild nicht geladen");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!("Moderation: Beweisbild nicht rechtzeitig geladen");
+                        continue;
+                    }
+                };
             if !response.status().is_success() {
                 continue;
             }
@@ -1929,22 +1927,19 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             {
                 continue;
             }
-            let bytes =
-                match tokio::time::timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, response.bytes())
-                    .await
-                {
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "Moderation: Beweisbild nicht vollständig geladen");
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "Moderation: Beweisbild nicht rechtzeitig vollständig geladen"
-                        );
-                        continue;
-                    }
-                };
+            let bytes = match tokio::time::timeout(self.evidence_download_limit, response.bytes())
+                .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "Moderation: Beweisbild nicht vollständig geladen");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("Moderation: Beweisbild nicht rechtzeitig vollständig geladen");
+                    continue;
+                }
+            };
             if bytes.len() > MODERATION_EVIDENCE_IMAGE_MAX_BYTES {
                 continue;
             }

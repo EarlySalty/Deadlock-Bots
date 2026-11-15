@@ -406,12 +406,12 @@ impl BotConfig {
         }
         if !CONCIERGE_TIMEOUT_SECONDS_RANGE.contains(&self.concierge.timeout_seconds) {
             return Err(invalid(
-                "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
+                "concierge.timeout_seconds liegt außerhalb des erlaubten Bereichs",
             ));
         }
         if !TEMPVOICE_GRACE_SECONDS_RANGE.contains(&self.tempvoice.empty_lane_grace_seconds) {
             return Err(invalid(
-                "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
+                "tempvoice.empty_lane_grace_seconds liegt außerhalb des erlaubten Bereichs",
             ));
         }
         let fireworks = &self.llm.fireworks;
@@ -439,7 +439,9 @@ impl BotConfig {
                     .as_deref()
                     .is_some_and(|value| !matches!(value, "none" | "low" | "medium" | "high"))
             {
-                return Err(invalid("KI-Parameter: 1–32768 Ausgabetokens, Temperatur 0–2, Zeitlimit 1–110 Sekunden; Denkaufwand none/low/medium/high"));
+                return Err(invalid(
+                    "KI-Parameter Ausgabetokens, Temperatur, Zeitlimit oder Denkaufwand liegen außerhalb der erlaubten Werte",
+                ));
             }
             if cfg.model.as_deref().is_some_and(|id| {
                 id.is_empty()
