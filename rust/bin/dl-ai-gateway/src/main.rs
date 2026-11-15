@@ -1,3 +1,4 @@
+mod alarm;
 mod http;
 
 use std::path::PathBuf;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use dl_ai::tool_chat::{build_router, GatewayConfig, PostgresLedger};
+use dl_ai::tool_chat::{build_router, GatewayConfig, PostgresLedger, RefusalAlarm};
 
 #[derive(Parser)]
 #[command(name = "dl-ai-gateway")]
@@ -29,8 +30,12 @@ async fn main() -> Result<()> {
         .with_context(|| format!("loading {}", cli.config.display()))?;
     if cli.check_config {
         println!("config ok: {} slots", config.slots.len());
+        for cause in alarm::readiness(&config.alarm) {
+            println!("alarm not ready: {cause}");
+        }
         return Ok(());
     }
+    alarm::report_readiness(&config.alarm);
     dl_core::token_snapshot::load(&cli.config).map_err(anyhow::Error::msg)?;
     let dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
         .context("central database access missing from the private snapshot")?;
@@ -46,7 +51,11 @@ async fn main() -> Result<()> {
                 .or_else(|| std::env::var(key).ok())
         },
         Arc::new(PostgresLedger),
-    )?;
+    )?
+    .with_alarm(Arc::new(RefusalAlarm::new(
+        Arc::new(alarm::ProcessNotifier::new(config.alarm.clone())),
+        config.alarm.refusal_streak,
+    )));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding {}", config.listen))?;

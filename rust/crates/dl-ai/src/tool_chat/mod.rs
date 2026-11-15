@@ -1,3 +1,4 @@
+mod alarm;
 mod anthropic_http;
 mod backend;
 mod chat_backend;
@@ -11,12 +12,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use alarm::{Delivery, Refusal, RefusalAlarm, RefusalNotifier};
 pub use anthropic_http::{parse_response, wire_request, AnthropicHttpBackend};
 pub use backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 pub use chat_backend::ChatProviderBackend;
 pub use claude_plan::ClaudePlanBackend;
 pub use config::{
-    ConfigError, FallbackConfig, GatewayConfig, ProviderConfig, ProviderKind, SlotConfig, Target,
+    AlarmConfig, ConfigError, FallbackConfig, GatewayConfig, ProviderConfig, ProviderKind,
+    SlotConfig, Target,
 };
 pub use router::{
     LedgerEntry, LedgerOutcome, PostgresLedger, ProviderHandle, RouteError, Routed, SlotRouter,

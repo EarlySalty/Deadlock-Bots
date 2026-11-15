@@ -125,10 +125,13 @@ fn into_request(wire: WireRequest) -> Result<ToolChatRequest, &'static str> {
 }
 
 fn failure_response(failure: RouteError) -> Response {
-    match failure {
+    match &failure {
         RouteError::UnknownSlot => invalid("unknown slot"),
-        RouteError::Failed { last, .. } => {
-            let (status, kind) = match last.kind {
+        RouteError::Failed { .. } => {
+            let last = failure
+                .last()
+                .map_or(FailureKind::Unavailable, |last| last.kind);
+            let (status, kind) = match last {
                 FailureKind::Limit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
                 FailureKind::Busy | FailureKind::Overloaded => (
                     StatusCode::from_u16(529).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
@@ -139,7 +142,7 @@ fn failure_response(failure: RouteError) -> Response {
                 FailureKind::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "api_error"),
                 FailureKind::InvalidOutput => (StatusCode::BAD_GATEWAY, "api_error"),
             };
-            error(status, kind, &last.to_string())
+            error(status, kind, &failure.summary())
         }
     }
 }
@@ -286,6 +289,7 @@ mod tests {
                     ..Usage::default()
                 }),
                 request_id: None,
+                upstream_status: None,
             })
         }
     }

@@ -15,6 +15,7 @@ use std::{
 };
 
 #[derive(Parser)]
+#[command(group(clap::ArgGroup::new("event_mode").args(["devfeed_429", "provider_refusal"])))]
 struct Args {
     #[arg(long)]
     config: PathBuf,
@@ -25,7 +26,17 @@ struct Args {
     /// Meldet einen bereits ausgeschalteten DevFeed nach Discord-Drosselung.
     #[arg(long, conflicts_with = "install")]
     devfeed_429: bool,
-    #[arg(long, requires = "devfeed_429")]
+    #[arg(long, conflicts_with = "install")]
+    provider_refusal: bool,
+    #[arg(long, requires = "provider_refusal")]
+    provider: Option<String>,
+    #[arg(long, requires = "provider_refusal")]
+    kind: Option<String>,
+    #[arg(long, requires = "provider_refusal")]
+    reason: Option<String>,
+    #[arg(long, requires = "provider_refusal")]
+    status: Option<u16>,
+    #[arg(long, requires = "event_mode")]
     event_id: Option<String>,
     /// Einmaliger, klar gekennzeichneter Test ohne Discord-Drosselung.
     #[arg(long, requires = "devfeed_429")]
@@ -41,6 +52,84 @@ struct Args {
 
 const DEVFEED_UNIT: &str = "deadlock-devfeed.service";
 const BOTLOGS_CHANNEL: u64 = 1_374_364_800_817_303_632;
+const GATEWAY_UNIT: &str = "dl-ai-gateway.service";
+
+const MAX_CODE_LEN: usize = 64;
+const REFUSAL_KINDS: [&str; 3] = ["limit", "overloaded", "unavailable"];
+
+struct RefusalEvent<'a> {
+    provider: &'a str,
+    kind: &'a str,
+    reason: &'a str,
+    status: Option<u16>,
+}
+
+fn valid_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CODE_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn validate_refusal_event<'a>(
+    unit: &str,
+    channel: u64,
+    args: &'a Args,
+) -> Result<RefusalEvent<'a>> {
+    if unit != GATEWAY_UNIT || channel != BOTLOGS_CHANNEL {
+        bail!("Anbieter-Ablehnungen sind ausschließlich für das KI-Gateway und den bestehenden Botlogs-Kanal erlaubt.");
+    }
+    let provider = args
+        .provider
+        .as_deref()
+        .filter(|provider| valid_code(provider))
+        .context("Anbietername ist ungültig.")?;
+    let kind = args
+        .kind
+        .as_deref()
+        .filter(|kind| REFUSAL_KINDS.contains(kind))
+        .context("Art der Ablehnung ist ungültig.")?;
+    let reason = args
+        .reason
+        .as_deref()
+        .filter(|reason| valid_code(reason))
+        .context("Ablehnungsgrund ist ungültig.")?;
+    Ok(RefusalEvent {
+        provider,
+        kind,
+        reason,
+        status: args.status,
+    })
+}
+
+fn refusal_cause(event: &RefusalEvent<'_>) -> &'static str {
+    match (event.reason, event.kind) {
+        ("billing", _) => "Das Guthaben oder das Ausgabenlimit beim Anbieter ist aufgebraucht.",
+        (_, "limit") => "Der Anbieter verweigert weitere Anfragen wegen eines Limits.",
+        (_, "overloaded") => "Der Anbieter ist überlastet und lehnt Anfragen ab.",
+        _ => "Der Anbieter lehnt Anfragen ab oder antwortet nur mit Fehlern.",
+    }
+}
+
+fn refusal_content(host: &str, event: &RefusalEvent<'_>) -> String {
+    let status = event
+        .status
+        .map(|status| format!(", HTTP {status}"))
+        .unwrap_or_default();
+    format!(
+        "**KI-Anbieter lehnt Anfragen ab: `{}`**\nHost: `{host}`\n{} (`{}`{status})\nAntworten über diesen Anbieter fallen aus, bis er wieder Anfragen annimmt.\nWeitere Meldungen: höchstens einmal pro Tag und zweimal innerhalb von sieben Tagen.",
+        event.provider,
+        refusal_cause(event),
+        event.reason,
+    )
+}
+
+fn refusal_outcome(refusal: bool, outcome: &str) {
+    if refusal {
+        println!("outcome={outcome}");
+    }
+}
 
 fn valid_event_id(id: &str) -> bool {
     !id.is_empty()
@@ -272,7 +361,22 @@ async fn run(args: Args) -> Result<()> {
         .context("Auslösende Dienst-Unit ist ungültig.")?;
     // OnFailure nutzt seine Dienstinstanz, der 429-Modus seine direkte Ereignis-ID.
     // Kein Fallback auf systemctl show: dort kann schon der nächste Start stehen.
-    let invocation = if args.devfeed_429 {
+    let refusal = if args.provider_refusal {
+        Some(validate_refusal_event(unit, config.channel_id, &args)?)
+    } else {
+        None
+    };
+    let invocation = if let Some(event) = &refusal {
+        args.event_id
+            .as_deref()
+            .filter(|id| valid_event_id(id))
+            .context("Ereignis-ID der Anbieter-Ablehnung ist ungültig.")?;
+        format!(
+            "{}-{}",
+            event.reason,
+            args.event_id.as_deref().unwrap_or_default()
+        )
+    } else if args.devfeed_429 {
         let id = validate_devfeed_event(unit, config.channel_id, args.event_id.as_deref())?;
         if args.notification_test {
             "devfeed-429-notification-test"
@@ -285,7 +389,9 @@ async fn run(args: Args) -> Result<()> {
             .context("Systemd hat keine auslösende Dienstinstanz übergeben.")?;
         journal::validate_invocation(&id)?.to_owned()
     };
-    let state_key = if args.notification_test {
+    let state_key = if let Some(event) = &refusal {
+        format!("{unit}:provider-refusal:{}", event.provider)
+    } else if args.notification_test {
         format!("{unit}:devfeed-429-test")
     } else if args.devfeed_429 {
         format!("{unit}:devfeed-429")
@@ -293,7 +399,7 @@ async fn run(args: Args) -> Result<()> {
         unit.to_owned()
     };
     let store = state::Store::open(&config.state_directory, &key(&state_key))?;
-    let legacy = if args.devfeed_429 {
+    let legacy = if args.devfeed_429 || args.provider_refusal {
         None
     } else {
         config.legacy_state_directory.as_deref()
@@ -307,15 +413,19 @@ async fn run(args: Args) -> Result<()> {
     store.save(&state)?;
     if state.unreported == 0 && state.pending.is_none() {
         println!("Diese Dienstinstanz wurde bereits gemeldet.");
+        refusal_outcome(refusal.is_some(), "suppressed");
         return Ok(());
     }
     if !state.eligible(now()?) {
         println!("Meldung entprellt; Wiederholung wurde für die nächste Meldung gezählt.");
+        refusal_outcome(refusal.is_some(), "suppressed");
         return Ok(());
     }
     if state.pending.is_none() {
         let repeats = state.unreported.saturating_sub(1);
-        let content = if args.devfeed_429 {
+        let content = if let Some(event) = &refusal {
+            refusal_content(&config.host_label, event)
+        } else if args.devfeed_429 {
             devfeed_content(args.notification_test, repeats)
         } else {
             let cause = safe_cause(journal::cause(unit, &invocation).await);
@@ -348,6 +458,7 @@ async fn run(args: Args) -> Result<()> {
     // verlorene ACKs dürfen nach Broker-TTL/Neustart keinen Replay-Sturm erzeugen.
     let attempt_time = now()?;
     if !state.eligible(attempt_time) {
+        refusal_outcome(refusal.is_some(), "suppressed");
         return Ok(());
     }
     state.reserve_attempt(attempt_time);
@@ -361,6 +472,7 @@ async fn run(args: Args) -> Result<()> {
     state.confirm(now()?);
     store.save(&state)?;
     println!("Ausfallmeldung wurde bestätigt und der Meldezustand gespeichert.");
+    refusal_outcome(refusal.is_some(), "sent");
     Ok(())
 }
 
@@ -469,6 +581,78 @@ mod tests {
         ])
         .is_err());
     }
+    fn refusal_args(provider: &str, kind: &str, reason: &str) -> Args {
+        Args::try_parse_from([
+            "notify",
+            "--config",
+            "/config.json",
+            "--unit",
+            GATEWAY_UNIT,
+            "--provider-refusal",
+            "--provider",
+            provider,
+            "--kind",
+            kind,
+            "--reason",
+            reason,
+            "--status",
+            "400",
+            "--event-id",
+            "123-456",
+        ])
+        .expect("refusal args")
+    }
+
+    #[test]
+    fn provider_refusal_is_confined_to_the_gateway_botlogs_and_plain_codes() {
+        let args = refusal_args("anthropic_api", "limit", "billing");
+        let event = validate_refusal_event(GATEWAY_UNIT, BOTLOGS_CHANNEL, &args).unwrap();
+        let text = refusal_content("v50671", &event);
+        assert!(text.contains("`anthropic_api`"));
+        assert!(text.contains("Guthaben oder das Ausgabenlimit"));
+        assert!(text.contains("(`billing`, HTTP 400)"));
+        let overloaded = refusal_args("claude_plan", "overloaded", "http_5xx");
+        let event = validate_refusal_event(GATEWAY_UNIT, BOTLOGS_CHANNEL, &overloaded).unwrap();
+        assert!(refusal_content("v50671", &event).contains("überlastet"));
+        let longest = "a".repeat(MAX_CODE_LEN);
+        assert!(validate_refusal_event(
+            GATEWAY_UNIT,
+            BOTLOGS_CHANNEL,
+            &refusal_args(&longest, "limit", &longest)
+        )
+        .is_ok());
+        assert!(validate_refusal_event("dl-bot.service", BOTLOGS_CHANNEL, &args).is_err());
+        assert!(validate_refusal_event(GATEWAY_UNIT, 1, &args).is_err());
+        let too_long = "a".repeat(MAX_CODE_LEN + 1);
+        for (provider, kind, reason) in [
+            ("anthropic_api", "limit", "@everyone"),
+            ("x`y", "limit", "billing"),
+            ("a", "limit", ""),
+            ("a", "limit", "Billing"),
+            ("a", "busy", "http_429"),
+            ("a", "", "http_429"),
+            (too_long.as_str(), "limit", "http_429"),
+        ] {
+            assert!(validate_refusal_event(
+                GATEWAY_UNIT,
+                BOTLOGS_CHANNEL,
+                &refusal_args(provider, kind, reason)
+            )
+            .is_err());
+        }
+        assert!(Args::try_parse_from([
+            "notify",
+            "--config",
+            "/c.json",
+            "--provider-refusal",
+            "--devfeed-429"
+        ])
+        .is_err());
+        assert!(
+            Args::try_parse_from(["notify", "--config", "/c.json", "--provider", "x"]).is_err()
+        );
+    }
+
     #[test]
     fn unit_and_invocation_cannot_inject_journal_filters_or_discord_markup() {
         assert!(valid_unit("steam-core-2.service"));
@@ -533,6 +717,11 @@ mod tests {
             unit: None,
             credential: None,
             devfeed_429: false,
+            provider_refusal: false,
+            provider: None,
+            kind: None,
+            reason: None,
+            status: None,
             event_id: None,
             notification_test: false,
             install: true,

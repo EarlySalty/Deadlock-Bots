@@ -7,6 +7,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
 
+use crate::upstream::{safe_code, status_reason};
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse};
 
 static LEDGER: OnceCell<(PgPool, &'static str)> = OnceCell::const_new();
@@ -149,6 +150,29 @@ pub struct Completion {
     pub error_code: Option<String>,
     pub http_status: Option<i32>,
     pub latency_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallTokens {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallOutcome<'a> {
+    pub tokens: Option<CallTokens>,
+    pub request_id: Option<&'a str>,
+    pub error_code: Option<&'a str>,
+    pub error_reason: Option<&'a str>,
+    pub http_status: Option<u16>,
 }
 
 pub struct Attempt {
@@ -221,6 +245,9 @@ impl Attempt {
                 error_code: Some("cancelled".into()),
                 http_status: None,
                 latency_ms: 0,
+                error_reason: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
             }),
             started: Instant::now(),
         })
@@ -244,6 +271,11 @@ impl Attempt {
                 i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
             completion.success = error_code.is_none();
             completion.error_code = error_code.map(str::to_owned);
+            completion.error_reason = error_code
+                .filter(|code| *code == "http_error")
+                .and(completion.http_status)
+                .and_then(|status| u16::try_from(status).ok())
+                .map(|status| status_reason(status).to_owned());
             if let Some(body) = body {
                 completion.tokens_in = count(body, "prompt_tokens");
                 completion.tokens_out = count(body, "completion_tokens");
@@ -261,27 +293,36 @@ impl Attempt {
         }
     }
 
-    pub async fn finish_call(
-        mut self,
-        tokens: Option<(u64, u64)>,
-        request_id: Option<&str>,
-        error_code: Option<&str>,
-    ) {
+    pub async fn finish_call(mut self, outcome: CallOutcome<'_>) {
         if let Some(completion) = &mut self.completion {
             completion.latency_ms =
                 i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
-            completion.success = error_code.is_none();
-            completion.error_code = error_code.map(str::to_owned);
-            if let Some((tokens_in, tokens_out)) = tokens {
-                let tokens_in = i64::try_from(tokens_in).ok();
-                let tokens_out = i64::try_from(tokens_out).ok();
+            completion.success = outcome.error_code.is_none();
+            completion.error_code = outcome.error_code.map(str::to_owned);
+            completion.error_reason = outcome
+                .error_reason
+                .filter(|reason| safe_code(reason))
+                .map(str::to_owned);
+            completion.http_status = outcome.http_status.map(i32::from);
+            if let Some(tokens) = outcome.tokens {
+                let tokens_in = i64::try_from(tokens.input).ok();
+                let tokens_out = i64::try_from(tokens.output).ok();
                 completion.tokens_in = tokens_in;
                 completion.tokens_out = tokens_out;
                 completion.total = tokens_in
                     .zip(tokens_out)
                     .and_then(|(a, b)| a.checked_add(b));
+                completion.cache_read_tokens = tokens
+                    .cache_read
+                    .and_then(|value| i64::try_from(value).ok());
+                completion.cache_write_tokens = tokens
+                    .cache_write
+                    .and_then(|value| i64::try_from(value).ok());
             }
-            completion.request_id = request_id.filter(|value| safe_id(value)).map(str::to_owned);
+            completion.request_id = outcome
+                .request_id
+                .filter(|value| safe_id(value))
+                .map(str::to_owned);
             recovery_log(completion);
             let _ = recover(completion).await;
             self.completion = None;
@@ -348,6 +389,8 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
             completion.tokens_in,
             completion.tokens_out,
             completion.total,
+            completion.cache_read_tokens,
+            completion.cache_write_tokens,
         ]
         .into_iter()
         .flatten()
@@ -356,6 +399,10 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
             .request_id
             .as_deref()
             .is_some_and(|value| !safe_id(value))
+        || completion
+            .error_reason
+            .as_deref()
+            .is_some_and(|value| !safe_code(value))
         || completion.error_code.as_deref().is_some_and(|value| {
             !matches!(
                 value,
@@ -376,13 +423,15 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
             "Verbrauchsherkunft passt nicht zum Dienst".into(),
         ));
     }
-    let updated = sqlx::query("UPDATE public.llm_usage SET tokens_in=$2,tokens_out=$3,total=$4,request_id=$5,success=$6,attempt_state=$7,finished_at=$8,error_code=$9,http_status=$10,latency_ms=$11 WHERE id=$1 AND attempt_state='started' AND project=$12 AND service=$13")
+    let updated = sqlx::query("UPDATE public.llm_usage SET tokens_in=$2,tokens_out=$3,total=$4,request_id=$5,success=$6,attempt_state=$7,finished_at=$8,error_code=$9,http_status=$10,latency_ms=$11,error_reason=$14,cache_read_tokens=$15,cache_write_tokens=$16 WHERE id=$1 AND attempt_state='started' AND project=$12 AND service=$13")
         .bind(completion.id).bind(completion.tokens_in).bind(completion.tokens_out).bind(completion.total)
         .bind(&completion.request_id).bind(i64::from(completion.success))
         .bind(if completion.success { "succeeded" } else { "failed" })
         .bind(Utc::now()).bind(&completion.error_code)
         .bind(completion.http_status).bind(completion.latency_ms)
-        .bind(&completion.project).bind(&completion.service).execute(pool).await?;
+        .bind(&completion.project).bind(&completion.service)
+        .bind(&completion.error_reason).bind(completion.cache_read_tokens).bind(completion.cache_write_tokens)
+        .execute(pool).await?;
     if updated.rows_affected() == 0 {
         let completed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM public.llm_usage WHERE id=$1 AND project=$2 AND service=$3 AND attempt_state IN ('succeeded','failed'))")
             .bind(completion.id).bind(&completion.project).bind(&completion.service).fetch_one(pool).await?;
@@ -425,6 +474,9 @@ mod tests {
             error_code: Some("cancelled".into()),
             http_status: None,
             latency_ms: 12,
+            error_reason: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
         };
         let message = format!("LLM_USAGE_RECOVERY: Abschluss aus dem Journal nachliefern \u{1b}[3mrecovery\u{1b}[0m\u{1b}[2m=\u{1b}[0m{}",serde_json::to_string(&completion).unwrap());
         let record = json!({"MESSAGE":message}).to_string();
@@ -474,16 +526,17 @@ mod tests {
             error_code: None,
             http_status: Some(200),
             latency_ms: 1,
+            error_reason: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
         });
     }
 
     #[tokio::test]
-    #[ignore = "Benötigt lokale PostgreSQL-Peer-Authentifizierung und CREATE DATABASE"]
+    #[ignore = "Benötigt die Wegwerf-Datenbank aus test-db-run (DATABASE_URL)"]
     async fn lokale_datenbank_belegt_abschluss_abbruch_nullwerte_und_herkunft() {
-        let options = PgConnectOptions::new()
-            .host("/var/run/postgresql")
-            .username("nathanael")
-            .database("postgres");
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let options = url.parse::<PgConnectOptions>().unwrap();
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options.clone())
@@ -501,6 +554,12 @@ mod tests {
             .unwrap();
         sqlx::raw_sql(include_str!(
             "../../dl-central-db/migrations/20261005120200_llm_usage_attempts.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../dl-central-db/migrations/20261115120000_llm_usage_refusal_reason_cache_tokens.sql"
         ))
         .execute(&pool)
         .await
@@ -675,11 +734,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let attempts: Vec<(String,Option<i64>)> = sqlx::query_as("SELECT attempt_state,total FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
+        let attempts: Vec<(String, Option<i64>, Option<i32>, Option<String>)> = sqlx::query_as("SELECT attempt_state,total,http_status,error_reason FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
             .fetch_all(&pool).await.unwrap();
         assert_eq!(
             attempts,
-            vec![("failed".into(), None), ("succeeded".into(), Some(9))]
+            vec![
+                ("failed".into(), None, Some(500), Some("http_5xx".into())),
+                ("succeeded".into(), Some(9), Some(200), None)
+            ]
+        );
+        let refused = Attempt::begin_call("anthropic_api", "brain_answer", "fixture-model")
+            .await
+            .unwrap();
+        let refused_id = refused.completion.as_ref().map(|c| c.id).unwrap();
+        refused
+            .finish_call(CallOutcome {
+                error_code: Some("rate_limited"),
+                error_reason: Some("billing"),
+                http_status: Some(400),
+                ..CallOutcome::default()
+            })
+            .await;
+        let served = Attempt::begin_call("anthropic_api", "brain_answer", "fixture-model")
+            .await
+            .unwrap();
+        let served_id = served.completion.as_ref().map(|c| c.id).unwrap();
+        served
+            .finish_call(CallOutcome {
+                tokens: Some(CallTokens {
+                    input: 21_000,
+                    output: 40,
+                    cache_read: Some(20_800),
+                    cache_write: Some(0),
+                }),
+                ..CallOutcome::default()
+            })
+            .await;
+        let unknown_cache = Attempt::begin_call("codex_plan", "brain_answer", "fixture-model")
+            .await
+            .unwrap();
+        let unknown_cache_id = unknown_cache.completion.as_ref().map(|c| c.id).unwrap();
+        unknown_cache
+            .finish_call(CallOutcome {
+                tokens: Some(CallTokens {
+                    input: 10,
+                    output: 2,
+                    ..CallTokens::default()
+                }),
+                http_status: Some(200),
+                ..CallOutcome::default()
+            })
+            .await;
+        let rows: Vec<(i64, Option<String>, Option<String>, Option<i32>, Option<i64>, Option<i64>, Option<i64>)> =
+            sqlx::query_as("SELECT id,error_code,error_reason,http_status,tokens_in,cache_read_tokens,cache_write_tokens FROM public.llm_usage WHERE id IN ($1,$2,$3) ORDER BY id")
+                .bind(refused_id)
+                .bind(served_id)
+                .bind(unknown_cache_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    refused_id,
+                    Some("rate_limited".into()),
+                    Some("billing".into()),
+                    Some(400),
+                    None,
+                    None,
+                    None
+                ),
+                (
+                    served_id,
+                    None,
+                    None,
+                    None,
+                    Some(21_000),
+                    Some(20_800),
+                    Some(0)
+                ),
+                (
+                    unknown_cache_id,
+                    None,
+                    None,
+                    Some(200),
+                    Some(10),
+                    None,
+                    None
+                ),
+            ]
         );
         sqlx::query("DROP TABLE public.llm_usage")
             .execute(&pool)

@@ -25,6 +25,13 @@ api_key_env = "ANTHROPIC_API_KEY"
 workspace_id_env = "ANTHROPIC_WORKSPACE_ID"
 request_timeout_ms = 120000
 
+[alarm]
+notify_binary = "/home/nathanael/.local/bin/dl-unit-failure-notify"
+notify_config = "/home/nathanael/.config/unit-failure-notify/config.json"
+credential = "/run/user/1000/credentials/dl-ai-gateway.service/infisical-token"
+refusal_streak = 5
+notify_timeout_secs = 75
+
 [slots.brain_answer]
 provider = "anthropic_api"
 model = "claude-haiku-5-5"

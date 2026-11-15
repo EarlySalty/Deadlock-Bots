@@ -8,6 +8,7 @@ use reqwest::header::HeaderValue;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::config::ConfigError;
 use super::types::{ContentBlock, StopReason, ToolChatRequest, ToolChatResponse, Usage};
+use crate::upstream::{status_reason, BILLING};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -16,6 +17,7 @@ pub struct AnthropicHttpBackend {
     messages_url: String,
     api_key: Option<HeaderValue>,
     workspace_id: Option<HeaderValue>,
+    prompt_cache: bool,
 }
 
 impl AnthropicHttpBackend {
@@ -50,17 +52,22 @@ impl AnthropicHttpBackend {
         Self {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
+            prompt_cache: api_key.is_some(),
             api_key,
             workspace_id,
         }
     }
 
     fn request(&self, request: &ToolChatRequest, target: &CallTarget) -> reqwest::RequestBuilder {
+        let mut body = wire_request(request, target);
+        if self.prompt_cache {
+            mark_prompt_cache(&mut body);
+        }
         let builder = self
             .http
             .post(&self.messages_url)
             .header("anthropic-version", "2023-06-01")
-            .json(&wire_request(request, target));
+            .json(&body);
         let builder = match &self.api_key {
             Some(key) => builder.header("x-api-key", key.clone()),
             None => builder,
@@ -97,6 +104,26 @@ pub fn wire_request(request: &ToolChatRequest, target: &CallTarget) -> Value {
     body
 }
 
+fn mark_prompt_cache(body: &mut Value) {
+    let marker = json!({"type": "ephemeral"});
+    if let Some(last) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+        .and_then(Value::as_object_mut)
+    {
+        last.insert("cache_control".into(), marker.clone());
+    }
+    let system = body
+        .get("system")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(|text| json!([{"type": "text", "text": text, "cache_control": marker}]));
+    if let (Some(system), Some(body)) = (system, body.as_object_mut()) {
+        body.insert("system".into(), system);
+    }
+}
+
 pub fn parse_response(body: &Value) -> Result<ToolChatResponse, BackendError> {
     let invalid = |reason| BackendError::new(FailureKind::InvalidOutput, reason);
     let model = body["model"]
@@ -130,26 +157,52 @@ pub fn parse_response(body: &Value) -> Result<ToolChatResponse, BackendError> {
         stop_reason,
         usage,
         request_id: body["id"].as_str().map(str::to_owned),
+        upstream_status: None,
     })
 }
 
 fn status_error(status: reqwest::StatusCode, body: &[u8]) -> BackendError {
-    match status.as_u16() {
-        429 => BackendError::new(FailureKind::Limit, "http_429"),
-        529 => BackendError::new(FailureKind::Unavailable, "http_529"),
-        400 | 402 | 403 if is_billing_error(body) => {
-            BackendError::new(FailureKind::Limit, "billing")
+    let code = status.as_u16();
+    let error = upstream_error(body);
+    let reason = error
+        .as_ref()
+        .and_then(upstream_reason)
+        .unwrap_or(status_reason(code));
+    match code {
+        429 => BackendError::upstream(FailureKind::Limit, reason, code),
+        529 => BackendError::upstream(FailureKind::Unavailable, reason, code),
+        400 | 402 | 403 if error.as_ref().is_some_and(is_billing_error) => {
+            BackendError::upstream(FailureKind::Limit, BILLING, code)
         }
-        400 | 404 | 413 | 422 => BackendError::new(FailureKind::InvalidRequest, "http_4xx"),
-        _ => BackendError::new(FailureKind::Unavailable, "http_status"),
+        400 | 404 | 413 | 422 => BackendError::upstream(FailureKind::InvalidRequest, reason, code),
+        _ => BackendError::upstream(FailureKind::Unavailable, reason, code),
     }
 }
 
-fn is_billing_error(body: &[u8]) -> bool {
-    let Ok(body) = serde_json::from_slice::<Value>(body) else {
-        return false;
-    };
-    let error = &body["error"];
+fn upstream_error(body: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("error")
+        .filter(|error| error.is_object())
+        .cloned()
+}
+
+fn upstream_reason(error: &Value) -> Option<&'static str> {
+    Some(match error["type"].as_str()? {
+        "invalid_request_error" => "invalid_request_error",
+        "authentication_error" => "authentication_error",
+        "permission_error" => "permission_error",
+        "not_found_error" => "not_found_error",
+        "request_too_large" => "request_too_large",
+        "rate_limit_error" => "rate_limit_error",
+        "api_error" => "api_error",
+        "overloaded_error" => "overloaded_error",
+        "timeout_error" => "timeout_error",
+        _ => return None,
+    })
+}
+
+fn is_billing_error(error: &Value) -> bool {
     if error["type"].as_str() == Some("billing_error") {
         return true;
     }
@@ -212,12 +265,16 @@ impl ToolBackend for AnthropicHttpBackend {
         let body = bounded_body(response).await?;
         let body: Value = serde_json::from_slice(&body)
             .map_err(|_| BackendError::new(FailureKind::InvalidOutput, "invalid_json"))?;
-        parse_response(&body)
+        parse_response(&body).map(|response| ToolChatResponse {
+            upstream_status: Some(status.as_u16()),
+            ..response
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{Message, Role, ToolSpec};
     use super::*;
 
     #[test]
@@ -257,6 +314,167 @@ mod tests {
             status_error(reqwest::StatusCode::BAD_REQUEST, invalid).kind,
             FailureKind::InvalidRequest
         );
+    }
+
+    #[test]
+    fn billing_and_rate_limit_refusals_keep_distinct_reasons_and_upstream_status() {
+        let billing = status_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#,
+        );
+        let limited = status_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+        );
+        let bare = status_error(reqwest::StatusCode::TOO_MANY_REQUESTS, b"");
+        let auth = status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            br#"{"error":{"type":"authentication_error","message":"x"}}"#,
+        );
+        assert_eq!(
+            (billing.kind, billing.reason, billing.status),
+            (FailureKind::Limit, "billing", Some(400))
+        );
+        assert_eq!(
+            (limited.kind, limited.reason, limited.status),
+            (FailureKind::Limit, "rate_limit_error", Some(429))
+        );
+        assert_eq!((bare.reason, bare.status), ("http_429", Some(429)));
+        assert_eq!(
+            (auth.kind, auth.reason, auth.status),
+            (FailureKind::Unavailable, "authentication_error", Some(401))
+        );
+    }
+
+    #[test]
+    fn error_bodies_that_are_not_objects_fall_back_to_the_status_reason() {
+        for body in [
+            &b"[1,2]"[..],
+            b"\"text\"",
+            b"{\"error\":\"flat\"}",
+            b"null",
+            b"<html>",
+        ] {
+            let failure = status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, body);
+            assert_eq!(
+                (failure.kind, failure.reason, failure.status),
+                (FailureKind::Unavailable, "http_5xx", Some(503))
+            );
+        }
+        let unknown = status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            br#"{"error":{"type":"new_kind","message":"x"}}"#,
+        );
+        assert_eq!((unknown.reason, unknown.status), ("http_401", Some(401)));
+    }
+
+    #[test]
+    fn a_toolless_round_marks_only_the_system_prefix_and_never_adds_tools() {
+        let mut final_round = wire_request(
+            &ToolChatRequest {
+                tools: Vec::new(),
+                ..round_request(vec![user_text("question")])
+            },
+            &CallTarget {
+                model: "m".into(),
+                max_tokens: 1,
+            },
+        );
+        mark_prompt_cache(&mut final_round);
+        assert!(final_round.get("tools").is_none());
+        assert_eq!(
+            final_round["system"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        let mut bare = wire_request(
+            &plain_request(None),
+            &CallTarget {
+                model: "m".into(),
+                max_tokens: 1,
+            },
+        );
+        bare.as_object_mut().map(|body| body.remove("system"));
+        mark_prompt_cache(&mut bare);
+        assert!(bare.get("system").is_none());
+        assert!(bare.get("tools").is_none());
+    }
+
+    fn user_text(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    fn round_request(messages: Vec<Message>) -> ToolChatRequest {
+        ToolChatRequest {
+            system: "fixed system prefix".into(),
+            messages,
+            tools: vec![
+                ToolSpec {
+                    name: "find_entity".into(),
+                    description: "a".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "get_hero".into(),
+                    description: "b".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+            ],
+            max_tokens: None,
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn api_key_path_marks_the_tools_and_system_prefix_identically_in_every_round() {
+        let backend = AnthropicHttpBackend::with_api_key(
+            "https://api.example/v1",
+            Duration::from_secs(5),
+            "sk-test",
+            None,
+        )
+        .expect("backend");
+        let target = CallTarget {
+            model: "m".into(),
+            max_tokens: 1,
+        };
+        let body = |request: &ToolChatRequest| -> Value {
+            let built = backend.request(request, &target).build().expect("request");
+            serde_json::from_slice(
+                built
+                    .body()
+                    .and_then(reqwest::Body::as_bytes)
+                    .expect("body"),
+            )
+            .expect("json")
+        };
+        let first = body(&round_request(vec![user_text("question")]));
+        let second = body(&round_request(vec![
+            user_text("question"),
+            user_text("tool results"),
+        ]));
+        assert_eq!(first["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert!(first["tools"][0].get("cache_control").is_none());
+        assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(first["system"][0]["text"], "fixed system prefix");
+        assert_eq!(first["tools"].to_string(), second["tools"].to_string());
+        assert_eq!(first["system"].to_string(), second["system"].to_string());
+        let plan = AnthropicHttpBackend::new("http://127.0.0.1:1/v1", Duration::from_secs(5));
+        let built = plan
+            .request(&round_request(Vec::new()), &target)
+            .build()
+            .expect("request");
+        let plain: Value = serde_json::from_slice(
+            built
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .expect("body"),
+        )
+        .expect("json");
+        assert_eq!(plain["system"], "fixed system prefix");
+        assert!(!plain.to_string().contains("cache_control"));
     }
 
     fn plain_request(output_schema: Option<Value>) -> ToolChatRequest {

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
+use super::alarm::RefusalAlarm;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::config::Target;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
@@ -15,7 +16,8 @@ const LEDGER_FINISH_BUDGET: Duration = Duration::from_secs(2);
 pub struct LedgerOutcome<'a> {
     pub usage: Option<Usage>,
     pub request_id: Option<&'a str>,
-    pub error_code: Option<&'static str>,
+    pub upstream_status: Option<u16>,
+    pub error: Option<BackendError>,
 }
 
 #[async_trait]
@@ -58,13 +60,46 @@ pub struct Routed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     UnknownSlot,
-    Failed { last: BackendError, attempts: usize },
+    Failed {
+        attempts: usize,
+        failures: Vec<(String, BackendError)>,
+    },
+}
+
+const NO_TARGET: BackendError = BackendError {
+    kind: FailureKind::Unavailable,
+    reason: "no_target",
+    status: None,
+};
+
+impl RouteError {
+    pub fn last(&self) -> Option<BackendError> {
+        match self {
+            Self::UnknownSlot => None,
+            Self::Failed { failures, .. } => {
+                Some(failures.last().map_or(NO_TARGET, |(_, error)| *error))
+            }
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            Self::UnknownSlot => "unknown slot".into(),
+            Self::Failed { failures, .. } if failures.is_empty() => NO_TARGET.to_string(),
+            Self::Failed { failures, .. } => failures
+                .iter()
+                .map(|(provider, error)| format!("{provider}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
 }
 
 pub struct SlotRouter {
     slots: BTreeMap<String, Vec<Target>>,
     providers: BTreeMap<String, ProviderHandle>,
     ledger: Arc<dyn UsageLedger>,
+    alarm: Option<Arc<RefusalAlarm>>,
 }
 
 impl SlotRouter {
@@ -77,7 +112,13 @@ impl SlotRouter {
             slots,
             providers,
             ledger,
+            alarm: None,
         }
+    }
+
+    pub fn with_alarm(mut self, alarm: Arc<RefusalAlarm>) -> Self {
+        self.alarm = Some(alarm);
+        self
     }
 
     pub fn slot_names(&self) -> Vec<&str> {
@@ -94,12 +135,15 @@ impl SlotRouter {
             + targets
                 .first()
                 .map_or(Duration::ZERO, |target| target.deadline);
-        let mut last = BackendError::new(FailureKind::Unavailable, "no_target");
+        let mut failures = Vec::new();
         for (index, target) in targets.iter().enumerate() {
-            match self
+            let outcome = self
                 .attempt_with_retries(slot, target, request, deadline)
-                .await
-            {
+                .await;
+            if let Some(alarm) = &self.alarm {
+                alarm.record(&target.provider, outcome.as_ref().map(|_| ()));
+            }
+            match outcome {
                 Ok(response) => {
                     if index > 0 {
                         tracing::warn!(
@@ -127,19 +171,19 @@ impl SlotRouter {
                         next_provider = next.map(|next| next.provider.as_str()).unwrap_or(""),
                         "AI_GATEWAY_ATTEMPT_FAILED"
                     );
-                    last = error;
+                    failures.push((target.provider.clone(), error));
                     if next.is_none() {
                         return Err(RouteError::Failed {
-                            last,
                             attempts: index + 1,
+                            failures,
                         });
                     }
                 }
             }
         }
         Err(RouteError::Failed {
-            last,
             attempts: targets.len(),
+            failures,
         })
     }
 
@@ -232,12 +276,14 @@ impl SlotRouter {
                 Ok(response) => LedgerOutcome {
                     usage: response.usage,
                     request_id: response.request_id.as_deref(),
-                    error_code: None,
+                    upstream_status: response.upstream_status,
+                    error: None,
                 },
                 Err(error) => LedgerOutcome {
                     usage: None,
                     request_id: None,
-                    error_code: Some(error.kind.ledger_code()),
+                    upstream_status: error.status,
+                    error: Some(*error),
                 },
             };
             if tokio::time::timeout(LEDGER_FINISH_BUDGET, entry.finish(outcome))
@@ -263,13 +309,18 @@ struct PostgresEntry(crate::usage::Attempt);
 impl LedgerEntry for PostgresEntry {
     async fn finish(self: Box<Self>, outcome: LedgerOutcome<'_>) {
         self.0
-            .finish_call(
-                outcome
-                    .usage
-                    .map(|usage| (usage.total_input(), usage.output_tokens)),
-                outcome.request_id,
-                outcome.error_code,
-            )
+            .finish_call(crate::usage::CallOutcome {
+                tokens: outcome.usage.map(|usage| crate::usage::CallTokens {
+                    input: usage.total_input(),
+                    output: usage.output_tokens,
+                    cache_read: usage.cache_read_input_tokens,
+                    cache_write: usage.cache_creation_input_tokens,
+                }),
+                request_id: outcome.request_id,
+                error_code: outcome.error.map(|error| error.kind.ledger_code()),
+                error_reason: outcome.error.map(|error| error.reason),
+                http_status: outcome.upstream_status,
+            })
             .await;
     }
 }
@@ -333,7 +384,9 @@ mod tests {
         }
     }
 
-    type LedgerRows = Arc<Mutex<Vec<(String, String, String, Option<&'static str>, Option<u64>)>>>;
+    type LedgerRows = Arc<Mutex<Vec<(String, String, String, Option<LedgerError>, Option<u64>)>>>;
+
+    type LedgerError = (&'static str, &'static str, Option<u16>);
 
     #[derive(Default)]
     struct FakeLedger {
@@ -353,7 +406,9 @@ mod tests {
                     self.key.0.clone(),
                     self.key.1.clone(),
                     self.key.2.clone(),
-                    outcome.error_code,
+                    outcome
+                        .error
+                        .map(|error| (error.kind.ledger_code(), error.reason, error.status)),
                     outcome.usage.map(|usage| usage.output_tokens),
                 ));
             }
@@ -423,10 +478,13 @@ mod tests {
             );
             let elapsed = started.elapsed();
             if stall_begin {
-                assert!(matches!(
-                    first,
-                    Err(RouteError::Failed { ref last, .. }) if last.kind == FailureKind::Timeout
-                ));
+                assert_eq!(
+                    first
+                        .err()
+                        .and_then(|failure| failure.last())
+                        .map(|last| last.kind),
+                    Some(FailureKind::Timeout)
+                );
                 assert!(elapsed <= Duration::from_secs(5));
             } else {
                 assert!(first.is_ok());
@@ -447,6 +505,7 @@ mod tests {
                 ..Usage::default()
             }),
             request_id: None,
+            upstream_status: None,
         }
     }
 
@@ -524,11 +583,76 @@ mod tests {
                     "slot_a".into(),
                     "plan".into(),
                     "m1".into(),
-                    Some("rate_limited"),
+                    Some(("rate_limited", "usage_limit", None)),
                     None
                 ),
                 ("slot_a".into(), "fake".into(), "m2".into(), None, Some(2)),
             ]
+        );
+    }
+
+    #[derive(Default)]
+    struct AlarmRecorder(Mutex<Vec<crate::tool_chat::Refusal>>);
+
+    impl crate::tool_chat::RefusalNotifier for AlarmRecorder {
+        fn notify(&self, refusal: crate::tool_chat::Refusal, delivery: crate::tool_chat::Delivery) {
+            if let Ok(mut sent) = self.0.lock() {
+                sent.push(refusal);
+            }
+            delivery.confirm();
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_and_rate_limit_refusals_are_ledgered_apart_and_billing_alarms_once() {
+        let billing = BackendError::upstream(FailureKind::Limit, "billing", 400);
+        let limited = BackendError::upstream(FailureKind::Limit, "rate_limit_error", 429);
+        let primary = FakeBackend::new(vec![Err(billing), Err(billing), Err(limited)]);
+        let second = FakeBackend::new(vec![Ok(answer("a")), Ok(answer("b")), Ok(answer("c"))]);
+        let ledger = Arc::new(FakeLedger::default());
+        let alarms = Arc::new(AlarmRecorder::default());
+        let router = router(
+            vec![target("plan", "m1"), target("fake", "m2")],
+            vec![("plan", primary), ("fake", second)],
+            ledger.clone(),
+        )
+        .with_alarm(Arc::new(RefusalAlarm::new(
+            alarms.clone(),
+            std::num::NonZeroU32::MIN.saturating_add(2),
+        )));
+        for _ in 0..3 {
+            router
+                .complete("slot_a", &request(None))
+                .await
+                .expect("fallback serves");
+        }
+        let refused: Vec<_> = ledger
+            .rows
+            .lock()
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| row.1 == "plan")
+                    .map(|row| row.3)
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            refused,
+            vec![
+                Some(("rate_limited", "billing", Some(400))),
+                Some(("rate_limited", "billing", Some(400))),
+                Some(("rate_limited", "rate_limit_error", Some(429))),
+            ]
+        );
+        let sent = alarms.0.lock().map(|sent| sent.clone()).unwrap_or_default();
+        assert_eq!(
+            sent,
+            vec![crate::tool_chat::Refusal {
+                provider: "plan".into(),
+                kind: "limit",
+                reason: "billing",
+                status: Some(400),
+            }]
         );
     }
 
@@ -547,8 +671,11 @@ mod tests {
         assert_eq!(
             alone.complete("slot_a", &request(None)).await.err(),
             Some(RouteError::Failed {
-                last: BackendError::new(FailureKind::Limit, "usage_limit"),
-                attempts: 1
+                attempts: 1,
+                failures: vec![(
+                    "plan".into(),
+                    BackendError::new(FailureKind::Limit, "usage_limit")
+                )],
             })
         );
         let invalid = FakeBackend::new(vec![Err(BackendError::new(
@@ -606,8 +733,11 @@ mod tests {
         assert_eq!(
             failing.complete("slot_a", &request(None)).await.err(),
             Some(RouteError::Failed {
-                last: BackendError::new(FailureKind::Overloaded, "upstream_overloaded"),
-                attempts: 1
+                attempts: 1,
+                failures: vec![(
+                    "plan".into(),
+                    BackendError::new(FailureKind::Overloaded, "upstream_overloaded")
+                )],
             })
         );
         assert_eq!(exhausted.calls().len(), 3);
@@ -680,6 +810,13 @@ model = "m1"
 timeout_ms = 1000
 max_tokens = 10
 fallback = [{ provider = "fake", model = "m2", timeout_ms = 1000 }]
+
+[alarm]
+notify_binary = "/bin/notify"
+notify_config = "/etc/notify.json"
+credential = "/run/credential"
+refusal_streak = 5
+notify_timeout_secs = 75
 "#,
         )
         .expect("config");

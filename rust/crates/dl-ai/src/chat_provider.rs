@@ -146,7 +146,7 @@ pub enum ChatProviderError {
     #[error("LLM provider rate limited")]
     RateLimit,
     #[error("LLM provider authentication failed")]
-    Auth,
+    Auth(u16),
     /// Der volle Hinweis, Wortlaut des Anbieters eingeschlossen. `Display`
     /// gibt davon nur den Statusteil her, siehe unten; an den Wortlaut kommt
     /// ausschliesslich [`ChatProviderError::transparenz_wortlaut`].
@@ -155,6 +155,18 @@ pub enum ChatProviderError {
 }
 
 impl ChatProviderError {
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::Timeout => None,
+            Self::RateLimit => Some(429),
+            Self::Auth(status) => Some(*status),
+            Self::Provider(hinweis) => hinweis
+                .strip_prefix("HTTP ")
+                .and_then(|rest| rest.get(..3))
+                .and_then(|digits| digits.parse().ok()),
+        }
+    }
+
     /// Der volle Wortlaut, Anbieter-Echo eingeschlossen. Nur fuer den
     /// Transparenz-Kanal.
     ///
@@ -1162,7 +1174,7 @@ async fn send_json_with_retry(
                 elapsed_ms = started.elapsed().as_millis(),
                 "LLM-Provider-Auth-Fehler"
             );
-            return Err(ChatProviderError::Auth);
+            return Err(ChatProviderError::Auth(status.as_u16()));
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             if attempt < retry.max_retries {
@@ -1654,7 +1666,7 @@ mod tests {
         for fehler in [
             ChatProviderError::Timeout,
             ChatProviderError::RateLimit,
-            ChatProviderError::Auth,
+            ChatProviderError::Auth(401),
         ] {
             assert_eq!(fehler.transparenz_wortlaut(), fehler.to_string());
         }
@@ -2490,7 +2502,7 @@ mod tests {
         assert_eq!(bad_request_attempts, 1);
 
         let (auth, auth_attempts) = error_for_status(axum::http::StatusCode::UNAUTHORIZED).await;
-        assert_eq!(auth, ChatProviderError::Auth);
+        assert_eq!(auth, ChatProviderError::Auth(401));
         assert_eq!(auth_attempts, 1);
     }
 
@@ -2513,7 +2525,7 @@ mod tests {
             .chat(&[ChatMessage::user("synthetisch")], ChatParams::default())
             .await
             .expect_err("auth error");
-        assert_eq!(err, ChatProviderError::Auth);
+        assert_eq!(err, ChatProviderError::Auth(401));
 
         let rate_app = Router::new().route(
             "/chat/completions",

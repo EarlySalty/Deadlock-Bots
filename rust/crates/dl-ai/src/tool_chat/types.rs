@@ -92,17 +92,17 @@ pub enum StopReason {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u64,
-    #[serde(default)]
-    pub cache_read_input_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 impl Usage {
     pub fn total_input(&self) -> u64 {
         self.input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-            .saturating_add(self.cache_read_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(self.cache_read_input_tokens.unwrap_or(0))
     }
 }
 
@@ -113,6 +113,7 @@ pub struct ToolChatResponse {
     pub stop_reason: StopReason,
     pub usage: Option<Usage>,
     pub request_id: Option<String>,
+    pub upstream_status: Option<u16>,
 }
 
 #[derive(Deserialize)]

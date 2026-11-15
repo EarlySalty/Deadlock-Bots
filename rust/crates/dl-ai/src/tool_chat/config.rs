@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::upstream::safe_code;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +15,17 @@ pub struct GatewayConfig {
     pub max_request_bytes: usize,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub slots: BTreeMap<String, SlotConfig>,
+    pub alarm: AlarmConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmConfig {
+    pub notify_binary: PathBuf,
+    pub notify_config: PathBuf,
+    pub credential: PathBuf,
+    pub refusal_streak: NonZeroU32,
+    pub notify_timeout_secs: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -127,8 +141,19 @@ impl GatewayConfig {
         if self.slots.is_empty() {
             return invalid("at least one slot is required".into());
         }
+        let alarm = &self.alarm;
+        if [
+            &alarm.notify_binary,
+            &alarm.notify_config,
+            &alarm.credential,
+        ]
+        .iter()
+        .any(|path| !path.is_absolute())
+        {
+            return invalid("alarm paths must be absolute".into());
+        }
         for (name, slot) in &self.slots {
-            if !valid_name(name) {
+            if !safe_code(name) {
                 return invalid(format!("slot name {name} is invalid"));
             }
             if slot.deadline_ms == Some(0) {
@@ -193,7 +218,7 @@ impl ProviderConfig {
                 self.kind.as_str()
             )))
         };
-        if !valid_name(name) || self.concurrency == 0 || self.queue_timeout_ms == 0 {
+        if !safe_code(name) || self.concurrency == 0 || self.queue_timeout_ms == 0 {
             return Err(ConfigError::Invalid(format!(
                 "provider {name} needs a valid name, concurrency and queue_timeout_ms"
             )));
@@ -247,14 +272,6 @@ impl ProviderConfig {
     }
 }
 
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && model.len() <= 120
@@ -292,6 +309,13 @@ model = "claude-haiku-5-5"
 timeout_ms = 120000
 max_tokens = 4096
 fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 }]
+
+[alarm]
+notify_binary = "/bin/notify"
+notify_config = "/etc/notify.json"
+credential = "/run/credential"
+refusal_streak = 5
+notify_timeout_secs = 75
 "#;
 
     #[test]
@@ -320,6 +344,15 @@ fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 0"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\nattempts = 9"),
             SAMPLE.replace("max_tokens = 4096", "max_tokens = 4096\ndeadline_ms = 0"),
+            SAMPLE.replace("refusal_streak = 5", "refusal_streak = 0"),
+            SAMPLE.replace("\"/bin/notify\"", "\"notify\""),
+            SAMPLE.replace("notify_timeout_secs = 75", "notify_timeout_secs = 0"),
+            SAMPLE.replace("refusal_streak = 5\n", ""),
+            SAMPLE
+                .split("\n[alarm]")
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
         ] {
             assert!(GatewayConfig::parse(&broken).is_err(), "{broken}");
         }

@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
+use crate::upstream::status_reason;
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError};
 
 pub struct ChatProviderBackend {
@@ -23,15 +24,15 @@ impl ChatProviderBackend {
 }
 
 fn provider_error(error: ChatProviderError) -> BackendError {
-    match error {
-        ChatProviderError::Timeout => BackendError::new(FailureKind::Timeout, "provider_timeout"),
-        ChatProviderError::RateLimit => {
-            BackendError::new(FailureKind::Limit, "provider_rate_limit")
-        }
-        ChatProviderError::Auth => BackendError::new(FailureKind::Unavailable, "provider_auth"),
-        ChatProviderError::Provider(_) => {
-            BackendError::new(FailureKind::Unavailable, "provider_error")
-        }
+    let (kind, fallback) = match error {
+        ChatProviderError::Timeout => (FailureKind::Timeout, "provider_timeout"),
+        ChatProviderError::RateLimit => (FailureKind::Limit, "provider_rate_limit"),
+        ChatProviderError::Auth(_) => (FailureKind::Unavailable, "provider_auth"),
+        ChatProviderError::Provider(_) => (FailureKind::Unavailable, "provider_error"),
+    };
+    match error.upstream_status() {
+        Some(status) => BackendError::upstream(kind, status_reason(status), status),
+        None => BackendError::new(kind, fallback),
     }
 }
 
@@ -92,6 +93,7 @@ impl ToolBackend for ChatProviderBackend {
             stop_reason,
             usage,
             request_id: None,
+            upstream_status: None,
         })
     }
 
@@ -144,6 +146,42 @@ mod tests {
         assert!(error.kind.allows_fallback());
         assert_eq!(error.reason, "image_input_unsupported");
         assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn provider_failures_keep_their_kind_and_carry_the_upstream_status() {
+        let mapped = |error| {
+            let mapped = provider_error(error);
+            (mapped.kind, mapped.reason, mapped.status)
+        };
+        assert_eq!(
+            mapped(ChatProviderError::RateLimit),
+            (FailureKind::Limit, "http_429", Some(429))
+        );
+        assert_eq!(
+            mapped(ChatProviderError::Auth(403)),
+            (FailureKind::Unavailable, "http_403", Some(403))
+        );
+        assert_eq!(
+            mapped(ChatProviderError::Provider(crate::anbieter_hinweis(
+                412, "{}"
+            ))),
+            (FailureKind::Unavailable, "http_status", Some(412))
+        );
+        assert_eq!(
+            mapped(ChatProviderError::Provider(crate::anbieter_hinweis(
+                503, ""
+            ))),
+            (FailureKind::Unavailable, "http_5xx", Some(503))
+        );
+        assert_eq!(
+            mapped(ChatProviderError::Provider("invalid JSON response".into())),
+            (FailureKind::Unavailable, "provider_error", None)
+        );
+        assert_eq!(
+            mapped(ChatProviderError::Timeout),
+            (FailureKind::Timeout, "provider_timeout", None)
+        );
     }
 
     #[tokio::test]

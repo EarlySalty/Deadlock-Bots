@@ -11,6 +11,7 @@ use tokio::process::Command;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
+use crate::upstream::status_reason;
 
 const PASSED_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"];
 const ENVELOPE_TOKENS: u32 = 512;
@@ -180,6 +181,7 @@ impl ToolBackend for ClaudePlanBackend {
             stop_reason,
             usage: Some(outcome.usage),
             request_id: outcome.session_id,
+            upstream_status: None,
         })
     }
 }
@@ -240,8 +242,27 @@ fn usage(result: &Value) -> Usage {
     Usage {
         input_tokens: field("input_tokens"),
         output_tokens: field("output_tokens"),
-        cache_creation_input_tokens: field("cache_creation_input_tokens"),
-        cache_read_input_tokens: field("cache_read_input_tokens"),
+        cache_creation_input_tokens: result["usage"]["cache_creation_input_tokens"].as_u64(),
+        cache_read_input_tokens: result["usage"]["cache_read_input_tokens"].as_u64(),
+    }
+}
+
+fn result_failure(status: Option<u16>, text: &str) -> (FailureKind, &'static str) {
+    let overloaded = status == Some(529) || text.to_ascii_lowercase().contains("overloaded");
+    let limit_text = mentions_limit(text);
+    if overloaded {
+        (FailureKind::Overloaded, "upstream_overloaded")
+    } else if limit_text {
+        (FailureKind::Limit, "usage_limit")
+    } else if status == Some(429) {
+        (FailureKind::Limit, "http_429")
+    } else if text.contains("output token maximum") {
+        (FailureKind::InvalidOutput, "output_token_maximum")
+    } else {
+        (
+            FailureKind::Unavailable,
+            status.map_or("result_error", status_reason),
+        )
     }
 }
 
@@ -251,30 +272,20 @@ fn parse_result(line: &Value, requested_model: &str) -> Option<Result<Outcome, B
     }
     let failure = |kind, reason| Some(Err(BackendError::new(kind, reason)));
     if line.get("is_error").and_then(Value::as_bool) != Some(false) {
-        let status = line.get("api_error_status").and_then(Value::as_u64);
-        let overloaded = status == Some(529)
-            || line
-                .get("result")
-                .and_then(Value::as_str)
-                .is_some_and(|text| text.to_ascii_lowercase().contains("overloaded"));
-        let limited = status == Some(429)
-            || line
-                .get("result")
-                .and_then(Value::as_str)
-                .is_some_and(mentions_limit);
-        let truncated = line
+        let status = line
+            .get("api_error_status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok());
+        let text = line
             .get("result")
             .and_then(Value::as_str)
-            .is_some_and(|text| text.contains("output token maximum"));
-        return if overloaded {
-            failure(FailureKind::Overloaded, "upstream_overloaded")
-        } else if limited {
-            failure(FailureKind::Limit, "usage_limit")
-        } else if truncated {
-            failure(FailureKind::InvalidOutput, "output_token_maximum")
-        } else {
-            failure(FailureKind::Unavailable, "result_error")
-        };
+            .unwrap_or_default();
+        let (kind, reason) = result_failure(status, text);
+        return Some(Err(BackendError {
+            kind,
+            reason,
+            status,
+        }));
     }
     if line.get("subtype").and_then(Value::as_str) != Some("success") {
         return failure(FailureKind::InvalidOutput, "unexpected_subtype");
@@ -356,6 +367,45 @@ mod tests {
             );
         }
         assert!(parse_result(&json!({"type": "assistant"}), MODEL).is_none());
+        let status_limit = parse_result(
+            &json!({"type": "result", "is_error": true, "api_error_status": 429}),
+            MODEL,
+        )
+        .and_then(Result::err)
+        .map(|e| (e.reason, e.status));
+        let plan_limit = parse_result(&json!({"type": "result", "is_error": true, "result": "Claude AI usage limit reached|1"}), MODEL)
+            .and_then(Result::err)
+            .map(|e| (e.reason, e.status));
+        assert_eq!(status_limit, Some(("http_429", Some(429))));
+        assert_eq!(plan_limit, Some(("usage_limit", None)));
+        let failure = |status: u16, text: &str| {
+            parse_result(
+                &json!({"type": "result", "is_error": true, "api_error_status": status, "result": text}),
+                MODEL,
+            )
+            .and_then(Result::err)
+            .map(|e| (e.kind, e.reason, e.status))
+        };
+        assert_eq!(
+            failure(429, "API Error: Overloaded"),
+            Some((FailureKind::Overloaded, "upstream_overloaded", Some(429)))
+        );
+        assert_eq!(
+            failure(500, "Claude AI usage limit reached"),
+            Some((FailureKind::Limit, "usage_limit", Some(500)))
+        );
+        assert_eq!(
+            failure(400, "bad request"),
+            Some((FailureKind::Unavailable, "http_4xx", Some(400)))
+        );
+        assert_eq!(
+            failure(200, "output token maximum"),
+            Some((
+                FailureKind::InvalidOutput,
+                "output_token_maximum",
+                Some(200)
+            ))
+        );
     }
 
     #[tokio::test]

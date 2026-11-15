@@ -50,17 +50,34 @@ impl FailureKind {
 pub struct BackendError {
     pub kind: FailureKind,
     pub reason: &'static str,
+    pub status: Option<u16>,
 }
 
 impl BackendError {
     pub fn new(kind: FailureKind, reason: &'static str) -> Self {
-        Self { kind, reason }
+        Self {
+            kind,
+            reason,
+            status: None,
+        }
+    }
+
+    pub fn upstream(kind: FailureKind, reason: &'static str, status: u16) -> Self {
+        Self {
+            kind,
+            reason,
+            status: Some(status),
+        }
     }
 }
 
 impl std::fmt::Display for BackendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.kind.as_str(), self.reason)
+        write!(formatter, "{}: {}", self.kind.as_str(), self.reason)?;
+        match self.status {
+            Some(status) => write!(formatter, " (upstream {status})"),
+            None => Ok(()),
+        }
     }
 }
 
