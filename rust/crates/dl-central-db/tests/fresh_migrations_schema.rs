@@ -1932,6 +1932,24 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     let migration_2026100114_signature_after_first =
         migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
+    let billing_subject_indexes = scalar_i64(
+        &pool,
+        "SELECT count(*)
+           FROM pg_indexes
+          WHERE schemaname = 'steam'
+            AND tablename = 'plus_billing_events'
+            AND indexname IN (
+                'plus_billing_events_object_id_idx',
+                'plus_billing_events_subscription_idx',
+                'plus_billing_events_subscription_object_idx',
+                'plus_billing_events_invoice_subscription_idx',
+                'plus_billing_events_payment_intent_idx',
+                'plus_billing_events_payment_intent_object_idx'
+            )",
+    )
+    .await;
+    assert_eq!(billing_subject_indexes, 6);
+
     run_migrator(&db_dsn, "second run");
 
     let migration_count_after_second = scalar_i64(
