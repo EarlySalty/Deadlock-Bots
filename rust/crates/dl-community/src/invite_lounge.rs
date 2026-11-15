@@ -750,9 +750,10 @@ impl InviteLoungeWatcher {
             if let Some(code) = new_code {
                 next.friend_code = Some(code.to_string());
             }
-            if repost {
+            if repost && accepts_repost(&next, event) {
                 note_repost(&mut next, event);
             }
+
             if self
                 .store
                 .compare_exchange(event.author_id, Some(&previous), &next)
@@ -1965,11 +1966,11 @@ fn update_state(
     now_millis: i64,
 ) -> bool {
     state.last_seen = event.message_id;
-    if kind.is_none() && outside_request_channel(state, event.channel_id) {
+    if kind.is_none() && !open_request_in(state, event.channel_id) {
         tracing::info!(
             user_id = event.author_id,
             message_id = event.message_id,
-            "Invite-Lounge übernimmt keinen Freundescode aus einem anderen Kanal"
+            "Invite-Lounge übernimmt keinen Freundescode ohne offene Bitte in diesem Kanal"
         );
         return false;
     }
@@ -2066,7 +2067,7 @@ fn update_state(
     needs_hint
 }
 
-fn outside_request_channel(state: &LoungeState, channel_id: u64) -> bool {
+fn open_request_in(state: &LoungeState, channel_id: u64) -> bool {
     state.request.as_ref().is_some_and(|request| {
         matches!(
             request.phase,
@@ -2075,7 +2076,7 @@ fn outside_request_channel(state: &LoungeState, channel_id: u64) -> bool {
     }) && state
         .status
         .channel_id
-        .is_some_and(|request_channel| request_channel != channel_id)
+        .is_none_or(|request_channel| request_channel == channel_id)
 }
 
 fn restart_for_new_code(state: &mut LoungeState, event: &LoungeMessage, direct: bool) {
@@ -2265,9 +2266,6 @@ fn accepts_repost(state: &LoungeState, event: &LoungeMessage) -> bool {
 }
 
 fn note_repost(state: &mut LoungeState, event: &LoungeMessage) {
-    if !accepts_repost(state, event) {
-        return;
-    }
     if let Some(request) = state
         .request
         .as_mut()

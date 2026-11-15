@@ -65,7 +65,7 @@ Clusters group the duplicates. Finding numbers refer to `gate-r4.log`.
 
 ## 4. Fix pass as done
 
-1. **A.** Any changed code on a `Pending` or `Dispatching` request restarts it at the new message (`restart_for_new_code`) with a fresh status and clears the claim token; `finish_dispatch` matches the token, so the late finish of the old call is a no-op. The restart is direct only when the new message is a direct request; a plain new code needs check-in and "nein". A non-request message from another channel changes neither code nor request (`outside_request_channel`). `dispatch_active` is the one "active" predicate for the replace rule.
+1. **A.** Any changed code on a `Pending` or `Dispatching` request restarts it at the new message (`restart_for_new_code`) with a fresh status and clears the claim token; `finish_dispatch` matches the token, so the late finish of the old call is a no-op. The restart is direct only when the new message is a direct request; a plain new code needs check-in and "nein". A non-request message changes code or request only when an open request lives in its channel (`open_request_in`). `dispatch_active` is the one "active" predicate for the replace rule.
 2. **C/D/J/K.** `repost: Option<Repost>` replaced by `reposts` and `earlier` (last five each, no duplicates). Staff checks match any id; `on_gone` follows the newest repost in every phase; `GoneOutcome::Deferred` and the dead `drop_deleted` guard are gone.
 3. **B.** `reread_waiting_request` hands a 404 to `drop_deleted`.
 4. **E.** `release_hint` reloads, restores each hint field that still holds its claimed value, and retries on conflict.

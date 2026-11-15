@@ -4183,3 +4183,29 @@ async fn hinweisfreigabe_gibt_die_sperrzeit_auch_nach_neuer_bitte_frei() {
     assert!(!state.hint_sent);
     assert_eq!(state.last_hint_at, None);
 }
+
+#[tokio::test]
+async fn zahl_ohne_offene_bitte_wird_kein_freundescode() {
+    let (watcher, store, _, invite) = setup();
+    let mut chat = message(1, NOW, "war das Match 45678912 verbuggt?");
+    chat.channel_id = 555;
+    watcher
+        .handle_message(chat, NOW, Some(false))
+        .await
+        .expect("Nachricht wird gelesen");
+    watcher
+        .handle_message(
+            message(2, NOW + 60, "Kannst du mich nochmal einladen?"),
+            NOW + 60,
+            Some(false),
+        )
+        .await
+        .expect("Direkte Bitte wird gelesen");
+    assert!(invite.calls.lock().await.is_empty());
+    let state = stored(&store).await;
+    assert_eq!(state.friend_code, None);
+    assert_eq!(
+        state.request.map(|request| request.phase),
+        Some(Phase::WaitingForCode)
+    );
+}
