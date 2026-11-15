@@ -12419,6 +12419,74 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
+    async fn welcome_ids_ersetzen_den_altschluessel_und_raeumen_gemeinsam_ab() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            "http://127.0.0.1:1".to_string(),
+            repo.path().to_path_buf(),
+        );
+        let legacy = welcome_publish::welcome_legacy_message_id_key("hero");
+        upsert_serversync_kv(db.pool(), &legacy, "11")
+            .await
+            .expect("legacy id");
+        upsert_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            "h",
+        )
+        .await
+        .expect("foreign key");
+
+        service
+            .store_welcome_message_id("hero", 0, 77)
+            .await
+            .expect("first id");
+        service
+            .store_welcome_message_id("hero", 1, 78)
+            .await
+            .expect("second id");
+        assert_eq!(get_serversync_kv(db.pool(), &legacy).await, None);
+        assert_eq!(
+            get_serversync_kv(
+                db.pool(),
+                &welcome_publish::welcome_message_id_key("hero", 0)
+            )
+            .await
+            .as_deref(),
+            Some("77")
+        );
+        assert_eq!(
+            get_serversync_kv(
+                db.pool(),
+                &welcome_publish::welcome_message_id_key("hero", 1)
+            )
+            .await
+            .as_deref(),
+            Some("78")
+        );
+
+        service
+            .clear_welcome_message_id_keys(&BTreeMap::new())
+            .await
+            .expect("clear ids");
+        assert!(service
+            .load_serversync_kv_prefix("welcome_message_id_")
+            .await
+            .expect("prefix")
+            .is_empty());
+        assert_eq!(
+            get_serversync_kv(db.pool(), rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+                .await
+                .as_deref(),
+            Some("h")
+        );
+    }
+
+    #[tokio::test]
     async fn service_v2_repost_teilfehler_laesst_altes_kv_und_alte_messages_stehen() {
         let db = dl_central_db::testing::test_pool()
             .await
