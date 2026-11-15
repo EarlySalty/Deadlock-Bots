@@ -64,8 +64,10 @@ pub const SUPPORT_TIER_BUTTON_PREFIX: &str = "support:tier:";
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
 const FUNDING_BAR_SEGMENTS: i64 = 20;
-const CUSTOM_ID_MAX_CHARS: usize = 100;
-const BUTTON_LABEL_MAX_CHARS: usize = 80;
+use dl_broker::payload::{
+    DISCORD_BUTTON_LABEL_MAX_CHARS as BUTTON_LABEL_MAX_CHARS,
+    DISCORD_CUSTOM_ID_MAX_CHARS as CUSTOM_ID_MAX_CHARS,
+};
 
 pub const SUPPORT_INTRO: &str = "\
 # Server unterstützen\n\
@@ -1324,7 +1326,7 @@ mod tests {
         assert!(validate_component_shape(&with_url).is_err());
         let no_custom_id = json!({"type": 2, "style": 1, "label": "Supporter werden"});
         assert!(validate_component_shape(&no_custom_id).is_err());
-        let long_custom_id = interactive_button(1, 1, "x", &"a".repeat(101));
+        let long_custom_id = interactive_button(1, 1, "x", &"a".repeat(CUSTOM_ID_MAX_CHARS + 1));
         assert!(validate_component_shape(&long_custom_id).is_err());
         let ok = interactive_button(1, 1, "x", SUPPORT_BUTTON_BECOME);
         assert!(validate_component_shape(&ok).is_ok());
@@ -1827,7 +1829,7 @@ enabled = false
         let empty_error = validate_support_message_budget(&empty.payload).expect_err("empty");
         assert!(empty_error.contains("leeren Container"));
 
-        let long_label = "x".repeat(81);
+        let long_label = "x".repeat(BUTTON_LABEL_MAX_CHARS + 1);
         let overflow = message_from_container(
             1,
             None,
@@ -1838,7 +1840,7 @@ enabled = false
             Vec::new(),
         );
         let overflow_error = validate_support_message_budget(&overflow.payload).expect_err("label");
-        assert!(overflow_error.contains("1 bis 80"));
+        assert!(overflow_error.contains(&format!("1 bis {BUTTON_LABEL_MAX_CHARS}")));
     }
 
     fn pay_text_for(options: &SupportPanelOptions) -> String {

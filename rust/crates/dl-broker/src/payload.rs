@@ -7,6 +7,9 @@ use crate::port::{DmPurpose, ViewSpec};
 
 pub type ParseResult<T> = Result<T, String>;
 
+pub const DISCORD_BUTTON_LABEL_MAX_CHARS: usize = 80;
+pub const DISCORD_CUSTOM_ID_MAX_CHARS: usize = 100;
+
 /// `_parse_positive_payload_int`: int oder Ziffern-String, > 0; bool ist Fehler.
 pub fn positive_int(payload: &Map<String, Value>, key: &str) -> ParseResult<u64> {
     let raw = payload.get(key);
@@ -211,8 +214,10 @@ pub fn view_spec(payload: &Map<String, Value>) -> ParseResult<Option<ViewSpec>> 
             if label.is_empty() {
                 return Err("view_spec.label is required".to_string());
             }
-            if label.chars().count() > 80 {
-                return Err("view_spec.label exceeds Discord limit (80)".to_string());
+            if label.chars().count() > DISCORD_BUTTON_LABEL_MAX_CHARS {
+                return Err(format!(
+                    "view_spec.label exceeds Discord limit ({DISCORD_BUTTON_LABEL_MAX_CHARS})"
+                ));
             }
             let url = get("url");
             if url.is_empty() {

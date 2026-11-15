@@ -20,7 +20,7 @@ COMMENT ON TABLE core.supporter_sources IS
 COMMENT ON COLUMN core.supporter_sources.discord_id IS
     'Discord user id of the supporter; positive.';
 COMMENT ON COLUMN core.supporter_sources.source IS
-    'Writer of the row: stripe (Steam bot billing), boost (dl-bot from guild members), twitch_sub and twitch_bot_customer (Twitch bot), manual (role holders imported at the cutover).';
+    'Writer of the row: stripe (Steam bot billing), boost (dl-bot from guild members), twitch_sub and twitch_bot_customer (Twitch dashboard, database role twitchdash), manual (role holders imported at the cutover).';
 COMMENT ON COLUMN core.supporter_sources.source_ref IS
     'Id of the proof inside the source, for example the Stripe subscription id, the Twitch channel, discord for a boost or role_cutover for the manual import; never empty.';
 COMMENT ON COLUMN core.supporter_sources.monthly_cents IS

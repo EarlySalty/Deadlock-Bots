@@ -273,7 +273,7 @@ impl DiscordAdapter {
                     "components": [{
                         "type": 2,
                         "style": 1,
-                        "label": label.chars().take(80).collect::<String>(),
+                        "label": label.chars().take(dl_broker::payload::DISCORD_BUTTON_LABEL_MAX_CHARS).collect::<String>(),
                         "custom_id": format!("twitch-live:{login_part}:{token_part}"),
                     }, Self::streamer_partner_button()],
                 }])

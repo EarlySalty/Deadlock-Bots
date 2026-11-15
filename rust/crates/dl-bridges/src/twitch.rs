@@ -277,7 +277,10 @@ impl TwitchApiClient {
                     if label.is_empty() {
                         DEFAULT_BUTTON_LABEL.to_string()
                     } else {
-                        label.chars().take(80).collect()
+                        label
+                            .chars()
+                            .take(dl_broker::payload::DISCORD_BUTTON_LABEL_MAX_CHARS)
+                            .collect()
                     }
                 },
                 channel_id: get_u64("channel_id"),

@@ -144,8 +144,11 @@ mod tests {
             ("TWITCH_INTERNAL_API_TOKEN", " twitch-wert-5e7 "),
         ]);
         let cfg = WebConfig::from_lookup(|key| map.get(key).map(|v| v.to_string()));
+        assert_eq!(cfg.session_secret.as_deref(), Some("sitzung-wert-31a"));
+        assert_eq!(cfg.relay_token.as_deref(), Some("relay-wert-8b2"));
         assert_eq!(cfg.twitch_token.as_deref(), Some("twitch-wert-5e7"));
         let debug = format!("{cfg:?}");
+        assert_eq!(debug.matches("<gesetzt>").count(), 3, "{debug}");
         for secret in ["sitzung-wert-31a", "relay-wert-8b2", "twitch-wert-5e7"] {
             assert!(!debug.contains(secret), "{debug}");
         }

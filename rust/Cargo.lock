@@ -1459,6 +1459,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "dl-broker",
  "dl-central-db",
  "dl-changelog",
  "dl-core",
