@@ -2404,7 +2404,7 @@ async fn bereits_zugestellte_antwort_wird_nicht_doppelt_gesendet() {
 }
 
 #[tokio::test]
-async fn keine_nachfrage_ausserhalb_von_deadlock_invite() {
+async fn nachfrage_auch_ausserhalb_von_deadlock_invite() {
     let (watcher, _, _, invite, brain) = setup_scripted();
     let mut request = message(1, NOW, "Kann mich jemand einladen? 123456789");
     request.channel_id = INVITE_LOUNGE_CHANNEL_ID;
@@ -2416,7 +2416,7 @@ async fn keine_nachfrage_ausserhalb_von_deadlock_invite() {
         .poll_due(NOW + CHECK_IN_SECONDS + 60)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert!(!status_updates(&brain).contains(&InviteLoungeUpdate::CheckIn));
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
     assert!(invite.calls.lock().await.is_empty());
 }
 
@@ -2753,4 +2753,62 @@ async fn bearbeitete_bitte_uebernimmt_den_nachgereichten_code() {
         .expect("Abfrage läuft");
     assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
     assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn spaetes_ja_waehrend_des_versands_bleibt_geschlossen() {
+    let (watcher, store, _, invite, brain) = setup_check_ins(vec![
+        check_in_reply(InviteCheckInOutcome::NotArrived),
+        check_in_reply(InviteCheckInOutcome::Arrived),
+    ]);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Nachfrage läuft");
+    let at = NOW + CHECK_IN_SECONDS + 60;
+    watcher
+        .record_message(message(2, at, "nein"), at, Some(false))
+        .await
+        .expect("Nein wird gelesen");
+    invite.hold.store(true, Ordering::SeqCst);
+    let watcher = Arc::new(watcher);
+    let dispatching = watcher.clone();
+    let task = tokio::spawn(async move { dispatching.dispatch_due(USER, at).await });
+    invite.started.notified().await;
+    assert_eq!(
+        stored(&store).await.request.expect("Bitte vorhanden").phase,
+        Phase::Dispatching
+    );
+    watcher
+        .handle_message(message(3, at + 5, "doch, ja hab ich"), at + 5, Some(false))
+        .await
+        .expect("Späte Antwort wird gelesen");
+    invite.release.notify_one();
+    task.await
+        .expect("Versand-Task endet")
+        .expect("Versand endet ohne Fehler");
+    watcher.poll_due(at + 60).await.expect("Abfrage läuft");
+    let state = stored(&store).await;
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
+    assert!(state.status.wait.is_none());
+    assert!(state.outbox.is_empty());
+    assert_eq!(invite.calls.lock().await.len(), 1);
+    assert_eq!(
+        status_updates(&brain),
+        vec![
+            InviteLoungeUpdate::CheckIn,
+            answer_update(InviteCheckInOutcome::Arrived)
+        ]
+    );
 }

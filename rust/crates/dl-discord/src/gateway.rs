@@ -887,6 +887,44 @@ pub async fn build_voice_worker_client(
 
 #[cfg(test)]
 mod tests {
+    fn update_event(bot: bool, content: Option<&str>) -> serenity::all::MessageUpdateEvent {
+        let mut payload = serde_json::json!({
+            "id": "1500000000000000001",
+            "channel_id": "1464736918951432222",
+            "guild_id": "1289721245281292288",
+            "author": {
+                "id": "1400000000000000007",
+                "username": "mitglied",
+                "discriminator": "0",
+                "global_name": null,
+                "avatar": null,
+                "bot": bot
+            },
+            "edited_timestamp": "2026-11-14T22:20:00.000000+00:00",
+            "type": 0
+        });
+        if let Some(content) = content {
+            payload["content"] = serde_json::Value::String(content.to_string());
+        }
+        serde_json::from_value(payload).expect("MESSAGE_UPDATE-Nutzlast lesbar")
+    }
+
+    #[test]
+    fn bearbeitete_nachricht_wird_mit_inhalt_weitergegeben() {
+        let edit = super::message_edit(&update_event(
+            false,
+            Some("Kann mich wer einladen? 123456789"),
+        ))
+        .expect("Bearbeitung eines Mitglieds");
+        assert_eq!(edit.guild_id, Some(1_289_721_245_281_292_288));
+        assert_eq!(edit.channel_id, 1_464_736_918_951_432_222);
+        assert_eq!(edit.message_id, 1_500_000_000_000_000_001);
+        assert_eq!(edit.author_id, 1_400_000_000_000_000_007);
+        assert_eq!(edit.content, "Kann mich wer einladen? 123456789");
+        assert!(super::message_edit(&update_event(true, Some("Bot-Text"))).is_none());
+        assert!(super::message_edit(&update_event(false, None)).is_none());
+    }
+
     #[test]
     fn member_join_mit_menschlichem_autor_ist_keine_chatnachricht() {
         let mut message = serenity::all::Message::default();

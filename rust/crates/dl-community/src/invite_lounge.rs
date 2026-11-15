@@ -1656,7 +1656,7 @@ fn is_due(request: &Request, status: &RequestStatus) -> bool {
 }
 
 fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
-    status.channel_id == Some(CHECK_IN_CHANNEL_ID)
+    status.channel_id.is_some()
         && request.phase == Phase::Pending
         && !request.direct
         && status.wait.is_none()

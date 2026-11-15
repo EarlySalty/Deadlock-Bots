@@ -32,10 +32,18 @@ A Brain failure while judging an answer holds it (`held_answer`) and retries aft
 ## Alp's live state
 Fixed by the code path: after deploy the next poll sees `wait: Delivery` with a past `check_at`, `request_gone` finds message 1571287459566981353 deleted (Discord 10008) and `drop_deleted` clears the request with log "Invite-Lounge verwirft gelöschte Bitte still". No manual DB change.
 
-## Open points
-- Room requests outside #deadlock-invite get no check-in, so they now wait silently until expiry (check-in stays limited to `CHECK_IN_CHANNEL_ID` by an earlier decision).
-- Judge prompt (Deadlock-Brain `brain-api/src/prompts/invite_check_in_judge.txt`) speaks of the "Deadlock-Lounge" instead of the Steam playtest invite; accepting the friend request is not "arrived". Separate Brain package.
-- Old `WaitingForCode` states expire through the request window as before.
+## Follow-up changes in this package
+- Check-in in every lounge channel: it was limited to #deadlock-invite since e2cd593c (an implementation choice, no user rule). Without the 60 min invite, room requests in other channels such as #frag-die-community would have dead-ended; they now get the same question. Test `nachfrage_auch_ausserhalb_von_deadlock_invite`.
+- Late "yes" while the invite call is in flight: `finish_dispatch` leaves the closed request alone, no "Invite ist raus" after the OK. Test `spaetes_ja_waehrend_des_versands_bleibt_geschlossen`.
+- Judge prompt (Deadlock-Brain branch `fix/invite-judge-playtest-20261115`): asks about the Steam playtest invite or owning the game; an accepted friend request is `unclear`, so it cannot cancel the follow-up invite during the Steam wait. A non-verdict Brain reply counts as `unclear` (no retry loop); only Brain errors hold the answer.
+- Gateway `message_update` mapping tested with a MESSAGE_UPDATE payload (`bearbeitete_nachricht_wird_mit_inhalt_weitergegeben`).
+
+## Limits to know
+- A request without an answer stays open for the request window (`REQUEST_WINDOW_SECONDS` = 7 days). A "no" from the requester in that channel within the window still sends the friend request; that is spec point 3.
+- Edits only revive `WaitingForCode` requests inside that window.
+
+## Dry run against live states (2026-11-15 00:20 UTC)
+15 open states. Alp: `Pending`, `wait: Delivery`, next Steam check due, created after `actions_since` (1794031680), so the next poll drops it. 14 `WaitingForCode` states (13 older than 7 days, one 31 h in #deadlock-invite) stay inert; only an edit with a code inside the window revives one.
 
 ## Live check
 - Journal of `deadlock-bot-rust.service` (user unit): "Invite-Lounge verwirft gelöschte Bitte still" for user 1037837117818142741.
