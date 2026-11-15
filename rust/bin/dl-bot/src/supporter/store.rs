@@ -258,7 +258,21 @@ mod tests {
                  valid_until = EXCLUDED.valid_until,
                  updated_at = now()";
         let mut tx = pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE twitchbot")
+        sqlx::raw_sql(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'twitchdash') THEN
+                     CREATE ROLE twitchdash NOLOGIN;
+                 END IF;
+             END $$;",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../../crates/dl-central-db/migrations/20261111120000_supporter_sources.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("SET LOCAL ROLE twitchdash")
             .execute(&mut *tx)
             .await?;
         let open = sqlx::query(insert).bind(72_i64).execute(&mut *tx).await?;
