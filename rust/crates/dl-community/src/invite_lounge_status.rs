@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
 pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
+pub(super) const CHECK_IN_MAX_AGE_SECONDS: i64 = 6 * 60 * 60;
+pub(super) const ANSWER_RETRY_MILLIS: i64 = 60_000;
 pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
 pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
 const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
@@ -177,6 +179,13 @@ pub(super) enum SteamWait {
     Retry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct HeldAnswer {
+    pub(super) message_id: u64,
+    pub(super) content: String,
+    pub(super) retry_at_millis: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct RequestStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +202,8 @@ pub(super) struct RequestStatus {
     pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) held_answer: Option<HeldAnswer>,
 }
 
 impl RequestStatus {
@@ -349,8 +360,8 @@ pub(super) fn check_in_step(invited: bool, answered: bool) -> CheckIn {
     }
 }
 
-pub(super) fn check_in_window(age: i64, room_wait: i64) -> bool {
-    (CHECK_IN_SECONDS..room_wait).contains(&age)
+pub(super) fn check_in_window(age: i64) -> bool {
+    (CHECK_IN_SECONDS..CHECK_IN_MAX_AGE_SECONDS).contains(&age)
 }
 
 #[cfg(test)]
@@ -552,9 +563,10 @@ mod tests {
 
     #[test]
     fn nachfrage_nach_dreissig_minuten_nur_ohne_antwort_und_ohne_einladung() {
-        assert!(!check_in_window(CHECK_IN_SECONDS - 1, 3600));
-        assert!(check_in_window(CHECK_IN_SECONDS, 3600));
-        assert!(!check_in_window(3600, 3600));
+        assert!(!check_in_window(CHECK_IN_SECONDS - 1));
+        assert!(check_in_window(CHECK_IN_SECONDS));
+        assert!(check_in_window(3600));
+        assert!(!check_in_window(CHECK_IN_MAX_AGE_SECONDS));
         assert_eq!(check_in_step(false, false), CheckIn::Ask);
         assert_eq!(check_in_step(false, true), CheckIn::Skip);
         assert_eq!(check_in_step(true, false), CheckIn::AlreadyInvited);

@@ -134,6 +134,15 @@ pub struct MessageEvent {
     pub author_joined_at: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MessageEdit {
+    pub guild_id: Option<u64>,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub author_id: u64,
+    pub content: String,
+}
+
 /// Mitglieder-Ereignisse — Konsumenten: steam-bridge, Onboarding (Phase 7),
 /// Aktivitäts-Analytik (Phase 5), Leave-Survey.
 #[derive(Debug, Clone)]
@@ -248,6 +257,7 @@ const CHANNEL_CAPACITY: usize = 1024;
 pub struct Dispatcher {
     voice_tx: broadcast::Sender<VoiceEvent>,
     message_tx: broadcast::Sender<MessageEvent>,
+    message_edit_tx: broadcast::Sender<MessageEdit>,
     member_tx: broadcast::Sender<MemberEvent>,
     role_tx: broadcast::Sender<RoleEvent>,
     channel_tx: broadcast::Sender<ChannelEvent>,
@@ -266,6 +276,7 @@ impl Dispatcher {
     pub fn new() -> Self {
         let (voice_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (message_edit_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (role_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (channel_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
@@ -275,6 +286,7 @@ impl Dispatcher {
         Self {
             voice_tx,
             message_tx,
+            message_edit_tx,
             member_tx,
             role_tx,
             channel_tx,
@@ -290,6 +302,10 @@ impl Dispatcher {
 
     pub fn subscribe_messages(&self) -> broadcast::Receiver<MessageEvent> {
         self.message_tx.subscribe()
+    }
+
+    pub fn subscribe_message_edits(&self) -> broadcast::Receiver<MessageEdit> {
+        self.message_edit_tx.subscribe()
     }
 
     pub fn subscribe_members(&self) -> broadcast::Receiver<MemberEvent> {
@@ -323,6 +339,10 @@ impl Dispatcher {
 
     pub fn publish_message(&self, event: MessageEvent) {
         let _ = self.message_tx.send(event);
+    }
+
+    pub fn publish_message_edit(&self, edit: MessageEdit) {
+        let _ = self.message_edit_tx.send(edit);
     }
 
     pub fn publish_member(&self, event: MemberEvent) {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
     GuildId, GuildMemberFlags, GuildMemberUpdateEvent, Interaction, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, MessageType, OnlineStatus, Permissions, Reaction,
-    ReactionType, Ready, User, UserId, VoiceState,
+    InviteDeleteEvent, Member, Message, MessageType, MessageUpdateEvent, OnlineStatus, Permissions,
+    Reaction, ReactionType, Ready, User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -21,8 +21,8 @@ use crate::core_user_sync::{
 };
 use crate::dispatcher::{
     member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
-    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEvent, PresenceEvent,
-    VoiceEvent,
+    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEdit, MessageEvent,
+    PresenceEvent, VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
@@ -39,6 +39,21 @@ fn is_user_message(message: &Message) -> bool {
             message.kind,
             MessageType::Regular | MessageType::InlineReply
         )
+}
+
+fn message_edit(event: &MessageUpdateEvent) -> Option<MessageEdit> {
+    let author = event.author.as_ref().filter(|author| !author.bot)?;
+    let content = event.content.clone()?;
+    if event.webhook_id.is_some_and(|webhook| webhook.is_some()) {
+        return None;
+    }
+    Some(MessageEdit {
+        guild_id: event.guild_id.map(|id| id.get()),
+        channel_id: event.channel_id.get(),
+        message_id: event.id.get(),
+        author_id: author.id.get(),
+        content,
+    })
 }
 
 fn ready_contains_guild(guild_ids: impl IntoIterator<Item = u64>, guild_id: u64) -> bool {
@@ -446,6 +461,18 @@ impl EventHandler for Handler {
             is_bot,
         )
         .await;
+    }
+
+    async fn message_update(
+        &self,
+        _ctx: Context,
+        _old_if_available: Option<Message>,
+        _new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        if let Some(edit) = message_edit(&event) {
+            self.dispatcher.publish_message_edit(edit);
+        }
     }
 
     async fn message(&self, ctx: Context, message: Message) {

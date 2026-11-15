@@ -1,4 +1,6 @@
-use super::status::{SteamOutcome, CHECK_IN_SECONDS, RETRY_SECONDS};
+use super::status::{
+    HeldAnswer, Notice, RequestStatus, SteamOutcome, SteamWait, CHECK_IN_SECONDS, RETRY_SECONDS,
+};
 use super::*;
 use crate::answer_support::test_brain::{check_in_reply, ScriptedBrain, ScriptedReply};
 use dl_brain::{
@@ -11,6 +13,7 @@ use tokio::sync::Mutex;
 
 const INVITE_LOUNGE_HINT_TEXT: &str = "Brain-Hinweis";
 const NOW: i64 = 1_790_000_000;
+const ROOM_WAIT_SECONDS: i64 = 60 * 60;
 const BOT: u64 = 99;
 const GUILD: u64 = 42;
 const USER: u64 = 7;
@@ -146,6 +149,8 @@ struct RecordingPort {
     history_calls: AtomicUsize,
     identity_missing: AtomicBool,
     history_fails: AtomicBool,
+    deleted: Mutex<HashSet<u64>>,
+    presence_fails: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -185,6 +190,12 @@ impl InviteLoungeReplyPort for RecordingPort {
         assert!([INVITE_LOUNGE_CHANNEL_ID, CHECK_IN_CHANNEL_ID].contains(&channel));
         self.replies.lock().await.push((id, text.into()));
         Ok(id + 100_000)
+    }
+    async fn message_exists(&self, _channel: u64, id: u64) -> Result<bool, String> {
+        if self.presence_fails.load(Ordering::SeqCst) {
+            return Err("Discord nicht erreichbar".into());
+        }
+        Ok(!self.deleted.lock().await.contains(&id))
     }
 }
 
@@ -562,8 +573,8 @@ async fn direkte_bitte_fragt_einmal_code_und_fortsetzung_geht_sofort() {
 }
 
 #[tokio::test]
-async fn raumbitte_mit_code_wartet_genau_eine_stunde() {
-    let (watcher, _, port, invite) = setup();
+async fn schweigen_nach_der_nachfrage_loest_nie_eine_einladung_aus() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -572,27 +583,30 @@ async fn raumbitte_mit_code_wartet_genau_eine_stunde() {
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    watcher
-        .poll_due(NOW + 3599)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    for at in [
+        NOW + CHECK_IN_SECONDS,
+        NOW + ROOM_WAIT_SECONDS,
+        NOW + 6 * 60 * 60,
+        NOW + 23 * 60 * 60,
+        NOW + REQUEST_WINDOW_SECONDS,
+    ] {
+        watcher.poll_due(at).await.expect("Abfrage läuft");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
     assert!(port.replies.lock().await.is_empty());
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
-    watcher
-        .poll_due(NOW + 3600)
+    let state = store
+        .load(USER)
         .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    watcher
-        .poll_due(NOW + 7200)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
-    assert!(port.replies.lock().await.is_empty());
+        .expect("Zustand lesbar")
+        .expect("Bitte gespeichert");
+    assert!(!state.status.invite_now);
+    assert!(state.dispatch_started_at_millis.is_none());
 }
 
 #[tokio::test]
-async fn raumbitte_ohne_code_startet_stunde_erst_bei_code() {
-    let (watcher, _, port, invite) = setup();
+async fn raumbitte_ohne_code_fragt_erst_nach_dem_code_nach() {
+    let (watcher, _, port, invite, brain) = setup_scripted();
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen?"),
@@ -601,21 +615,22 @@ async fn raumbitte_ohne_code_startet_stunde_erst_bei_code() {
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(port.replies.lock().await[0].1, INVITE_LOUNGE_HINT_TEXT);
+    assert_eq!(port.replies.lock().await.len(), 1);
     watcher
         .handle_message(message(2, NOW + 4000, "123456789"), NOW + 4000, Some(false))
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
-        .poll_due(NOW + 7599)
+        .poll_due(NOW + 4000 + CHECK_IN_SECONDS - 1)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
+    assert!(status_updates(&brain).is_empty());
     watcher
-        .poll_due(NOW + 7600)
+        .poll_due(NOW + 4000 + CHECK_IN_SECONDS)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert!(invite.calls.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -843,17 +858,13 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_loest_die_einladung_aus() {
         status_updates(&brain),
         vec![
             InviteLoungeUpdate::CheckIn,
-            answer_update(InviteCheckInOutcome::NotArrived),
             InviteLoungeUpdate::Status {
                 status: InviteStatus::Sent
             }
         ]
     );
     assert_eq!(check_in_texts(&brain), ["nein, noch nichts"]);
-    assert_eq!(
-        notice_answers(&brain),
-        [None, Some("nein, noch nichts".to_string()), None]
-    );
+    assert_eq!(notice_answers(&brain), [None, None]);
 }
 
 #[tokio::test]
@@ -905,8 +916,8 @@ async fn ja_auf_die_nachfrage_bestaetigt_ohne_neue_einladung() {
 }
 
 #[tokio::test]
-async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
-    let (watcher, _, _, invite, brain) =
+async fn nachfrage_liest_auch_schlichte_folgenachrichten() {
+    let (watcher, store, _, invite, brain) =
         setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
     watcher
         .handle_message(
@@ -924,19 +935,12 @@ async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
         .handle_message(message(2, NOW + 1900, "ja"), NOW + 1900, Some(false))
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
-    assert!(check_in_texts(&brain).is_empty());
-    let mut reply_to_own_message = message(3, NOW + 1901, "ja");
-    reply_to_own_message.reply_message_id = Some(2);
     watcher
-        .handle_message(reply_to_own_message, NOW + 1901, Some(false))
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert!(check_in_texts(&brain).is_empty());
-    let mut answer = message(4, NOW + 1902, "ja");
-    answer.reply_message_id = Some(200_001);
-    watcher
-        .handle_message(answer, NOW + 1902, Some(false))
+        .handle_message(
+            message(3, NOW + 1901, "ja wirklich"),
+            NOW + 1901,
+            Some(false),
+        )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert!(invite.calls.lock().await.is_empty());
@@ -948,10 +952,19 @@ async fn nachfrage_nimmt_nur_antworten_mit_bezug_zum_bot_an() {
             answer_update(InviteCheckInOutcome::Arrived)
         ]
     );
+    let state = store
+        .load(USER)
+        .await
+        .expect("Zustand lesbar")
+        .expect("Bitte gespeichert");
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
 }
 
 #[tokio::test]
-async fn unklare_antwort_bleibt_offen_und_die_rueckfrage_wird_gelesen() {
+async fn unklare_antwort_bleibt_still_und_die_folgeantwort_wird_gelesen() {
     let (watcher, _, _, invite, brain) = setup_check_ins(vec![
         check_in_reply(InviteCheckInOutcome::Unclear),
         check_in_reply(InviteCheckInOutcome::Arrived),
@@ -990,7 +1003,6 @@ async fn unklare_antwort_bleibt_offen_und_die_rueckfrage_wird_gelesen() {
         status_updates(&brain),
         vec![
             InviteLoungeUpdate::CheckIn,
-            answer_update(InviteCheckInOutcome::Unclear),
             answer_update(InviteCheckInOutcome::Arrived)
         ]
     );
@@ -1094,7 +1106,8 @@ async fn bereits_eingeladen_laut_steam_bestaetigt_ohne_neue_einladung() {
 
 #[tokio::test]
 async fn eigene_bot_antwort_haelt_die_einladung_nicht_auf() {
-    let (watcher, _, port, invite, _) = setup_scripted();
+    let (watcher, _, port, invite, _) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::NotArrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -1108,16 +1121,14 @@ async fn eigene_bot_antwort_haelt_die_einladung_nicht_auf() {
     own.is_bot = true;
     own.reply_message_id = Some(1);
     port.history.lock().await.push(own);
-    watcher
-        .poll_due(NOW + ROOM_WAIT_SECONDS)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    answer_no_after_check_in(&watcher).await;
     assert_eq!(invite.calls.lock().await.len(), 1);
 }
 
 #[tokio::test]
 async fn fremde_bot_antwort_haelt_die_einladung_nicht_auf() {
-    let (watcher, _, port, invite, _) = setup_scripted();
+    let (watcher, _, port, invite, _) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::NotArrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -1131,16 +1142,14 @@ async fn fremde_bot_antwort_haelt_die_einladung_nicht_auf() {
     other.is_bot = true;
     other.reply_message_id = Some(1);
     port.history.lock().await.push(other);
-    watcher
-        .poll_due(NOW + ROOM_WAIT_SECONDS)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    answer_no_after_check_in(&watcher).await;
     assert_eq!(invite.calls.lock().await.len(), 1);
 }
 
 #[tokio::test]
 async fn unlesbarer_verlauf_haelt_die_einladung_nicht_auf() {
-    let (watcher, _, port, invite, _) = setup_scripted();
+    let (watcher, _, port, invite, _) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::NotArrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -1150,12 +1159,7 @@ async fn unlesbarer_verlauf_haelt_die_einladung_nicht_auf() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     port.history_fails.store(true, Ordering::SeqCst);
-    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
-        watcher
-            .poll_due(at)
-            .await
-            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    }
+    answer_no_after_check_in(&watcher).await;
     assert_eq!(invite.calls.lock().await.len(), 1);
 }
 
@@ -1184,7 +1188,7 @@ async fn von_hand_erledigte_bitte_bleibt_ohne_meldung() {
 }
 
 #[tokio::test]
-async fn einladung_nach_dem_check_in_schliesst_die_bitte_still() {
+async fn einladung_nach_dem_check_in_bleibt_ohne_versand_und_meldung() {
     let (watcher, store, _, invite, brain) = setup_scripted();
     watcher
         .handle_message(
@@ -1200,22 +1204,12 @@ async fn einladung_nach_dem_check_in_schliesst_die_bitte_still() {
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let notices_before = notices(&brain).len();
     store.handled.store(true, Ordering::SeqCst);
-    watcher
-        .poll_due(NOW + ROOM_WAIT_SECONDS)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    for at in [NOW + ROOM_WAIT_SECONDS, NOW + 6 * 60 * 60] {
+        watcher.poll_due(at).await.expect("Abfrage läuft");
+    }
     assert!(invite.calls.lock().await.is_empty());
     assert_eq!(notices(&brain).len(), notices_before);
-    let state = store
-        .load(USER)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag")
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(
-        state.last_result.as_deref(),
-        Some("Schon von Hand erledigt; keine Meldung")
-    );
-    assert!(state.outbox.is_empty());
+    assert!(outbox(&store).await.is_empty());
 }
 
 #[tokio::test]
@@ -1293,19 +1287,19 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
 async fn zwei_dispatcher_erhalten_nur_einen_versuch() {
     let (watcher, _, _, invite) = setup();
     watcher
-        .handle_message(
-            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+        .record_message(
+            message(1, NOW, "Kannst du mich einladen? 123456789"),
             NOW,
             Some(false),
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     let (first, second) = tokio::join!(
-        watcher.dispatch_due(USER, NOW + 3600),
-        watcher.dispatch_due(USER, NOW + 3600)
+        watcher.dispatch_due(USER, NOW),
+        watcher.dispatch_due(USER, NOW)
     );
-    first.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    second.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    first.expect("Erster Versuch läuft");
+    second.expect("Zweiter Versuch bleibt harmlos");
     assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
 }
 
@@ -1759,8 +1753,9 @@ async fn direkte_bitte_waehrend_dispatch_startet_keinen_zweiten_versuch() {
 }
 
 #[tokio::test]
-async fn dank_ist_kein_audit_beleg_und_stoppt_keine_raumbitte() {
-    let (watcher, _, _, invite) = setup();
+async fn dank_des_mitglieds_schliesst_die_raumbitte_still() {
+    let (watcher, store, _, invite, brain) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -1777,11 +1772,20 @@ async fn dank_ist_kein_audit_beleg_und_stoppt_keine_raumbitte() {
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    watcher
-        .poll_due(NOW + 3600)
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher.poll_due(at).await.expect("Abfrage läuft");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(notices(&brain).is_empty());
+    let state = store
+        .load(USER)
         .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+        .expect("Zustand lesbar")
+        .expect("Bitte gespeichert");
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
 }
 
 #[test]
@@ -1994,7 +1998,8 @@ async fn alter_warteauftrag_verfällt_ohne_steam_oder_antwort() {
 
 #[tokio::test]
 async fn raumbitte_mit_echtem_audit_erzeugt_keine_späte_statusantwort() {
-    let (watcher, store, port, invite) = setup();
+    let (watcher, store, port, invite, _) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::NotArrived)]);
     invite.audit.store(true, Ordering::SeqCst);
     watcher
         .handle_message(
@@ -2004,10 +2009,7 @@ async fn raumbitte_mit_echtem_audit_erzeugt_keine_späte_statusantwort() {
         )
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    watcher
-        .poll_due(NOW + ROOM_WAIT_SECONDS)
-        .await
-        .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    answer_no_after_check_in(&watcher).await;
     assert_eq!(invite.calls.lock().await.len(), 1);
     assert_eq!(invite.sends.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -2128,7 +2130,7 @@ async fn rueckblick_und_gateway_erhalten_die_bitte_in_beiden_reihenfolgen() {
                 .dispatch_due(USER, due)
                 .await
                 .expect("Erledigter Auftrag bleibt erledigt");
-            assert_eq!(invite.calls.lock().await.len(), 1);
+            assert_eq!(invite.calls.lock().await.len(), usize::from(direct));
             assert!(port.replies.lock().await.is_empty());
         }
     }
@@ -2153,6 +2155,10 @@ async fn ablauf_waehrend_load_oder_claim_verhindert_jeden_versand() {
                         direct,
                         phase: Phase::Pending,
                     }),
+                    status: RequestStatus {
+                        invite_now: !direct,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             );
@@ -2245,8 +2251,8 @@ async fn ablauf_waehrend_abschluss_speichert_status_ohne_oeffentliche_antwort() 
 }
 
 #[tokio::test]
-async fn gleicher_code_schiebt_die_stunde_nicht_auf() {
-    let (watcher, _, _, invite) = setup();
+async fn gleicher_code_schiebt_die_nachfrage_nicht_auf() {
+    let (watcher, _, _, invite, brain) = setup_scripted();
     watcher
         .handle_message(
             message(1, NOW, "Kann mich jemand einladen? 123456789"),
@@ -2260,10 +2266,11 @@ async fn gleicher_code_schiebt_die_stunde_nicht_auf() {
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     watcher
-        .poll_due(NOW + 3600)
+        .poll_due(NOW + CHECK_IN_SECONDS)
         .await
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
-    assert_eq!(invite.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert!(invite.calls.lock().await.is_empty());
 }
 
 fn moving_clock(watcher: &mut InviteLoungeWatcher) -> Arc<AtomicI64> {
@@ -2462,4 +2469,288 @@ async fn fremde_bot_antwort_zaehlt_nicht_als_zugestellte_meldung() {
         .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
     assert_eq!(notices(&brain).len(), 2);
     assert!(outbox(&store).await.is_empty());
+}
+
+async fn answer_no_after_check_in(watcher: &InviteLoungeWatcher) {
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Nachfrage läuft");
+    let at = NOW + CHECK_IN_SECONDS + 60;
+    watcher
+        .handle_message(message(9, at, "nein, noch nichts"), at, Some(false))
+        .await
+        .expect("Antwort wird gelesen");
+}
+
+fn open_request_state(phase: Phase, wait: Option<SteamWait>) -> LoungeState {
+    LoungeState {
+        friend_code: Some("123456789".into()),
+        request: Some(Request {
+            message_id: 1,
+            created_at: NOW,
+            direct: false,
+            phase,
+        }),
+        status: RequestStatus {
+            channel_id: Some(CHECK_IN_CHANNEL_ID),
+            notices: vec![Notice::CheckIn, Notice::FriendRequest],
+            wait,
+            check_at: wait.map(|_| NOW + 2 * ROOM_WAIT_SECONDS),
+            check_in_at: Some(NOW + CHECK_IN_SECONDS),
+            check_in_message_id: Some(200_001),
+            ..Default::default()
+        },
+        last_seen: 1,
+        dispatch_started_at_millis: Some((NOW + ROOM_WAIT_SECONDS) * 1000),
+        ..Default::default()
+    }
+}
+
+async fn stored(store: &MemoryStore) -> LoungeState {
+    store
+        .load(USER)
+        .await
+        .expect("Zustand lesbar")
+        .expect("Zustand gespeichert")
+}
+
+#[tokio::test]
+async fn spaetes_ja_schliesst_die_bitte_in_jedem_offenen_zustand() {
+    for (phase, wait) in [
+        (Phase::Pending, Some(SteamWait::Delivery)),
+        (Phase::Pending, Some(SteamWait::Retry)),
+        (Phase::Pending, None),
+        (Phase::Dispatching, None),
+    ] {
+        let (watcher, store, _, invite, brain) =
+            setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
+        let mut state = open_request_state(phase, wait);
+        state.outbox.push(OutboxEntry::notice(
+            1,
+            Some(CHECK_IN_CHANNEL_ID),
+            Notice::NotAccepted,
+            false,
+        ));
+        store.states.lock().await.insert(USER, state);
+        let at = NOW + ROOM_WAIT_SECONDS + 60;
+        watcher
+            .handle_message(message(5, at, "Jo habe ich schon !"), at, Some(false))
+            .await
+            .expect("Späte Antwort wird gelesen");
+        watcher
+            .poll_due(NOW + 3 * ROOM_WAIT_SECONDS)
+            .await
+            .expect("Abfrage läuft");
+        let state = stored(&store).await;
+        assert_eq!(
+            state.request.expect("Bitte vorhanden").phase,
+            Phase::Attempted
+        );
+        assert!(state.status.wait.is_none());
+        assert!(state.status.check_at.is_none());
+        assert!(state.outbox.is_empty());
+        assert_eq!(check_in_texts(&brain), ["Jo habe ich schon !"]);
+        assert_eq!(
+            status_updates(&brain),
+            vec![answer_update(InviteCheckInOutcome::Arrived)]
+        );
+        assert!(invite.calls.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn geloeschte_bitte_bekommt_weder_nachfrage_noch_einladung() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    port.deleted.lock().await.insert(1);
+    for at in [NOW + CHECK_IN_SECONDS, NOW + ROOM_WAIT_SECONDS] {
+        watcher.poll_due(at).await.expect("Abfrage läuft");
+    }
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(notices(&brain).is_empty());
+    let state = stored(&store).await;
+    assert!(state.request.is_none());
+    assert_eq!(
+        state.last_result.as_deref(),
+        Some("Bitte gelöscht; still beendet")
+    );
+    let at = NOW + ROOM_WAIT_SECONDS + 10;
+    watcher
+        .handle_message(
+            message(3, at, "Kann mich jemand einladen? 123456789"),
+            at,
+            Some(false),
+        )
+        .await
+        .expect("Neue Bitte wird angelegt");
+    let request = stored(&store).await.request.expect("Neue Bitte vorhanden");
+    assert_eq!(request.message_id, 3);
+    assert_eq!(request.phase, Phase::Pending);
+}
+
+#[tokio::test]
+async fn geloeschte_bitte_im_steam_warten_endet_still() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    store.states.lock().await.insert(
+        USER,
+        open_request_state(Phase::Pending, Some(SteamWait::Delivery)),
+    );
+    port.deleted.lock().await.insert(1);
+    watcher
+        .poll_due(NOW + 2 * ROOM_WAIT_SECONDS)
+        .await
+        .expect("Abfrage läuft");
+    assert!(invite.calls.lock().await.is_empty());
+    assert!(notices(&brain).is_empty());
+    let state = stored(&store).await;
+    assert!(state.request.is_none());
+    assert!(state.outbox.is_empty());
+    assert!(store
+        .pending_users()
+        .await
+        .expect("Offene Bitten lesbar")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn meldung_zu_geloeschter_bitte_wird_still_verworfen() {
+    let (mut watcher, store, port, _, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    brain.script_notices(vec![Err(BrainError::Backend("Broker weg".into()))]);
+    direct_request(&watcher).await;
+    assert_eq!(outbox(&store).await.len(), 1);
+    port.deleted.lock().await.insert(1);
+    clock.store((NOW + 61) * 1000, Ordering::SeqCst);
+    watcher.poll_due(NOW + 61).await.expect("Abfrage läuft");
+    assert_eq!(notices(&brain).len(), 1);
+    let state = stored(&store).await;
+    assert!(state.outbox.is_empty());
+    assert!(state.request.is_none());
+}
+
+#[tokio::test]
+async fn nicht_pruefbare_bitte_setzt_den_schritt_nur_aus() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    port.presence_fails.store(true, Ordering::SeqCst);
+    assert!(watcher
+        .dispatch_due(USER, NOW + CHECK_IN_SECONDS)
+        .await
+        .is_err());
+    assert!(notices(&brain).is_empty());
+    assert_eq!(
+        stored(&store).await.request.expect("Bitte bleibt").phase,
+        Phase::Pending
+    );
+    port.presence_fails.store(false, Ordering::SeqCst);
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS + 60)
+        .await
+        .expect("Abfrage läuft");
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn antwort_ohne_brain_urteil_wird_spaeter_erneut_gewertet() {
+    let (mut watcher, store, _, invite, brain) = setup_check_ins(vec![
+        Err(BrainError::Backend("Brain weg".into())),
+        check_in_reply(InviteCheckInOutcome::Arrived),
+    ]);
+    let clock = moving_clock(&mut watcher);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    let at = NOW + CHECK_IN_SECONDS + 120;
+    clock.store(at * 1000, Ordering::SeqCst);
+    watcher
+        .handle_message(message(2, at, "hab ich schon"), at, Some(false))
+        .await
+        .expect("Antwort wird gehalten");
+    assert_eq!(
+        stored(&store).await.status.held_answer,
+        Some(HeldAnswer {
+            message_id: 2,
+            content: "hab ich schon".into(),
+            retry_at_millis: at * 1000 + 60_000,
+        })
+    );
+    watcher.poll_due(at + 30).await.expect("Abfrage läuft");
+    assert!(status_updates(&brain).is_empty());
+    clock.store((at + 61) * 1000, Ordering::SeqCst);
+    watcher.poll_due(at + 61).await.expect("Abfrage läuft");
+    assert_eq!(check_in_texts(&brain), ["hab ich schon", "hab ich schon"]);
+    let state = stored(&store).await;
+    assert!(state.status.held_answer.is_none());
+    assert_eq!(
+        state.request.expect("Bitte vorhanden").phase,
+        Phase::Attempted
+    );
+    assert!(notices(&brain).is_empty());
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn bearbeitete_bitte_uebernimmt_den_nachgereichten_code() {
+    let (mut watcher, store, _, invite, brain) = setup_scripted();
+    let clock = moving_clock(&mut watcher);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen?"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    assert_eq!(
+        stored(&store).await.request.expect("Bitte vorhanden").phase,
+        Phase::WaitingForCode
+    );
+    let edited_at = NOW + 600;
+    clock.store(edited_at * 1000, Ordering::SeqCst);
+    let edit = dl_discord::MessageEdit {
+        guild_id: Some(GUILD),
+        channel_id: CHECK_IN_CHANNEL_ID,
+        message_id: 1,
+        author_id: USER,
+        content: "Kann mich jemand einladen? 123456789".into(),
+    };
+    assert_eq!(
+        watcher
+            .record_edit(&edit)
+            .await
+            .expect("Bearbeitung lesbar"),
+        Some(USER)
+    );
+    let state = stored(&store).await;
+    assert_eq!(state.friend_code.as_deref(), Some("123456789"));
+    let request = state.request.expect("Bitte vorhanden");
+    assert_eq!(request.phase, Phase::Pending);
+    assert_eq!(request.created_at, edited_at);
+    watcher
+        .poll_due(edited_at + CHECK_IN_SECONDS)
+        .await
+        .expect("Abfrage läuft");
+    assert_eq!(status_updates(&brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert!(invite.calls.lock().await.is_empty());
 }

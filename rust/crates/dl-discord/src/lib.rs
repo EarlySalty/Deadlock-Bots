@@ -24,7 +24,7 @@ pub mod voice_cache;
 pub use adapter::DiscordAdapter;
 pub use dispatcher::{
     ChannelEvent, Dispatcher, GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment,
-    MessageEvent, PresenceEvent, RoleEvent, VoiceEvent,
+    MessageEdit, MessageEvent, PresenceEvent, RoleEvent, VoiceEvent,
 };
 pub use interactions::{
     BridgeAttachment, BridgeInteraction, BridgeReply, ChannelSender, CommandSpec,
