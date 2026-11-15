@@ -307,7 +307,7 @@ impl DiscordAdapter {
             json!({
                 "message_id": reply.message_id.to_string(),
                 "channel_id": channel_id.to_string(),
-                "fail_if_not_exists": false,
+                "fail_if_not_exists": true,
             }),
         );
         body.insert(
@@ -1441,6 +1441,19 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_antwort_ohne_zielnachricht_wird_nicht_ohne_bezug_gepostet() {
+        let reply = ChannelReply {
+            message_id: 55,
+            allowed_user_ids: vec![7],
+        };
+        let body = DiscordAdapter::reply_body(42, &reply, "<@7> Einladung ist raus.");
+        assert_eq!(
+            body["message_reference"],
+            json!({"message_id": "55", "channel_id": "42", "fail_if_not_exists": true})
+        );
+    }
 
     #[test]
     fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
