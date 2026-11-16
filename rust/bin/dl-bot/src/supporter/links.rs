@@ -329,9 +329,11 @@ fn link_outcome(
             return Ok(LinkOutcome::AlreadySubscribed)
         }
         (StatusCode::BAD_REQUEST, wire::UNKNOWN_TIER) => {
+            let service = link_service(path);
             tracing::error!(
                 path,
-                "Unterstützer-Stufe fehlt im Steam Bot: supporter_tiers_eur und die Stripe-Preise passen nicht zusammen"
+                service,
+                "Unterstützer-Stufe fehlt im {service}: supporter_tiers_eur und die Stripe-Preise passen nicht zusammen"
             );
             return Ok(LinkOutcome::UnknownTier);
         }
@@ -339,10 +341,12 @@ fn link_outcome(
             StatusCode::SERVICE_UNAVAILABLE,
             wire::SUPPORTER_NOT_CONFIGURED | wire::TIP_NOT_CONFIGURED | wire::PRICES_UNVERIFIED,
         ) => {
+            let service = link_service(path);
             tracing::warn!(
                 path,
+                service,
                 code,
-                "Unterstützer-Link: Steam Bot meldet nicht eingerichtet"
+                "Unterstützer-Link: {service} meldet nicht eingerichtet"
             );
             return Ok(LinkOutcome::Unavailable);
         }
@@ -364,6 +368,14 @@ fn link_outcome(
 fn token_rejected(status: StatusCode, code: &str) -> bool {
     status == StatusCode::UNAUTHORIZED
         || (status == StatusCode::SERVICE_UNAVAILABLE && code == wire::AUTH_NOT_CONFIGURED)
+}
+
+fn link_service(path: &str) -> &'static str {
+    if path == TWITCH_CONNECT_PATH {
+        "Twitch Bot"
+    } else {
+        "Steam Bot"
+    }
 }
 
 fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
