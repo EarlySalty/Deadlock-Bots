@@ -4881,6 +4881,31 @@ async fn neue_bitte_in_anderem_kanal_nach_erledigtem_hinweis_bekommt_ihren_hinwe
 }
 
 #[tokio::test]
+async fn zweite_bitte_im_anderen_kanal_in_derselben_sekunde_behaelt_ihren_hinweis() {
+    let (watcher, store, port, _) = setup();
+    let first = watcher
+        .record_message(message(1, NOW, IMPERSONAL_REQUEST), NOW, None)
+        .await
+        .expect("Bitte wird angelegt")
+        .expect("Bitte gespeichert");
+    let hint = first.hint.expect("Hinweis beansprucht");
+    let mut other = message(2, NOW, IMPERSONAL_REQUEST);
+    other.channel_id = INVITE_LOUNGE_CHANNEL_ID;
+    watcher
+        .handle_message(other, NOW, Some(false))
+        .await
+        .expect("Zweite Bitte wird gelesen");
+    watcher.send_hint(hint).await.expect("Erster Hinweis endet");
+    assert_eq!(
+        port.replies.lock().await.as_slice(),
+        &[(2, INVITE_LOUNGE_HINT_TEXT.into())]
+    );
+    let state = stored(&store).await;
+    assert_eq!(state.status.channel_id, Some(INVITE_LOUNGE_CHANNEL_ID));
+    assert!(state.hint_sent);
+}
+
+#[tokio::test]
 async fn lesefehler_vor_dem_hinweis_gibt_ihn_frei() {
     let (watcher, store, port, _) = setup();
     let recorded = watcher
