@@ -17,6 +17,7 @@ mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
+mod supporter;
 mod turnierglue;
 mod twitch_invite_sync;
 mod twitch_invites;
@@ -606,11 +607,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
+    let supporter_config = supporter::SupporterConfig::new(
+        &operating.runtime.community,
+        &operating.services.steam_api_url,
+        env,
+    );
+    supporter_config.log_effective();
+    let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config)
+        .context("HTTP-Client für die Unterstützer-Knöpfe")?;
     let serversync_concrete = serversync::ServerSyncService::new(
         central_pool.clone(),
         adapter.clone(),
         discord_token.clone(),
         serversync::GUILD_ID,
+        supporter_links.clone(),
     );
     let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
@@ -651,6 +661,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    supporter::register(&mut router, supporter_links, &supporter_config);
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
@@ -1549,6 +1560,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 matcher.client.clone(),
             );
         }
+        supporter::SupporterSync::new(
+            central_pool.clone(),
+            adapter.http.clone(),
+            serversync::GUILD_ID,
+            serversync_concrete.clone(),
+            supporter_config.clone(),
+        )
+        .spawn();
         master::spawn_control(
             &dispatcher,
             adapter.clone(),

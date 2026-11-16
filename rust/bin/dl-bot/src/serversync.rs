@@ -3,7 +3,7 @@
 pub(crate) mod faq_publish;
 pub(crate) mod rang_guide_publish;
 pub(crate) mod regelwerk_publish;
-mod support_publish;
+pub(crate) mod support_publish;
 mod twitch_link;
 pub(crate) mod voice_ux_publish;
 mod welcome_publish;
@@ -68,6 +68,7 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
+const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
@@ -920,6 +921,121 @@ pub struct ServerSyncService {
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
     panel_apply_lock: tokio::sync::Mutex<()>,
+    supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    support_panel_lock: tokio::sync::Mutex<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FundingRefresh {
+    Updated,
+    Unchanged,
+    Skipped(&'static str),
+}
+
+fn support_fallback_funding(
+    live: support_publish::SupportFunding,
+    goal_cents: i64,
+) -> support_publish::SupportFunding {
+    support_publish::SupportFunding {
+        raised_cents: live.raised_cents,
+        goal_cents,
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FixedFundingSource {
+    funding: std::sync::Mutex<Result<support_publish::SupportFunding, String>>,
+    options: std::sync::Mutex<support_publish::SupportPanelOptions>,
+    goal_cents: std::sync::Mutex<i64>,
+}
+
+#[cfg(test)]
+impl FixedFundingSource {
+    pub fn standard() -> Self {
+        Self::new(
+            Ok(Self::standard_funding()),
+            Self::standard_options(),
+            Self::standard_funding().goal_cents,
+        )
+    }
+
+    pub fn new(
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+        goal_cents: i64,
+    ) -> Self {
+        Self {
+            funding: std::sync::Mutex::new(funding),
+            options: std::sync::Mutex::new(options),
+            goal_cents: std::sync::Mutex::new(goal_cents),
+        }
+    }
+
+    pub fn set(
+        &self,
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+    ) {
+        *self.funding.lock().expect("funding") = funding;
+        *self.options.lock().expect("options") = options;
+    }
+
+    pub fn set_goal(&self, goal_cents: i64) {
+        *self.goal_cents.lock().expect("goal") = goal_cents;
+    }
+
+    pub fn standard_funding() -> support_publish::SupportFunding {
+        support_publish::SupportFunding {
+            raised_cents: 0,
+            goal_cents: dl_core::runtime_config::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+        }
+    }
+
+    pub fn standard_options() -> support_publish::SupportPanelOptions {
+        support_publish::SupportPanelOptions {
+            tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
+            twitch: false,
+            role_grant: true,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::supporter::FundingSource for FixedFundingSource {
+    async fn funding(&self) -> Result<support_publish::SupportFunding, String> {
+        self.funding.lock().expect("funding").clone()
+    }
+
+    fn missing_config(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn goal_cents(&self) -> i64 {
+        *self.goal_cents.lock().expect("goal")
+    }
+
+    fn panel_options(&self) -> support_publish::SupportPanelOptions {
+        self.options.lock().expect("options").clone()
+    }
+}
+
+async fn upsert_serversync_kv<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    key: &str,
+    value: &str,
+) -> ServerSyncResult<()> {
+    sqlx::query(
+        "INSERT INTO bot.kv_store(ns, k, v)
+         VALUES($1, $2, $3)
+         ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
+    )
+    .bind(SERVERSYNC_KV_NS)
+    .bind(key)
+    .bind(value)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 impl ServerSyncService {
@@ -928,6 +1044,7 @@ impl ServerSyncService {
         adapter: Arc<dl_discord::DiscordAdapter>,
         discord_token: String,
         guild_id: u64,
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
     ) -> Arc<Self> {
         Arc::new(Self {
             pool,
@@ -940,6 +1057,8 @@ impl ServerSyncService {
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             panel_apply_lock: tokio::sync::Mutex::new(()),
+            supporter_funding,
+            support_panel_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -948,6 +1067,21 @@ impl ServerSyncService {
         pool: PgPool,
         discord_api_base: String,
         rang_guide_repo_root: PathBuf,
+    ) -> Arc<Self> {
+        Self::new_for_test_with_funding(
+            pool,
+            discord_api_base,
+            rang_guide_repo_root,
+            Arc::new(FixedFundingSource::standard()),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_funding(
+        pool: PgPool,
+        discord_api_base: String,
+        rang_guide_repo_root: PathBuf,
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
     ) -> Arc<Self> {
         Arc::new(Self {
             pool,
@@ -960,6 +1094,8 @@ impl ServerSyncService {
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             panel_apply_lock: tokio::sync::Mutex::new(()),
+            supporter_funding,
+            support_panel_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -1171,16 +1307,15 @@ impl ServerSyncService {
     }
 
     async fn store_serversync_kv(&self, key: &str, value: &str) -> ServerSyncResult<()> {
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3)
-             ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await?;
+        upsert_serversync_kv(&self.pool, key, value).await
+    }
+
+    async fn store_serversync_kv_pairs(&self, pairs: &[(&str, &str)]) -> ServerSyncResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in pairs {
+            upsert_serversync_kv(&mut *tx, key, value).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2140,6 +2275,151 @@ impl ServerSyncService {
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
         parse_discord_id("Message-ID", &written.id)
+    }
+
+    async fn support_funding_for_apply(
+        &self,
+        source: &dyn crate::supporter::FundingSource,
+    ) -> Result<(support_publish::SupportFunding, Option<String>), String> {
+        let error = match source.funding().await {
+            Ok(funding) => return Ok((funding, None)),
+            Err(error) => error,
+        };
+        let raw = self
+            .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
+            .await
+            .map_err(|kv_error| format!("{error}; letzter Stand nicht lesbar: {kv_error}"))?
+            .ok_or_else(|| format!("{error}; es gibt keinen veröffentlichten Stand"))?;
+        let last_live = support_publish::SupportFunding::from_kv(&raw).map_err(|decode_error| {
+            format!("{error}; veröffentlichter Stand unlesbar: {decode_error}")
+        })?;
+        let funding = support_fallback_funding(last_live, source.goal_cents());
+        Ok((
+            funding,
+            Some(format!(
+                "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {} Cent, bis der nächste Abgleich ihn aktualisiert.",
+                funding.raised_cents
+            )),
+        ))
+    }
+
+    pub async fn support_funding_refresh(&self) -> ServerSyncResult<FundingRefresh> {
+        let source = self.supporter_funding.clone();
+        if let Some(missing) = source.missing_config() {
+            return Ok(FundingRefresh::Skipped(missing));
+        }
+        let Ok(_claim) = self.support_panel_lock.try_lock() else {
+            return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        };
+        let fetched = source.funding().await;
+        let options = source.panel_options();
+        let stored_payload_format = self
+            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
+            .await?;
+        if stored_payload_format.as_deref() != Some(support_publish::SUPPORT_PAYLOAD_FORMAT) {
+            return Ok(FundingRefresh::Skipped("Panel noch im alten Format"));
+        }
+        let stored_message_ids = self
+            .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
+            .await?;
+        if stored_message_ids.is_empty() {
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
+        }
+        let Some(live_raw) = self
+            .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
+            .await?
+        else {
+            return Ok(FundingRefresh::Skipped("kein veröffentlichter Monatsstand"));
+        };
+        let live = support_publish::SupportFunding::from_kv(&live_raw).map_err(|error| {
+            ServerSyncError::internal(format!("veröffentlichter Monatsstand unlesbar: {error}"))
+        })?;
+        let Some(options_raw) = self
+            .load_serversync_kv(support_publish::SUPPORT_PANEL_OPTIONS_KEY)
+            .await?
+        else {
+            return Ok(FundingRefresh::Skipped(
+                "keine veröffentlichten Panel-Optionen",
+            ));
+        };
+        let published_options = support_publish::SupportPanelOptions::from_kv(&options_raw)
+            .map_err(|error| {
+                ServerSyncError::internal(format!(
+                    "veröffentlichte Panel-Optionen unlesbar: {error}"
+                ))
+            })?;
+        let funding = match fetched {
+            Ok(funding) => funding,
+            Err(error) => {
+                let fallback = support_fallback_funding(live, source.goal_cents());
+                if fallback == live && published_options == options {
+                    return Err(ServerSyncError::internal(error));
+                }
+                tracing::warn!(
+                    %error,
+                    raised_cents = fallback.raised_cents,
+                    goal_cents = fallback.goal_cents,
+                    "Support: Monatsstand nicht abrufbar; geändertes Ziel oder geänderte Panel-Optionen gehen mit dem veröffentlichten Betrag raus"
+                );
+                fallback
+            }
+        };
+        if live == funding && published_options == options {
+            return Ok(FundingRefresh::Unchanged);
+        }
+        let stored_payload_hash = self
+            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_HASH_KEY)
+            .await?;
+        let stored = support_publish::SupportStoredState {
+            message_ids: &stored_message_ids,
+            payload_format: stored_payload_format.as_deref(),
+            payload_hash: stored_payload_hash.as_deref(),
+        };
+        let current = support_publish::build_support_publish_output(
+            &self.rang_guide_repo_root,
+            &stored,
+            live,
+            &published_options,
+            true,
+        )
+        .map_err(ServerSyncError::internal)?;
+        if !support_publish::support_payload_is_unchanged(&current) {
+            return Ok(FundingRefresh::Skipped(
+                "Panel-Text weicht vom veröffentlichten Stand ab",
+            ));
+        }
+        let next = support_publish::build_support_publish_output(
+            &self.rang_guide_repo_root,
+            &stored,
+            funding,
+            &options,
+            true,
+        )
+        .map_err(ServerSyncError::internal)?;
+        let Some(edits) = support_publish::changed_messages(&current, &next, &stored_message_ids)
+        else {
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
+        };
+        let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
+        for (message_id, message) in edits {
+            if self
+                .edit_support_message(message_id, message)
+                .await?
+                .is_none()
+            {
+                return Ok(FundingRefresh::Skipped("Panel-Nachricht nicht gefunden"));
+            }
+        }
+        self.store_serversync_kv_pairs(&[
+            (
+                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                &next.payload_hash,
+            ),
+            (support_publish::SUPPORT_FUNDING_LIVE_KEY, &funding.to_kv()),
+            (support_publish::SUPPORT_PANEL_OPTIONS_KEY, &options_kv),
+        ])
+        .await?;
+        Ok(FundingRefresh::Updated)
     }
 
     async fn edit_support_message(
@@ -4080,7 +4360,33 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
+        let Ok(_support_claim) = self.support_panel_lock.try_lock() else {
+            return Err(ServerSyncError::bad_request(format!(
+                "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
+            )));
+        };
         let _apply_guard = self.panel_apply_lock.lock().await;
+        let source = self.supporter_funding.clone();
+        let options = source.panel_options();
+        let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
+        let (funding, funding_warning) = match self.support_funding_for_apply(source.as_ref()).await
+        {
+            Ok(found) => found,
+            Err(error) if confirm => {
+                return Err(ServerSyncError::bad_request(format!(
+                    "Support: Monatsstand unbekannt ({error}); Apply blockiert, damit das Panel keinen erfundenen Betrag zeigt."
+                )));
+            }
+            Err(error) => (
+                support_publish::SupportFunding {
+                    raised_cents: 0,
+                    goal_cents: source.goal_cents(),
+                },
+                Some(format!(
+                    "Support: Monatsstand unbekannt ({error}); die Vorschau zeigt 0 €, Bestätigen wird abgelehnt."
+                )),
+            ),
+        };
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
             .await?;
@@ -4092,12 +4398,17 @@ impl ServerSyncOps for ServerSyncService {
             .await?;
         let mut output = support_publish::build_support_publish_output(
             &self.rang_guide_repo_root,
-            &stored_message_ids,
-            stored_payload_format.as_deref(),
-            stored_payload_hash.as_deref(),
+            &support_publish::SupportStoredState {
+                message_ids: &stored_message_ids,
+                payload_format: stored_payload_format.as_deref(),
+                payload_hash: stored_payload_hash.as_deref(),
+            },
+            funding,
+            &options,
             !confirm,
         )
         .map_err(ServerSyncError::bad_request)?;
+        output.warnings.extend(funding_warning);
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
         let scan = self.fetch_support_v2_message_ids(bot_user_id).await?;
@@ -4329,6 +4640,18 @@ impl ServerSyncOps for ServerSyncService {
                 }
             }
         }
+        let funding_kv = output.funding.to_kv();
+        self.store_serversync_kv_pairs(&[
+            (
+                support_publish::SUPPORT_FUNDING_LIVE_KEY,
+                funding_kv.as_str(),
+            ),
+            (
+                support_publish::SUPPORT_PANEL_OPTIONS_KEY,
+                options_kv.as_str(),
+            ),
+        ])
+        .await?;
 
         output.dry_run = false;
         output.repost_required = false;
@@ -9510,6 +9833,26 @@ title = "**📜 Regelwerk · Deutsche Deadlock Community**"
         std::fs::write(banner_path, b"regelwerk-banner").expect("write banner");
     }
 
+    fn build_support_for_test(
+        repo_root: &std::path::Path,
+        message_ids: &[u64],
+        payload_format: Option<&str>,
+        payload_hash: Option<&str>,
+        dry_run: bool,
+    ) -> Result<SupportPublishOutput, String> {
+        support_publish::build_support_publish_output(
+            repo_root,
+            &support_publish::SupportStoredState {
+                message_ids,
+                payload_format,
+                payload_hash,
+            },
+            FixedFundingSource::standard_funding(),
+            &FixedFundingSource::standard_options(),
+            dry_run,
+        )
+    }
+
     fn write_test_support_repo(repo_root: &std::path::Path) {
         let texts_path = repo_root.join(support_publish::SUPPORT_TEXTS_FILE);
         std::fs::create_dir_all(texts_path.parent().expect("texts parent"))
@@ -9518,7 +9861,7 @@ title = "**📜 Regelwerk · Deutsche Deadlock Community**"
             texts_path,
             r#"
 [texts]
-title = "**💜 Server unterstützen**"
+thanks = "Danke fürs Mittragen"
 "#,
         )
         .expect("write texts");
@@ -9828,7 +10171,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn mock_support_output(dry_run: bool) -> SupportPublishOutput {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let stored = [8401, 8402, 8403];
-        let planned = support_publish::build_support_publish_output(
+        let planned = build_support_for_test(
             &repo,
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -9836,7 +10179,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             true,
         )
         .expect("support fixture");
-        let mut output = support_publish::build_support_publish_output(
+        let mut output = build_support_for_test(
             &repo,
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -11550,8 +11893,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let pay_row = pay_children.last().expect("pay buttons");
         assert_eq!(pay_row["type"], 1);
         assert_eq!(
-            pay_row["components"][0]["url"],
-            support_publish::SUPPORT_DONATE_URL_DEFAULT
+            pay_row["components"][0]["custom_id"],
+            support_publish::SUPPORT_BUTTON_BECOME
         );
 
         let confirmed = app
@@ -12159,7 +12502,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let repo = tempfile::tempdir().expect("repo");
         write_test_support_repo(repo.path());
         let stored = [9701_u64, 9702, 9703];
-        let planned = support_publish::build_support_publish_output(
+        let planned = build_support_for_test(
             repo.path(),
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -12210,6 +12553,306 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .iter()
             .all(|message| message.action != "no_op"));
         assert_eq!(output.posted_message_ids.len(), stored.len());
+    }
+
+    fn patches_since(fake: &FakeDiscord, before: usize) -> Vec<String> {
+        fake.state
+            .patch_bodies
+            .lock()
+            .expect("patch bodies")
+            .iter()
+            .skip(before)
+            .map(|(_, body)| body.to_string())
+            .collect()
+    }
+
+    fn patch_count(fake: &FakeDiscord) -> usize {
+        fake.state.patch_bodies.lock().expect("patch bodies").len()
+    }
+
+    async fn delete_serversync_kv_for_test(pool: &PgPool, key: &str) {
+        sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+            .bind(SERVERSYNC_KV_NS)
+            .bind(key)
+            .execute(pool)
+            .await
+            .expect("delete kv");
+    }
+
+    #[tokio::test]
+    async fn support_panel_wartet_nie_auf_die_eigene_sperre_und_meldet_belegt() {
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let claim = service.support_panel_lock.try_lock().expect("frei");
+        let wait = std::time::Duration::from_secs(1);
+
+        let refresh = tokio::time::timeout(wait, service.support_funding_refresh())
+            .await
+            .expect("wartet nicht")
+            .expect("refresh");
+        assert_eq!(refresh, FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        let apply = tokio::time::timeout(wait, service.support_apply(false))
+            .await
+            .expect("wartet nicht");
+        assert!(apply
+            .expect_err("belegt")
+            .to_string()
+            .contains(SUPPORT_PANEL_BUSY));
+        assert_eq!(patch_count(&fake), 0);
+
+        drop(claim);
+        assert!(service.support_panel_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn service_support_monatsziel_und_optionen_folgen_dem_veroeffentlichten_stand() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(
+            42,
+            Vec::new(),
+            vec![
+                FakePostResponse::Ok(9801),
+                FakePostResponse::Ok(9802),
+                FakePostResponse::Ok(9803),
+            ],
+        )
+        .await;
+        let source = Arc::new(FixedFundingSource::standard());
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source.clone(),
+        );
+
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+        );
+        let blocked = service.support_apply(true).await;
+        assert!(blocked.is_err());
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        let dry_run = service.support_apply(false).await.expect("dry-run");
+        assert!(dry_run
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Steam Bot nicht erreichbar")));
+
+        source.set(
+            Ok(FixedFundingSource::standard_funding()),
+            FixedFundingSource::standard_options(),
+        );
+        let published = service.support_apply(true).await.expect("apply");
+        assert_eq!(published.posted_message_ids, vec![9801, 9802, 9803]);
+        let stored_hash = get_serversync_kv(db.pool(), support_publish::SUPPORT_PAYLOAD_HASH_KEY)
+            .await
+            .expect("hash");
+        assert_eq!(stored_hash, published.payload_hash);
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(FixedFundingSource::standard_funding().to_kv().as_str())
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            FixedFundingSource::standard_options().to_kv().ok()
+        );
+
+        delete_serversync_kv_for_test(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY).await;
+        delete_serversync_kv_for_test(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await;
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("kein veröffentlichter Monatsstand")
+        );
+        let repaired = service.support_apply(true).await.expect("second apply");
+        assert_eq!(repaired.payload_hash, stored_hash);
+        assert!(repaired.posted_message_ids.is_empty());
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(FixedFundingSource::standard_funding().to_kv().as_str())
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            FixedFundingSource::standard_options().to_kv().ok()
+        );
+
+        let raised = support_publish::SupportFunding {
+            raised_cents: 5_000,
+            goal_cents: FixedFundingSource::standard_funding().goal_cents,
+        };
+        source.set(Ok(raised), FixedFundingSource::standard_options());
+        let before = patch_count(&fake);
+        let calls_before = fake.state.patch_calls.lock().expect("patch calls").len();
+        let refreshed = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(refreshed, FundingRefresh::Updated);
+        assert_eq!(
+            fake.state.patch_calls.lock().expect("patch calls")[calls_before..],
+            [9803]
+        );
+        assert_eq!(patches_since(&fake, before).len(), 1);
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(raised.to_kv().as_str())
+        );
+        let refreshed_hash =
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PAYLOAD_HASH_KEY).await;
+        assert_ne!(refreshed_hash.as_deref(), Some(stored_hash.as_str()));
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Unchanged
+        );
+
+        let mut changed_tiers = FixedFundingSource::standard_options();
+        changed_tiers.tiers_eur = vec![5, 15];
+        let tier_text = support_publish::format_tier_list(&changed_tiers.tiers_eur);
+        source.set(Ok(raised), changed_tiers.clone());
+        let before = patch_count(&fake);
+        let tiers_refresh = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(tiers_refresh, FundingRefresh::Updated);
+        assert!(patches_since(&fake, before)
+            .iter()
+            .any(|body| body.contains(&tier_text)));
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            changed_tiers.to_kv().ok()
+        );
+
+        let mut without_role = changed_tiers.clone();
+        without_role.role_grant = false;
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            without_role.clone(),
+        );
+        let before = patch_count(&fake);
+        let options_only = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(options_only, FundingRefresh::Updated);
+        assert!(!patches_since(&fake, before).is_empty());
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            without_role.to_kv().ok()
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(raised.to_kv().as_str())
+        );
+        assert!(service.support_funding_refresh().await.is_err());
+
+        let new_goal = raised.goal_cents + 1_000;
+        source.set_goal(new_goal);
+        let goal_text = support_publish::format_euro(new_goal);
+        let before = patch_count(&fake);
+        let goal_only = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(goal_only, FundingRefresh::Updated);
+        assert!(patches_since(&fake, before)
+            .iter()
+            .any(|body| body.contains(&goal_text)));
+        let with_new_goal = support_publish::SupportFunding {
+            raised_cents: raised.raised_cents,
+            goal_cents: new_goal,
+        };
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(with_new_goal.to_kv().as_str())
+        );
+        assert!(service.support_funding_refresh().await.is_err());
+
+        source.set(Ok(with_new_goal), changed_tiers.clone());
+        let before = patch_count(&fake);
+        let restored = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(restored, FundingRefresh::Updated);
+        assert!(!patches_since(&fake, before).is_empty());
+
+        std::fs::write(
+            repo.path().join(support_publish::SUPPORT_TEXTS_FILE),
+            "[texts]\nthanks = \"Danke, dass du mitträgst\"\n",
+        )
+        .expect("rewrite texts");
+        source.set(
+            Ok(support_publish::SupportFunding {
+                raised_cents: 6_000,
+                goal_cents: new_goal,
+            }),
+            changed_tiers,
+        );
+        let before = patch_count(&fake);
+        let text_refresh = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(
+            text_refresh,
+            FundingRefresh::Skipped("Panel-Text weicht vom veröffentlichten Stand ab")
+        );
+        assert_eq!(patch_count(&fake), before);
+    }
+
+    #[tokio::test]
+    async fn service_support_monatsziel_faellt_auf_den_veroeffentlichten_stand_mit_aktuellem_ziel_zurueck(
+    ) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let configured_goal = FixedFundingSource::standard_funding().goal_cents + 1_234;
+        let source = Arc::new(FixedFundingSource::new(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+            configured_goal,
+        ));
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source,
+        );
+        let published = support_publish::SupportFunding {
+            raised_cents: 4_321,
+            goal_cents: FixedFundingSource::standard_funding().goal_cents,
+        };
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            &published.to_kv(),
+        )
+        .await;
+
+        let preview = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(
+            preview.funding,
+            support_publish::SupportFunding {
+                raised_cents: published.raised_cents,
+                goal_cents: configured_goal,
+            }
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("zuletzt veröffentlichten Stand von 4321 Cent")));
+
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            "kaputt",
+        )
+        .await;
+        let unreadable = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(unreadable.funding.raised_cents, 0);
+        assert!(unreadable
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("veröffentlichter Stand unlesbar")));
     }
 
     async fn seed_static_panel_kv(
@@ -12583,7 +13226,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         static_panel_scan_edges!(
             write_test_support_repo,
-            support_publish::build_support_publish_output,
+            build_support_for_test,
             support_apply,
             support_publish::support_message_id_key,
             support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
