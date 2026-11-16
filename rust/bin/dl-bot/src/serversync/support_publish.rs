@@ -63,7 +63,7 @@ pub const SUPPORT_ATTACHMENT_BUDGET: usize = 9;
 pub const SUPPORT_TIER_BUTTON_PREFIX: &str = "support:tier:";
 const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 const SUPPORT_MESSAGE_COUNT: usize = 3;
-const FUNDING_BAR_SEGMENTS: i64 = 20;
+const FUNDING_BAR_SEGMENTS: i64 = 10;
 const BUTTON_LABEL_MAX_CHARS: usize = 80;
 const CUSTOM_ID_MAX_CHARS: usize = 100;
 const TIER_ID_MAX_DIGITS: usize = u64::MAX.ilog10() as usize + 1;
@@ -87,58 +87,43 @@ pub(crate) const SUPPORT_BANNED_COPY: [&str; 6] = [
 pub const SUPPORT_INTRO: &str = "\
 # Server unterstützen\n\
 \n\
-Hier steht, wie du den Server und die Projekte unterstützen kannst. Jeder Weg zählt gleich.";
+Damit trägst du den Server und unsere Projekte mit.";
 pub const SUPPORT_PERKS: &str = "\
-## Was du jetzt bekommst\n\
+## Das bekommst du\n\
 \n\
-**Mit den Streamern zusammen spielen.** Als Unterstützer bist du ein vertrauenswürdiges Mitglied der Community. Du kommst in den Streamer-VC und kannst dort mit den Streamern zusammen zocken.\n\
-\n\
-**Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst.";
+**Streamer-VC.** Zock mit den Streamern zusammen.\n\
+**Rolle Server Unterstützer.** Jeder sieht, dass du den Server mitträgst.";
 pub const SUPPORT_STEAM: &str = "\
-## Steam Bot\n\
+## Als Nächstes\n\
 \n\
-Als Nächstes wird der Steam Bot zur Funktion für Unterstützer. Dann holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.\n\
-\n\
-Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.";
+**Steam Bot.** Holt deine Matches bevorzugt ab, mit ganzer Historie und Rang direkt von Steam.";
 pub const SUPPORT_PLANNED: &str = "\
 ## Was noch kommt\n\
 \n\
-Das ist geplant und noch nicht fertig:\n\
-\n\
-- **Patch-Watchlist.** Du suchst dir Helden und Items aus und bekommst Bescheid, wenn ein Patch genau daran etwas ändert.\n\
-- **Build-Helfer im Deadlock Brain.** Du wählst einen Helden und bekommst passende Items mit einer Erklärung, auch gegen bestimmte Gegner.\n\
-- **Mehr Match-Funktionen im Steam Bot.**\n\
-- **Turniere und Scrims.** Unterstützer testen neue Turnierfunktionen als Erste. Dazu kommen zusätzliche Community-Abende und Fun-Turniere.\n\
-- **Coaching-Material** für Unterstützer.\n\
-- **Mitbestimmen.** Unterstützer stimmen ab, was als Nächstes gebaut wird.";
+**Patch-Watchlist.** Du erfährst, wenn ein Patch deine Helden oder Items ändert.\n\
+**Build-Helfer im Deadlock Brain.** Passende Items für deinen Helden, auch gegen bestimmte Gegner.\n\
+**Turniere.** Neue Turnierfunktionen zuerst testen, dazu Fun-Turniere.\n\
+**Coaching-Material.** Nur für Unterstützer.\n\
+**Mitbestimmen.** Du stimmst ab, was als Nächstes gebaut wird.";
 pub const SUPPORT_FREE: &str = "\
-## Was kostenlos bleibt\n\
+## Bleibt kostenlos\n\
 \n\
-Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.\n\
-\n\
-Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen Vorteil.";
+Mitspieler suchen, Voice-Channels, Community-Abende, reguläre Turniere, Scrims und Coaching.";
 pub const SUPPORT_FUNDING: &str = "\
-## Monatsziel\n\
-\n\
-{balken} {prozent} %\n\
-**{stand} von {ziel} im Monat**\n\
--# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat.";
+**Monatsziel:** {stand} / {ziel}\n\
+{balken}";
 pub const SUPPORT_PAY: &str = "\
-## So kannst du unterstützen\n\
+## So unterstützt du\n\
 \n\
-**Monatlich über Stripe.** {stufen} im Monat.{rolle} Kündigen kannst du jederzeit selbst über den Button unten.\n\
-\n\
-**Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.{rolle}\n\
-\n\
-**Server-Boost.** Zählt vorerst als Unterstützung.{rolle}";
-pub const SUPPORT_TWITCH: &str = "\
-**Twitch-Sub.** Ein Abo bei {kanaele} zählt, genauso ein Abo bei einem Streamer, der den bezahlten Twitch Bot nutzt. Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch.";
+**Monatlich.** {stufen} im Monat, jederzeit kündbar.\n\
+**Einmalig.** Betrag frei wählbar.\n\
+**Server-Boost.** Zählt auch.";
+pub const SUPPORT_TWITCH: &str = "**Twitch-Sub.** Ein Abo bei {kanaele} zählt auch.";
 pub const SUPPORT_THANKS: &str = "Danke, dass du den Server und die Projekte mitträgst ❤️";
 pub const SUPPORT_BECOME_BUTTON_LABEL: &str = "Supporter werden";
 pub const SUPPORT_TIP_BUTTON_LABEL: &str = "Einmalig unterstützen";
 pub const SUPPORT_MANAGE_BUTTON_LABEL: &str = "Abo verwalten oder kündigen";
 pub const SUPPORT_TWITCH_BUTTON_LABEL: &str = "Twitch verbinden";
-const SUPPORT_ROLE_NOTE: &str = " Die Rolle kommt automatisch.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SupportFunding {
@@ -580,22 +565,17 @@ pub fn support_payload_is_unchanged(output: &SupportPublishOutput) -> bool {
 pub fn render_funding_text(template: &str, funding: SupportFunding) -> String {
     template
         .replace("{balken}", &funding_bar(funding))
-        .replace("{prozent}", &funding_percent(funding).to_string())
         .replace("{stand}", &format_euro(funding.raised_cents))
         .replace("{ziel}", &format_euro(funding.goal_cents))
-}
-
-fn funding_percent(funding: SupportFunding) -> i128 {
-    funding_share(funding, 100)
 }
 
 fn funding_bar(funding: SupportFunding) -> String {
     let segments = i128::from(FUNDING_BAR_SEGMENTS);
     let filled = funding_share(funding, segments).min(segments);
     format!(
-        "`{}{}`",
-        "█".repeat(segment_count(filled)),
-        "░".repeat(segment_count(segments - filled))
+        "{}{}",
+        "▰".repeat(segment_count(filled)),
+        "▱".repeat(segment_count(segments - filled))
     )
 }
 
@@ -795,9 +775,8 @@ impl ResolvedSupportConfig {
     }
 }
 
-const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "prozent", "stand", "ziel"];
-const ROLE_PLACEHOLDER: &str = "rolle";
-const PAY_PLACEHOLDERS: &[&str] = &["stufen", ROLE_PLACEHOLDER];
+const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "stand", "ziel"];
+const PAY_PLACEHOLDERS: &[&str] = &["stufen"];
 const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
 
 type PlaceholderCheck<'a> = (
@@ -813,7 +792,6 @@ fn placeholder_warnings(
     options: &SupportPanelOptions,
     warnings: &mut Vec<String>,
 ) {
-    let pay_required = pay_required_placeholders(options.role_grant);
     let checks: [PlaceholderCheck; 9] = [
         (true, &texts.intro, "intro", &[], &[]),
         (options.role_grant, &texts.perks, "perks", &[], &[]),
@@ -827,7 +805,7 @@ fn placeholder_warnings(
             FUNDING_PLACEHOLDERS,
             FUNDING_PLACEHOLDERS,
         ),
-        (true, &texts.pay, "pay", &pay_required, PAY_PLACEHOLDERS),
+        (true, &texts.pay, "pay", PAY_PLACEHOLDERS, PAY_PLACEHOLDERS),
         (
             options.twitch,
             &texts.twitch,
@@ -850,14 +828,6 @@ fn placeholder_warnings(
             ));
         }
     }
-}
-
-fn pay_required_placeholders(role_grant: bool) -> Vec<&'static str> {
-    PAY_PLACEHOLDERS
-        .iter()
-        .copied()
-        .filter(|name| role_grant || *name != ROLE_PLACEHOLDER)
-        .collect()
 }
 
 fn placeholder_names(text: &str) -> Vec<&str> {
@@ -946,20 +916,14 @@ fn main_message(
 }
 
 fn render_pay_text(texts: &ResolvedSupportTexts, options: &SupportPanelOptions) -> String {
-    let role = if options.role_grant {
-        SUPPORT_ROLE_NOTE
-    } else {
-        ""
-    };
     let mut parts = vec![texts
         .pay
-        .replace("{stufen}", &format_tier_list(&options.tiers_eur))
-        .replace("{rolle}", role)];
+        .replace("{stufen}", &format_tier_list(&options.tiers_eur))];
     if options.twitch {
         parts.push(texts.twitch.replace("{kanaele}", &twitch_channel_list()));
     }
     parts.retain(|part| !part.trim().is_empty());
-    parts.join("\n\n")
+    parts.join("\n")
 }
 
 fn pay_message(
@@ -1551,10 +1515,8 @@ enabled = false
                 SUPPORT_STEAM.to_string()
             ]
         );
-        assert!(main_text[1]
-            .starts_with("## Was du jetzt bekommst\n\n**Mit den Streamern zusammen spielen.**"));
-        assert!(main_text[1].contains("vertrauenswürdiges Mitglied"));
-        assert!(main_text[2].contains("deadlock-api.com/patron"));
+        assert!(main_text[1].starts_with("## Das bekommst du\n\n**Streamer-VC.**"));
+        assert!(main_text[2].contains("**Steam Bot.**"));
 
         let benefits = text_contents(&output.messages[1].payload);
         assert_eq!(
@@ -1566,13 +1528,10 @@ enabled = false
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
         assert_eq!(pay_text.len(), 3);
-        assert!(pay_text[0].contains("`██████░░░░░░░░░░░░░░` 30 %"));
-        assert!(pay_text[0].contains("**15 € von 50 € im Monat**"));
+        assert_eq!(pay_text[0], "**Monatsziel:** 15 € / 50 €\n▰▰▰▱▱▱▱▱▱▱");
         assert_eq!(
             pay_text[1],
-            SUPPORT_PAY
-                .replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
-                .replace("{rolle}", SUPPORT_ROLE_NOTE)
+            SUPPORT_PAY.replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
         );
         assert!(!pay_text[1].contains("Steam Plus"));
         assert!(!pay_text[1].contains("Tage"));
@@ -1632,7 +1591,7 @@ enabled = false
                 let rendered = rendered_copy(&output);
                 assert_eq!(rendered.contains("Twitch"), twitch, "twitch={twitch}");
                 assert_eq!(
-                    rendered.contains(SUPPORT_ROLE_NOTE.trim()),
+                    rendered.contains("Rolle"),
                     role_grant,
                     "role_grant={role_grant}"
                 );
@@ -1658,10 +1617,8 @@ enabled = false
         );
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
-        assert!(pay_text[1].ends_with(
-            "Verbinde dafür einmal deinen Twitch-Account über den Button unten, den Rest prüft der Bot automatisch."
-        ));
-        assert!(pay_text[1].contains("Ein Abo bei earlysalty oder dach_lock zählt"));
+        assert!(pay_text[1]
+            .ends_with("\n**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt auch."));
         let custom_ids: Vec<String> = buttons(pay)
             .iter()
             .filter_map(|button| button["custom_id"].as_str().map(str::to_string))
@@ -1696,19 +1653,19 @@ enabled = false
     }
 
     #[test]
-    fn balken_zeigt_betrag_prozent_und_mindestens_ein_segment() {
-        let template = "{balken} {prozent} % {stand} von {ziel}";
+    fn balken_zeigt_betrag_und_mindestens_ein_segment() {
+        let template = "{balken} {stand} von {ziel}";
         assert_eq!(
             render_funding_text(template, funding(0)),
-            "`░░░░░░░░░░░░░░░░░░░░` 0 % 0 € von 50 €"
+            "▱▱▱▱▱▱▱▱▱▱ 0 € von 50 €"
         );
         assert_eq!(
             render_funding_text(template, funding(50)),
-            "`█░░░░░░░░░░░░░░░░░░░` 1 % 0,50 € von 50 €"
+            "▰▱▱▱▱▱▱▱▱▱ 0,50 € von 50 €"
         );
         assert_eq!(
             render_funding_text(template, funding(7550)),
-            "`████████████████████` 151 % 75,50 € von 50 €"
+            "▰▰▰▰▰▰▰▰▰▰ 75,50 € von 50 €"
         );
         let big = SupportFunding {
             raised_cents: 123_456_700,
@@ -1716,7 +1673,7 @@ enabled = false
         };
         assert_eq!(
             render_funding_text(template, big),
-            "`░░░░░░░░░░░░░░░░░░░░` 0 % 1.234.567 € von 0 €"
+            "▱▱▱▱▱▱▱▱▱▱ 1.234.567 € von 0 €"
         );
         let tiny = SupportFunding {
             raised_cents: 500,
@@ -1724,14 +1681,13 @@ enabled = false
         };
         assert_eq!(
             render_funding_text(template, tiny),
-            "`█░░░░░░░░░░░░░░░░░░░` 1 % 5 € von 1.000 €"
+            "▰▱▱▱▱▱▱▱▱▱ 5 € von 1.000 €"
         );
         let huge = SupportFunding {
             raised_cents: i64::MAX,
             goal_cents: 7,
         };
-        assert_eq!(funding_percent(huge), i128::from(i64::MAX) * 100 / 7);
-        assert!(render_funding_text(template, huge).starts_with("`████████████████████` "));
+        assert!(render_funding_text(template, huge).starts_with("▰▰▰▰▰▰▰▰▰▰ "));
     }
 
     #[test]
@@ -1979,7 +1935,8 @@ enabled = false
     #[test]
     fn rollenzusage_haengt_am_vergabeschalter() {
         let granted = pay_text_for(&options());
-        assert_eq!(granted.matches(SUPPORT_ROLE_NOTE.trim()).count(), 3);
+        assert!(!granted.contains("Rolle"), "{granted}");
+        assert!(!granted.contains('{'), "{granted}");
         let manual_options = SupportPanelOptions {
             role_grant: false,
             ..options()
@@ -2009,11 +1966,10 @@ enabled = false
     fn einmalig_nennt_keine_zahlen_die_der_steam_bot_festlegt() {
         let text = pay_text_for(&options());
         let once = text
-            .split("\n\n")
-            .find(|part| part.starts_with("**Einmalig.**"))
-            .expect("Einmalig-Absatz");
+            .lines()
+            .find(|line| line.starts_with("**Einmalig.**"))
+            .expect("Einmalig-Zeile");
         assert!(!once.chars().any(|ch| ch.is_ascii_digit()), "{once}");
-        assert!(once.contains("Zahlungsseite"), "{once}");
         assert!(!text.contains('{'), "{text}");
     }
 
@@ -2025,7 +1981,7 @@ enabled = false
         assert!(warnings.is_empty(), "{warnings:?}");
         texts.funding = "{stand}".to_string();
         placeholder_warnings(&texts, &options(), &mut warnings);
-        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings
             .iter()
             .all(|warning| warning.contains("[texts].funding")));
@@ -2074,10 +2030,7 @@ enabled = false
         placeholder_warnings(&texts, &hidden, &mut warnings);
         assert!(warnings.is_empty(), "{warnings:?}");
         placeholder_warnings(&texts, &options(), &mut warnings);
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("[texts].pay enthält keinen Platzhalter {rolle}")));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings
             .iter()
             .any(|warning| warning
