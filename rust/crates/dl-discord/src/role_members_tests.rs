@@ -4,7 +4,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, PortError> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let member = super::member_fixture;
+    let member = |id: u64, roles: &[&str]| {
+        json!({
+            "user": {"id": id.to_string(), "username": "test", "discriminator": "0", "avatar": null},
+            "roles": roles, "joined_at": "2026-10-08T00:00:00Z", "deaf": false, "mute": false, "flags": 0
+        })
+    };
     let pages = [
         json!([
             {"id":"1","name":"@everyone","color":0,"colors":{"primary_color":0,"secondary_color":null,"tertiary_color":null},"hoist":false,"position":0,"permissions":"0","managed":false,"mentionable":false},

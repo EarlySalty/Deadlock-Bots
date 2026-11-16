@@ -1529,7 +1529,7 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
                 "name": "frage",
                 "description": "Was möchtest du wissen?",
                 "required": true,
-                "max_length": max_question_len,
+                "max_length": max_question_len.min(4000),
             }, {
                 "type": 11,
                 "name": "bild",
@@ -2637,23 +2637,36 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
         role_id: u64,
     ) -> Vec<(u64, String, String, String)> {
         let role = serenity::all::RoleId::new(role_id);
-        match dl_discord::adapter::fetch_all_guild_members(
-            &self.adapter.http,
-            GuildId::new(self.guild_id),
-            dl_discord::adapter::discord_call_timeout(),
-        )
-        .await
-        {
-            Ok(members) => members
-                .iter()
-                .filter(|member| member.roles.contains(&role))
-                .map(coach_member_tuple)
-                .collect(),
-            Err(err) => {
-                tracing::warn!(%err, guild_id = self.guild_id, "Coach-Member-Fetch-Fallback fehlgeschlagen");
-                Vec::new()
+        let guild_id = GuildId::new(self.guild_id);
+        let mut after = None;
+        let mut coaches = Vec::new();
+        loop {
+            let page = match self
+                .adapter
+                .http
+                .get_guild_members(guild_id, Some(1000), after)
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::warn!(%err, guild_id = self.guild_id, "Coach-Member-Fetch-Fallback fehlgeschlagen");
+                    break;
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|member| member.user.id.get());
+            coaches.extend(
+                page.iter()
+                    .filter(|member| member.roles.contains(&role))
+                    .map(coach_member_tuple),
+            );
+            if page.len() < 1000 || after.is_none() {
+                break;
             }
         }
+        coaches
     }
 
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
@@ -3427,16 +3440,26 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             }
         }
 
-        Ok(dl_discord::adapter::fetch_all_guild_members(
-            &self.adapter.http,
-            guild,
-            dl_discord::adapter::discord_call_timeout(),
-        )
-        .await?
-        .into_iter()
-        .filter(|member| member.roles.contains(&role))
-        .map(|member| member.user.id.get())
-        .collect())
+        let mut after = None;
+        let mut ids = Vec::new();
+        loop {
+            let page = self
+                .adapter
+                .http
+                .get_guild_members(guild, Some(1000), after)
+                .await
+                .map_err(|err| err.to_string())?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|member| member.user.id.get());
+            ids.extend(
+                page.into_iter()
+                    .filter(|member| member.roles.contains(&role))
+                    .map(|member| member.user.id.get()),
+            );
+        }
+        Ok(ids)
     }
 
     async fn private_channel_owned_by_user(
@@ -4541,8 +4564,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 .map_err(|err| err.to_string())?;
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = crate::serversync::discord_http_client()
-            .map_err(|err| format!("Coaching-HTTP-Client: {err}"))?
+        let response = reqwest::Client::new()
             .post(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages"
             ))
@@ -4596,14 +4618,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             };
             form = form.part(format!("files[{id}]"), part);
         }
-        let client = match crate::serversync::discord_http_client() {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::warn!(%err, channel_id, message_id, "Coaching: HTTP-Client nicht gebaut");
-                return;
-            }
-        };
-        let response = match client
+        let response = match reqwest::Client::new()
             .patch(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
             ))

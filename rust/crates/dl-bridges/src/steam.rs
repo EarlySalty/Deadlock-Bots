@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_central_db::kv;
-use dl_core::runtime_config::{supporter_wire, STEAM_INVITE_BRIDGE_TIMEOUT_MS};
+use dl_core::runtime_config::{supporter_wire, token_by_names};
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
@@ -22,8 +22,25 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_BRIDGE_TIMEOUT_MS;
-const INVITE_FORWARD_TIMEOUT: Duration = Duration::from_millis(INVITE_FORWARD_TIMEOUT_MS);
+/// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
+/// Freundschafts-Check, dann der Invite), jeder mit bis zu 45 s Budget.
+/// Der Bridge-Timeout muss echt darüber liegen. Bei den ursprünglichen 30 s
+/// brach die Bridge mitten im Vorgang ab, während der Invite-Task bei Steam
+/// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
+/// und der Poller schickte sie später ein zweites Mal.
+const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
+/// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
+/// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
+/// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
+const STEAM_INVITE_WORST_CASE_SECS: u64 = 45 * 2;
+
+// Der Vertrag gilt zur Compile-Zeit: wer das Bridge-Timeout senkt oder das
+// Steam-Budget hebt, bekommt keinen roten Test, sondern gar kein Binary.
+const _: () = assert!(
+    INVITE_FORWARD_TIMEOUT_SECS > STEAM_INVITE_WORST_CASE_SECS,
+    "Bridge-Timeout für /invite liegt unter dem Steam-Worst-Case: die Bridge \
+     bricht ab, während der Invite-Task bei Steam noch läuft"
+);
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
 pub const PANEL_CUSTOM_IDS: [&str; 8] = [
@@ -84,24 +101,12 @@ const ADMIN_COMMANDS: [&str; 6] = [
 
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
-pub use dl_core::runtime_config::token_by_names;
-
 pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     token_by_names(lookup, &[supporter_wire::TWITCH_TOKEN_NAME])
 }
 
 pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     token_by_names(lookup, &supporter_wire::SUPPORTER_TOKEN_NAMES)
-}
-
-pub fn internal_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    token_by_names(lookup, &supporter_wire::STEAM_INTERNAL_TOKEN_NAMES)
-}
-
-fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
-    lookup(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 pub struct SteamBotClient {
@@ -111,10 +116,19 @@ pub struct SteamBotClient {
 }
 
 impl SteamBotClient {
+    /// ENVs wie das Original: STEAM_BOT_API_URL + Token-Kette
+    /// TWITCH_INTERNAL_API_TOKEN → MASTER_BROKER_TOKEN → MAIN_BOT_INTERNAL_TOKEN.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Arc<Self> {
-        let base_url =
-            trimmed(&lookup, "STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
-        Self::new(base_url, token_from_lookup(&lookup))
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let base_url = get("STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        let token = get("TWITCH_INTERNAL_API_TOKEN")
+            .or_else(|| get("MASTER_BROKER_TOKEN"))
+            .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"));
+        Self::new(base_url, token)
     }
 
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
@@ -232,16 +246,20 @@ impl SteamBotClient {
             ("user".into(), json!(target_id)),
         ]);
         let payload = Self::slash_event_payload(bot_id, guild_id, "invite", Some(options));
-        self.post_event("slash_command", payload, INVITE_FORWARD_TIMEOUT)
-            .await
-            .and_then(|value| {
-                value
-                    .get("reply_text")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
+        self.post_event(
+            "slash_command",
+            payload,
+            Duration::from_secs(INVITE_FORWARD_TIMEOUT_SECS),
+        )
+        .await
+        .and_then(|value| {
+            value
+                .get("reply_text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
     }
 
     /// Frische Einmal-Login-URL — öffentlicher Helfer (voice_nudge nutzt ihn).
@@ -712,12 +730,12 @@ fn register_inner(
 
     let spec = |definition: Value| CommandSpec { definition };
     let forward_slash =
-        |wire_name: &'static str, passthrough: &'static [&'static str], timeout: Duration| {
+        |wire_name: &'static str, passthrough: &'static [&'static str], secs: u64| {
             Arc::new(ForwardSlash {
                 client: client.clone(),
                 wire_name,
                 passthrough_options: passthrough,
-                timeout,
+                timeout: Duration::from_secs(secs),
             })
         };
 
@@ -728,7 +746,7 @@ fn register_inner(
             "name": "account_verknüpfen",
             "description": "Zeigt den Steam-OpenID-Link zur Account-Verknüpfung.",
         })),
-        forward_slash("account_verknüpfen", &[], Duration::from_secs(15)),
+        forward_slash("account_verknüpfen", &[], 15),
     );
     router.on_command(
         "steam_rank",
@@ -741,7 +759,7 @@ fn register_inner(
                 "required": false,
             }],
         })),
-        forward_slash("steam_rank", &["target"], Duration::from_secs(60)),
+        forward_slash("steam_rank", &["target"], 60),
     );
     router.on_command(
         "checkrank",
@@ -784,26 +802,22 @@ fn register_inner(
     router.on_command(
         "steam links",
         spec(steam_group.clone()),
-        forward_slash("steam_links", &[], Duration::from_secs(15)),
+        forward_slash("steam_links", &[], 15),
     );
     router.on_command(
         "steam whoami",
         spec(steam_group.clone()),
-        forward_slash("steam_whoami", &["steam"], Duration::from_secs(15)),
+        forward_slash("steam_whoami", &["steam"], 15),
     );
     router.on_command(
         "steam setprimary",
         spec(steam_group.clone()),
-        forward_slash(
-            "steam_setprimary",
-            &["steam", "name"],
-            Duration::from_secs(15),
-        ),
+        forward_slash("steam_setprimary", &["steam", "name"], 15),
     );
     router.on_command(
         "steam unlink",
         spec(steam_group),
-        forward_slash("steam_unlink", &["steam"], Duration::from_secs(15)),
+        forward_slash("steam_unlink", &["steam"], 15),
     );
 
     router.on_command(
@@ -816,7 +830,7 @@ fn register_inner(
                 {"type": 6, "name": "user", "description": "Das Discord-Mitglied, das den Playtest bekommt", "required": true}
             ],
         })),
-        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT),
+        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
     );
     // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     for (name, description) in [
@@ -841,11 +855,9 @@ fn register_inner(
                 "default_member_permissions": "8",
             })),
             match name {
-                "steam_rank_sync" => {
-                    forward_slash("steam_rank_sync", &[], Duration::from_secs(180))
-                }
-                "subrank_sync" => forward_slash("subrank_sync", &[], Duration::from_secs(180)),
-                _ => forward_slash("sync_steam_friends", &[], Duration::from_secs(180)),
+                "steam_rank_sync" => forward_slash("steam_rank_sync", &[], 180),
+                "subrank_sync" => forward_slash("subrank_sync", &[], 180),
+                _ => forward_slash("sync_steam_friends", &[], 180),
             },
         );
     }
@@ -1569,13 +1581,12 @@ mod tests {
         );
     }
 
-    fn assert_follows_name_order(
-        names: &[&str],
-        read: impl Fn(&dyn Fn(&str) -> Option<String>) -> Option<String>,
-    ) {
+    #[test]
+    fn supporter_token_follows_the_shared_name_order() {
+        let names = supporter_wire::SUPPORTER_TOKEN_NAMES;
         for first in 0..names.len() {
             let answering = &names[first..];
-            let token = read(&|key| {
+            let token = token_from_lookup(|key| {
                 answering
                     .iter()
                     .position(|name| *name == key)
@@ -1583,26 +1594,13 @@ mod tests {
             });
             assert_eq!(token, Some(format!("value-{first}")), "{}", names[first]);
         }
-        let blank_first = read(&|key| match names.iter().position(|name| *name == key) {
-            Some(0) => Some("   ".to_string()),
-            Some(index) => Some(format!("value-{index}")),
-            None => None,
-        });
+        let blank_first =
+            token_from_lookup(|key| match names.iter().position(|name| *name == key) {
+                Some(0) => Some("   ".to_string()),
+                Some(index) => Some(format!("value-{index}")),
+                None => None,
+            });
         assert_eq!(blank_first.as_deref(), Some("value-1"));
-        assert_eq!(read(&|_| None), None);
-    }
-
-    #[test]
-    fn supporter_token_follows_the_shared_name_order() {
-        assert_follows_name_order(&supporter_wire::SUPPORTER_TOKEN_NAMES, |lookup| {
-            token_from_lookup(lookup)
-        });
-    }
-
-    #[test]
-    fn steam_internal_token_follows_the_shared_name_order() {
-        assert_follows_name_order(&supporter_wire::STEAM_INTERNAL_TOKEN_NAMES, |lookup| {
-            internal_token_from_lookup(lookup)
-        });
+        assert_eq!(token_from_lookup(|_| None), None);
     }
 }
