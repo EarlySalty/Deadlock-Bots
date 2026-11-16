@@ -25,9 +25,9 @@ All buttons are interactive (custom_id), none is a link button:
 
 ## Funding
 
-The monthly amount on the payment card comes from the Steam Bot route `/supporter/v1/funding`. A subscription counts while its row in `core.supporter_sources` is active. A one-off tip (row `source = stripe`, `source_ref = tip:<payment intent>`) counts in the Europe/Berlin calendar month of its payment time `paid_at` and grants the supporter role for 31 days from that time (`TIP_VALID_DAYS` in the Steam Bot), so its row carries `valid_until = paid_at + 31 days`. A tip paid on the last day of a month therefore counts for that month only, while the role stays for 31 days. `paid_at` comes from migration `20261116130000_supporter_sources_tip_paid_at.sql`, which backfills older tip rows from `updated_at`. The Steam Bot funding query reads `paid_at`, not `updated_at`, which stays the time the writer last confirmed the row.
+The monthly amount on the payment card comes from the Steam Bot route `/supporter/v1/funding`. A subscription counts while its row in `core.supporter_sources` is active. A one-off tip (row `source = stripe`, `source_ref = tip:<payment intent>`) counts in the Europe/Berlin calendar month of its payment time `paid_at` and grants the supporter role for 31 days from that time (`TIP_VALID_DAYS` in the Steam Bot), so its row carries `valid_until = paid_at + 31 days`. A tip paid on the last day of a month therefore counts for that month only, while the role stays for 31 days. `paid_at` comes from migration `20261116130000_supporter_sources_tip_paid_at.sql`, which backfills older tip rows from `updated_at`. The Steam Bot must write `paid_at` with every tip and read it for the funding month, not `updated_at`, which stays the time the writer last confirmed the row.
 
-dl-bot calls the Steam Bot supporter routes with the first non-empty token of `supporter_wire::SUPPORTER_TOKEN_NAMES` (`TWITCH_INTERNAL_API_TOKEN`, `MASTER_BROKER_TOKEN`, `MAIN_BOT_INTERNAL_TOKEN`); the Steam Bot reads the same constant.
+dl-bot calls the Steam Bot supporter routes with the first non-empty token of `supporter_wire::SUPPORTER_TOKEN_NAMES` (`TWITCH_INTERNAL_API_TOKEN`, `MASTER_BROKER_TOKEN`, `MAIN_BOT_INTERNAL_TOKEN`); the Steam Bot must accept the same names in the same order by reading this constant.
 
 ## Roles
 
