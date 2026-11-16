@@ -1069,19 +1069,32 @@ mod tests {
         ] {
             assert_eq!(cadence(Duration::from_secs(interval)), expected);
         }
-        for (configured, expected) in [(0, 60), (59, 60), (86_401, 86_400), (u64::MAX, 86_400)] {
-            let config = config_from(
-                dl_core::runtime_config::CommunityOptions {
+        let range = dl_core::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE;
+        for configured in [*range.start(), 300, *range.end()] {
+            let community = dl_core::runtime_config::CommunityOptions {
+                supporter_sync_interval_seconds: Some(configured),
+                ..Default::default()
+            };
+            let runtime = dl_core::runtime_config::RuntimeConfig {
+                community: community.clone(),
+                ..Default::default()
+            };
+            assert!(runtime.validate().is_ok(), "{configured}");
+            assert_eq!(
+                config_from(community, |_| None).interval,
+                Duration::from_secs(configured),
+                "{configured}"
+            );
+        }
+        for configured in [0, *range.start() - 1, *range.end() + 1, u64::MAX] {
+            let runtime = dl_core::runtime_config::RuntimeConfig {
+                community: dl_core::runtime_config::CommunityOptions {
                     supporter_sync_interval_seconds: Some(configured),
                     ..Default::default()
                 },
-                |_| None,
-            );
-            assert_eq!(
-                config.interval,
-                Duration::from_secs(expected),
-                "{configured}"
-            );
+                ..Default::default()
+            };
+            assert!(runtime.validate().is_err(), "{configured}");
         }
         let off = RoleNote {
             grant: false,
