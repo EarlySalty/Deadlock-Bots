@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_central_db::kv;
+use dl_core::runtime_config::{
+    STEAM_INVITE_TASK_WAIT_MS, STEAM_INVITE_TIMEOUT_MS_RANGE, STEAM_INVITE_WORST_CASE_MS,
+};
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
@@ -21,24 +24,14 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
-/// Freundschafts-Check, dann der Invite), jeder mit bis zu 45 s Budget.
-/// Der Bridge-Timeout muss echt darüber liegen. Bei den ursprünglichen 30 s
-/// brach die Bridge mitten im Vorgang ab, während der Invite-Task bei Steam
-/// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
-/// und der Poller schickte sie später ein zweites Mal.
-const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
-/// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
-/// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
-/// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
-const STEAM_INVITE_WORST_CASE_SECS: u64 = 45 * 2;
+const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_WORST_CASE_MS + STEAM_INVITE_TASK_WAIT_MS;
+const INVITE_FORWARD_TIMEOUT: Duration = Duration::from_millis(INVITE_FORWARD_TIMEOUT_MS);
 
-// Der Vertrag gilt zur Compile-Zeit: wer das Bridge-Timeout senkt oder das
-// Steam-Budget hebt, bekommt keinen roten Test, sondern gar kein Binary.
 const _: () = assert!(
-    INVITE_FORWARD_TIMEOUT_SECS > STEAM_INVITE_WORST_CASE_SECS,
-    "Bridge-Timeout für /invite liegt unter dem Steam-Worst-Case: die Bridge \
-     bricht ab, während der Invite-Task bei Steam noch läuft"
+    INVITE_FORWARD_TIMEOUT_MS >= *STEAM_INVITE_TIMEOUT_MS_RANGE.start()
+        && INVITE_FORWARD_TIMEOUT_MS <= *STEAM_INVITE_TIMEOUT_MS_RANGE.end(),
+    "Bridge-Timeout für /invite liegt nicht über dem Steam-Worst-Case oder überlebt \
+     das Discord-Interaktions-Token nicht"
 );
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
@@ -244,20 +237,16 @@ impl SteamBotClient {
             ("user".into(), json!(target_id)),
         ]);
         let payload = Self::slash_event_payload(bot_id, guild_id, "invite", Some(options));
-        self.post_event(
-            "slash_command",
-            payload,
-            Duration::from_secs(INVITE_FORWARD_TIMEOUT_SECS),
-        )
-        .await
-        .and_then(|value| {
-            value
-                .get("reply_text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
+        self.post_event("slash_command", payload, INVITE_FORWARD_TIMEOUT)
+            .await
+            .and_then(|value| {
+                value
+                    .get("reply_text")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| "Der Invite-Event hat keine Antwort geliefert".into())
     }
 
     /// Frische Einmal-Login-URL — öffentlicher Helfer (voice_nudge nutzt ihn).
@@ -728,12 +717,12 @@ fn register_inner(
 
     let spec = |definition: Value| CommandSpec { definition };
     let forward_slash =
-        |wire_name: &'static str, passthrough: &'static [&'static str], secs: u64| {
+        |wire_name: &'static str, passthrough: &'static [&'static str], timeout: Duration| {
             Arc::new(ForwardSlash {
                 client: client.clone(),
                 wire_name,
                 passthrough_options: passthrough,
-                timeout: Duration::from_secs(secs),
+                timeout,
             })
         };
 
@@ -744,7 +733,7 @@ fn register_inner(
             "name": "account_verknüpfen",
             "description": "Zeigt den Steam-OpenID-Link zur Account-Verknüpfung.",
         })),
-        forward_slash("account_verknüpfen", &[], 15),
+        forward_slash("account_verknüpfen", &[], Duration::from_secs(15)),
     );
     router.on_command(
         "steam_rank",
@@ -757,7 +746,7 @@ fn register_inner(
                 "required": false,
             }],
         })),
-        forward_slash("steam_rank", &["target"], 60),
+        forward_slash("steam_rank", &["target"], Duration::from_secs(60)),
     );
     router.on_command(
         "checkrank",
@@ -800,22 +789,26 @@ fn register_inner(
     router.on_command(
         "steam links",
         spec(steam_group.clone()),
-        forward_slash("steam_links", &[], 15),
+        forward_slash("steam_links", &[], Duration::from_secs(15)),
     );
     router.on_command(
         "steam whoami",
         spec(steam_group.clone()),
-        forward_slash("steam_whoami", &["steam"], 15),
+        forward_slash("steam_whoami", &["steam"], Duration::from_secs(15)),
     );
     router.on_command(
         "steam setprimary",
         spec(steam_group.clone()),
-        forward_slash("steam_setprimary", &["steam", "name"], 15),
+        forward_slash(
+            "steam_setprimary",
+            &["steam", "name"],
+            Duration::from_secs(15),
+        ),
     );
     router.on_command(
         "steam unlink",
         spec(steam_group),
-        forward_slash("steam_unlink", &["steam"], 15),
+        forward_slash("steam_unlink", &["steam"], Duration::from_secs(15)),
     );
 
     router.on_command(
@@ -828,7 +821,7 @@ fn register_inner(
                 {"type": 6, "name": "user", "description": "Das Discord-Mitglied, das den Playtest bekommt", "required": true}
             ],
         })),
-        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
+        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT),
     );
     // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     for (name, description) in [
@@ -853,9 +846,11 @@ fn register_inner(
                 "default_member_permissions": "8",
             })),
             match name {
-                "steam_rank_sync" => forward_slash("steam_rank_sync", &[], 180),
-                "subrank_sync" => forward_slash("subrank_sync", &[], 180),
-                _ => forward_slash("sync_steam_friends", &[], 180),
+                "steam_rank_sync" => {
+                    forward_slash("steam_rank_sync", &[], Duration::from_secs(180))
+                }
+                "subrank_sync" => forward_slash("subrank_sync", &[], Duration::from_secs(180)),
+                _ => forward_slash("sync_steam_friends", &[], Duration::from_secs(180)),
             },
         );
     }
