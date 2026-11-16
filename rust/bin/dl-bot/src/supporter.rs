@@ -12,6 +12,7 @@ use dl_core::runtime_config::{
     CommunityOptions, HTTP_DEFAULT_REQUEST_TIMEOUT_MS, SUPPORTER_CUTOVER_GRACE_DAYS,
     SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS, SUPPORTER_DEFAULT_MAX_REVOKES,
     SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS, SUPPORTER_DEFAULT_TIERS_EUR,
+    SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE,
 };
 
 use crate::serversync::support_publish::{SupportFunding, SupportPanelOptions};
@@ -70,7 +71,11 @@ impl SupporterConfig {
             interval: Duration::from_secs(
                 community
                     .supporter_sync_interval_seconds
-                    .unwrap_or(SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS),
+                    .unwrap_or(SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS)
+                    .clamp(
+                        *SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start(),
+                        *SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end(),
+                    ),
             ),
             goal_cents: community
                 .supporter_funding_goal_cents

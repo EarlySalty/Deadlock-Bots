@@ -67,7 +67,7 @@ impl RoleNote {
 }
 
 fn cadence(interval: Duration) -> String {
-    let seconds = interval.as_secs().max(1);
+    let seconds = interval.as_secs();
     let (count, one, many) = if seconds % 3600 == 0 {
         (seconds / 3600, "Stunde", "Stunden")
     } else if seconds % 60 == 0 {
@@ -944,6 +944,20 @@ mod tests {
             (90, "alle 90 Sekunden"),
         ] {
             assert_eq!(cadence(Duration::from_secs(interval)), expected);
+        }
+        for (configured, expected) in [(0, 60), (59, 60), (86_401, 86_400), (u64::MAX, 86_400)] {
+            let config = config_from(
+                dl_core::runtime_config::CommunityOptions {
+                    supporter_sync_interval_seconds: Some(configured),
+                    ..Default::default()
+                },
+                |_| None,
+            );
+            assert_eq!(
+                config.interval,
+                Duration::from_secs(expected),
+                "{configured}"
+            );
         }
         let off = RoleNote {
             grant: false,
