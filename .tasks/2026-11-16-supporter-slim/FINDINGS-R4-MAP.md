@@ -1,13 +1,13 @@
 # Supporter P1 slim: round-4 finding map
 
-Findings 158 to 260 of `p1-slim-r3b-findings.txt` (gate run `gate-p1-slim-r3b.log`), each with its class and the commit that fixes it. A finding listed twice is fixed in parts by both commits.
+Findings 157 to 260 of `p1-slim-r3b-findings.txt` (gate run `gate-p1-slim-r3b.log`), each with its class and the commit that fixes it. A finding listed twice is fixed in parts by both commits. 157 is the last hook line of the file (`adapter.rs::member_json`, stale_state); the stalled member cursor it names stops through `next_page_cursor` since 09e742f6, tested by `mitgliederliste_bricht_bei_haengender_oder_wiederholter_seite_ohne_teilstand_ab`.
 
 | Class | Defect family | Commit | Findings |
 |---|---|---|---|
 | 1 | fix commits without a true four-layer Ursache block | 617e8234, 5d191ec8 (rewords of 0f2dd3f8, 59a0ac5f) | 167, 193, 244 |
 | 2/8 | dangling links and unreadable optional files reported as absent | 756dad7f (182 finished in e05d5e31) | 158, 164, 165, 168, 169, 171, 172, 173, 174, 179, 180, 182, 184, 185, 186, 187, 188, 189, 191, 199, 200, 201, 207, 210, 213, 214, 258, 259 |
 | 3 | tip paid_at time encoding and month boundary | afd65c7b | 160, 161, 162, 238, 239, 241, 242, 243, 260 |
-| 4/6 | unbounded waits and cursor pagers | 09e742f6 | 159, 166, 170, 175, 176, 255, 256, 257 |
+| 4/6 | unbounded waits and cursor pagers | 09e742f6 | 157, 159, 166, 170, 175, 176, 255, 256, 257 |
 | 5 | literal bounds restated next to their constant | 22a0cc1f | 246, 247, 250, 251, 252, 254 |
 | 7 | token name chains copied per bridge | 34841138 (Ursache of 0f2dd3f8 part in 617e8234) | 216, 220, 221, 222, 224, 226, 227, 234, 235, 237 |
 | 9 | supporter tick: privacy gate, role failures, empty member list | 9fc9bca1 | 215, 217, 229, 230, 231, 232, 233 |
