@@ -171,6 +171,11 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 "runtime.community.supporter_sync_interval_seconds" => {
                     bounds = Some(range_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE))
                 }
+                SUPPORTER_TIERS_PATH => {
+                    bounds = Some(range_bounds(
+                        &(rc::SUPPORTER_TIER_MIN_EUR..=rc::SUPPORTER_TIER_MAX_EUR),
+                    ))
+                }
                 "runtime.community.supporter_funding_goal_cents" => {
                     bounds = Some((
                         *rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start(),
@@ -377,9 +382,27 @@ pub fn normalize(
                 _ => return Err(invalid()),
             }
         };
+        if path == SUPPORTER_TIERS_PATH && !supporter_tiers_allowed(&normalized) {
+            return Err(CatalogError(
+                "Die Unterstützer-Stufen passen nicht: Anzahl, aufsteigende Reihenfolge und Beträge stehen im Hilfetext.",
+            ));
+        }
         result.insert(path.clone(), normalized);
     }
     Ok(result)
+}
+
+const SUPPORTER_TIERS_PATH: &str = "runtime.community.supporter_tiers_eur";
+
+fn supporter_tiers_allowed(value: &Value) -> bool {
+    match value.as_array() {
+        None => value.is_null(),
+        Some(entries) => entries
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .is_some_and(|tiers| rc::supporter_tiers_valid(&tiers)),
+    }
 }
 
 fn toml_value(value: &Value) -> Result<toml_edit::Value, CatalogError> {
@@ -484,6 +507,105 @@ pub fn apply(
 mod tests {
     use super::*;
     use serde_json::json;
+    fn supporter_field(path: &str) -> Field {
+        crate::admin_settings::fields()
+            .into_iter()
+            .find(|field| field.path == path)
+            .unwrap_or_else(|| panic!("{path} fehlt im Katalog"))
+    }
+    #[test]
+    fn unterstuetzer_hilfetexte_und_grenzen_folgen_den_konstanten() {
+        let expected = [
+            (
+                "runtime.community.supporter_role_sync_max_revokes",
+                format!(
+                    "Standard ist {}, höchstens {}. Bei {} wird niemandem",
+                    rc::SUPPORTER_DEFAULT_MAX_REVOKES,
+                    rc::SUPPORTER_MAX_REVOKES_RANGE.end(),
+                    rc::SUPPORTER_MAX_REVOKES_RANGE.start()
+                ),
+                rc::SUPPORTER_MAX_REVOKES_RANGE.start().to_string(),
+                rc::SUPPORTER_MAX_REVOKES_RANGE.end().to_string(),
+            ),
+            (
+                "runtime.community.supporter_sync_interval_seconds",
+                format!(
+                    "Standard ist {}, mindestens {}, höchstens {}.",
+                    rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
+                    rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start(),
+                    rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end()
+                ),
+                rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start().to_string(),
+                rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end().to_string(),
+            ),
+            (
+                "runtime.community.supporter_funding_goal_cents",
+                format!(
+                    "Standard ist {}, also {} €. Erlaubt sind {} bis {}.",
+                    rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+                    rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100,
+                    rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start(),
+                    rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end()
+                ),
+                rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().to_string(),
+                rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().to_string(),
+            ),
+            (
+                "runtime.community.supporter_tiers_eur",
+                format!(
+                    "Standard ist {}. Mindestens eine und höchstens {} Stufen, aufsteigend, jede mindestens {} € und höchstens {} €.",
+                    rc::SUPPORTER_DEFAULT_TIERS_EUR
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    rc::SUPPORTER_MAX_TIERS,
+                    rc::SUPPORTER_TIER_MIN_EUR,
+                    rc::SUPPORTER_TIER_MAX_EUR
+                ),
+                rc::SUPPORTER_TIER_MIN_EUR.to_string(),
+                rc::SUPPORTER_TIER_MAX_EUR.to_string(),
+            ),
+        ];
+        for (path, help, min, max) in expected {
+            let field = supporter_field(path);
+            assert!(field.writable, "{path}");
+            assert!(field.help.contains(&help), "{path}: {}", field.help);
+            assert_eq!(field.min.as_deref(), Some(min.as_str()), "{path}");
+            assert_eq!(field.max.as_deref(), Some(max.as_str()), "{path}");
+        }
+    }
+    #[test]
+    fn unterstuetzer_stufen_ausserhalb_der_grenzen_werden_abgelehnt() {
+        let fields = vec![supporter_field("runtime.community.supporter_tiers_eur")];
+        let change = |tiers: Value| {
+            normalize(
+                &fields,
+                &BTreeMap::from([("runtime.community.supporter_tiers_eur".into(), tiers)]),
+            )
+        };
+        let text = |eur: u64| eur.to_string();
+        let rejected = |tiers: Value| {
+            change(tiers)
+                .err()
+                .map(|error| error.0)
+                .is_some_and(|message| message.starts_with("Die Unterstützer-Stufen passen nicht"))
+        };
+        assert!(rejected(json!([])));
+        assert!(rejected(json!([text(10), text(5)])));
+        assert!(rejected(json!([text(5), text(5)])));
+        assert!(rejected(json!((0..=rc::SUPPORTER_MAX_TIERS as u64)
+            .map(|step| text(rc::SUPPORTER_TIER_MIN_EUR + step))
+            .collect::<Vec<_>>())));
+        assert!(change(Value::Null).is_ok());
+        assert!(change(json!([text(rc::SUPPORTER_TIER_MIN_EUR - 1)])).is_err());
+        assert!(change(json!([text(rc::SUPPORTER_TIER_MAX_EUR + 1)])).is_err());
+        assert!(change(json!([
+            text(rc::SUPPORTER_TIER_MIN_EUR),
+            text(rc::SUPPORTER_TIER_MAX_EUR)
+        ]))
+        .is_ok());
+    }
     const SPEC: &str = "role\tOption<u64>\tTest\tRolle\tedit\tTest\nprotected\tString\tTest\tGeschützt\tprotected\tInfisical\n";
     #[test]
     fn exact_integers_and_secret_boundary() {
