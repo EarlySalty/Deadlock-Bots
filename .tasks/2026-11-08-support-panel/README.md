@@ -12,7 +12,7 @@ Three Components V2 messages in `#server-support`, built by `/serversync/support
 
 ## Texts
 
-`assets/support_texts.toml` holds empty `[texts]` and `[buttons]` tables, so every card text and button label comes from the compile defaults in `support_publish.rs`. A field set in the file replaces its default. Fields of the old panel (`title`, `boost`, `donation`, `benefits`, `why`, `ai`, the `donate` and `stripe` buttons, `[urls]`, `[stripe]`) still parse, are not shown and produce a warning. A missing file falls back to the defaults with a warning; any other read or parse error stops the apply.
+`assets/support_texts.toml` holds empty `[texts]` and `[buttons]` tables, so every card text and button label comes from the compile defaults in `support_publish.rs`. A field set in the file replaces its default. Fields of the old panel (`title`, `boost`, `donation`, `benefits`, `why`, `ai`, `brain`, `discord`, the `donate` and `stripe` buttons, `[urls]`, `[stripe]`) still parse, are not shown and produce a warning. A missing file falls back to the defaults with a warning; any other read or parse error stops the apply.
 
 Placeholders are filled per block:
 
@@ -20,7 +20,7 @@ Placeholders are filled per block:
 - `pay`: `{stufen}`
 - `twitch`: `{kanaele}`
 
-For every shown block the check warns about a placeholder of that block that the text leaves out and about every other `{name}` made of letters, digits and underscores, which would appear literally in the panel.
+For every shown block the check warns about a placeholder of that block that the text leaves out and about every other `{name}` made of letters, digits and underscores and no longer than `PLACEHOLDER_NAME_MAX_CHARS`, which would appear literally in the panel.
 
 ## Banner
 
