@@ -43,7 +43,7 @@ async fn seed_row(pool: &PgPool, discord_id: i64, source: &str, source_ref: &str
 async fn block_member(pool: &PgPool, discord_id: i64, deleted: bool) -> TestResult {
     sqlx::query(
         "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-         VALUES ($1, TRUE, CASE WHEN $2 THEN now() END, 'test', now())",
+         VALUES ($1, NOT $2, CASE WHEN $2 THEN now() END, 'test', now())",
     )
     .bind(discord_id)
     .bind(deleted)
