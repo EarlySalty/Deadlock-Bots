@@ -560,8 +560,10 @@ impl InviteLoungeWatcher {
                 code,
                 existing_hint.unwrap_or(false),
                 now,
-                (self.clock_millis)(),
-                self.running.contains(event.author_id),
+                DispatchClock {
+                    now_millis: (self.clock_millis)(),
+                    running: self.running.contains(event.author_id),
+                },
             );
             if wants_hint
                 && existing_hint.is_none()
@@ -1448,6 +1450,21 @@ enum RequestKind {
     Room,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DispatchClock {
+    now_millis: i64,
+    running: bool,
+}
+
+impl DispatchClock {
+    fn active(self, started_at_millis: Option<i64>) -> bool {
+        self.running
+            || started_at_millis.is_some_and(|started| {
+                self.now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
+            })
+    }
+}
+
 fn update_state(
     state: &mut LoungeState,
     event: &LoungeMessage,
@@ -1455,8 +1472,7 @@ fn update_state(
     code: Option<String>,
     existing_hint: bool,
     now: i64,
-    now_millis: i64,
-    dispatch_running: bool,
+    dispatch: DispatchClock,
 ) -> bool {
     state.last_seen = event.message_id;
     let request_before = state.request.as_ref().map(|request| request.message_id);
@@ -1477,10 +1493,7 @@ fn update_state(
                 .is_some_and(|finished| event.created_at_millis <= finished);
         let replace = state.request.as_ref().is_none_or(|request| {
             let active_dispatch = request.phase == Phase::Dispatching
-                && (dispatch_running
-                    || state.dispatch_started_at_millis.is_some_and(|started| {
-                        now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
-                    }));
+                && dispatch.active(state.dispatch_started_at_millis);
             !active_dispatch
                 && !arrived_during_dispatch
                 && (direct || request.phase == Phase::WaitingForCode)
@@ -1992,8 +2005,10 @@ mod tests {
                 None,
                 false,
                 at / 1000,
-                at,
-                running,
+                DispatchClock {
+                    now_millis: at,
+                    running,
+                },
             );
             let expected = if replaced { 3 } else { 1 };
             assert_eq!(
