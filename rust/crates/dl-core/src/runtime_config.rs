@@ -34,6 +34,26 @@ pub const STEAM_INVITE_WORST_CASE_MS: u64 = 2 * STEAM_INVITE_TASK_WAIT_MS;
 pub const STEAM_INVITE_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
     STEAM_INVITE_WORST_CASE_MS + 1..=DISCORD_INTERACTION_TOKEN_MS;
 
+pub mod supporter_wire {
+    pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
+    pub const TIP_PATH: &str = "/supporter/v1/tip";
+    pub const PORTAL_PATH: &str = "/supporter/v1/portal";
+    pub const FUNDING_PATH: &str = "/supporter/v1/funding";
+    pub const TWITCH_CONNECT_PATH: &str = "/internal/supporter/twitch-connect-link";
+    pub const DISCORD_ID_FIELD: &str = "discord_id";
+    pub const TIER_FIELD: &str = "tier";
+    pub const URL_FIELD: &str = "url";
+    pub const ERROR_FIELD: &str = "error";
+    pub const FUNDING_CENTS_FIELD: &str = "monthly_cents_active";
+    pub const NO_SUBSCRIPTION: &str = "no_subscription";
+    pub const ALREADY_SUBSCRIBED: &str = "already_subscribed";
+    pub const UNKNOWN_TIER: &str = "unknown_tier";
+    pub const SUPPORTER_NOT_CONFIGURED: &str = "supporter_not_configured";
+    pub const TIP_NOT_CONFIGURED: &str = "tip_not_configured";
+    pub const PRICES_UNVERIFIED: &str = "prices_unverified";
+    pub const AUTH_NOT_CONFIGURED: &str = "auth_not_configured";
+}
+
 pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
     !tiers.is_empty()
         && tiers.len() <= SUPPORTER_MAX_TIERS

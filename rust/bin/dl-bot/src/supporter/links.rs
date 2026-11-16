@@ -5,6 +5,10 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 
+use dl_core::runtime_config::supporter_wire::{
+    self as wire, CHECKOUT_PATH, DISCORD_ID_FIELD, FUNDING_PATH, PORTAL_PATH, TIER_FIELD, TIP_PATH,
+    TWITCH_CONNECT_PATH,
+};
 use dl_core::runtime_config::{SUPPORTER_MAX_TIERS, SUPPORTER_TWITCH_CHANNELS};
 
 use super::{FundingSource, SupporterConfig};
@@ -17,11 +21,6 @@ use crate::serversync::support_publish::{
 const INTERNAL_TOKEN_HEADER: &str = crate::serversync::TOKEN_HEADER;
 const ACTION_ROW_MAX_BUTTONS: usize = 5;
 const _: () = assert!(SUPPORTER_MAX_TIERS <= ACTION_ROW_MAX_BUTTONS);
-const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
-const TIP_PATH: &str = "/supporter/v1/tip";
-const PORTAL_PATH: &str = "/supporter/v1/portal";
-const FUNDING_PATH: &str = "/supporter/v1/funding";
-const TWITCH_CONNECT_PATH: &str = "/internal/supporter/twitch-connect-link";
 const PUBLIC_ORIGIN: &str = "https://deutsche-deadlock-community.de/";
 const STRIPE_HOST_SUFFIX: &str = ".stripe.com";
 const LINK_URL_MAX_LEN: usize = 512;
@@ -221,18 +220,18 @@ impl SupporterLinks for HttpSupporterLinks {
     async fn checkout(&self, discord_id: u64, tier: u64) -> LinkResult {
         self.steam_link(
             CHECKOUT_PATH,
-            json!({ "discord_id": discord_id, "tier": tier }),
+            json!({ DISCORD_ID_FIELD: discord_id, TIER_FIELD: tier }),
         )
         .await
     }
 
     async fn tip(&self, discord_id: u64) -> LinkResult {
-        self.steam_link(TIP_PATH, json!({ "discord_id": discord_id }))
+        self.steam_link(TIP_PATH, json!({ DISCORD_ID_FIELD: discord_id }))
             .await
     }
 
     async fn portal(&self, discord_id: u64) -> LinkResult {
-        self.steam_link(PORTAL_PATH, json!({ "discord_id": discord_id }))
+        self.steam_link(PORTAL_PATH, json!({ DISCORD_ID_FIELD: discord_id }))
             .await
     }
 
@@ -246,7 +245,7 @@ impl SupporterLinks for HttpSupporterLinks {
                 base,
                 token,
                 TWITCH_CONNECT_PATH,
-                json!({ "discord_id": discord_id }),
+                json!({ DISCORD_ID_FIELD: discord_id }),
             )
             .await?;
         link_outcome(TWITCH_CONNECT_PATH, status, &body, is_public_url)
@@ -293,10 +292,10 @@ impl FundingSource for HttpSupporterLinks {
 
 fn parse_funding(body: &Value, goal_cents: i64) -> Result<SupportFunding, String> {
     let raised_cents = body
-        .get("monthly_cents_active")
+        .get(wire::FUNDING_CENTS_FIELD)
         .and_then(Value::as_i64)
         .filter(|cents| *cents >= 0)
-        .ok_or_else(|| format!("{FUNDING_PATH} ohne monthly_cents_active"))?;
+        .ok_or_else(|| format!("{FUNDING_PATH} ohne {}", wire::FUNDING_CENTS_FIELD))?;
     Ok(SupportFunding {
         raised_cents,
         goal_cents,
@@ -318,7 +317,9 @@ async fn read_reply(
 }
 
 fn error_code(body: &Value) -> &str {
-    body.get("error").and_then(Value::as_str).unwrap_or("")
+    body.get(wire::ERROR_FIELD)
+        .and_then(Value::as_str)
+        .unwrap_or("")
 }
 
 fn link_outcome(
@@ -329,9 +330,11 @@ fn link_outcome(
 ) -> LinkResult {
     let code = error_code(body);
     match (status, code) {
-        (StatusCode::NOT_FOUND, "no_subscription") => return Ok(LinkOutcome::NoSubscription),
-        (StatusCode::CONFLICT, "already_subscribed") => return Ok(LinkOutcome::AlreadySubscribed),
-        (StatusCode::BAD_REQUEST, "unknown_tier") => {
+        (StatusCode::NOT_FOUND, wire::NO_SUBSCRIPTION) => return Ok(LinkOutcome::NoSubscription),
+        (StatusCode::CONFLICT, wire::ALREADY_SUBSCRIBED) => {
+            return Ok(LinkOutcome::AlreadySubscribed)
+        }
+        (StatusCode::BAD_REQUEST, wire::UNKNOWN_TIER) => {
             tracing::error!(
                 path,
                 "Unterstützer-Stufe fehlt im Steam Bot: supporter_tiers_eur und die Stripe-Preise passen nicht zusammen"
@@ -340,7 +343,7 @@ fn link_outcome(
         }
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            "supporter_not_configured" | "tip_not_configured" | "prices_unverified",
+            wire::SUPPORTER_NOT_CONFIGURED | wire::TIP_NOT_CONFIGURED | wire::PRICES_UNVERIFIED,
         ) => {
             tracing::warn!(
                 path,
@@ -356,7 +359,7 @@ fn link_outcome(
             "{path} antwortet {status} {code}"
         )));
     }
-    body.get("url")
+    body.get(wire::URL_FIELD)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|url| accept(url))
@@ -366,7 +369,7 @@ fn link_outcome(
 
 fn token_rejected(status: StatusCode, code: &str) -> bool {
     status == StatusCode::UNAUTHORIZED
-        || (status == StatusCode::SERVICE_UNAVAILABLE && code == "auth_not_configured")
+        || (status == StatusCode::SERVICE_UNAVAILABLE && code == wire::AUTH_NOT_CONFIGURED)
 }
 
 fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
