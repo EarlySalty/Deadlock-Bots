@@ -1762,6 +1762,52 @@ async fn direkte_bitte_waehrend_dispatch_startet_keinen_zweiten_versuch() {
 }
 
 #[tokio::test]
+async fn laufender_versand_haelt_eine_direkte_bitte_weit_nach_dem_fenster_auf() {
+    let (mut watcher, _, _, invite) = setup();
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
+    let reader = clock.clone();
+    watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+    invite.hold.store(true, Ordering::SeqCst);
+    let late = NOW + 10 * ACTIVE_DISPATCH_MILLIS / 1000;
+    let initial = watcher.handle_message(
+        message(1, NOW, "Kannst du mich einladen? 123456789"),
+        NOW,
+        Some(false),
+    );
+    let during = async {
+        invite.started.notified().await;
+        invite.hold.store(false, Ordering::SeqCst);
+        clock.store(late * 1000, Ordering::SeqCst);
+        watcher
+            .handle_message(
+                message(2, late, "Kannst du mich einladen? 123456789"),
+                late,
+                Some(false),
+            )
+            .await
+            .expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+        let calls = invite.calls.lock().await.len();
+        invite.release.notify_one();
+        calls
+    };
+    let (result, calls_during) = tokio::join!(initial, during);
+    result.expect("Testzustand und Testports erfüllen den erwarteten Vertrag");
+    assert_eq!(calls_during, 1);
+    assert_eq!(invite.calls.lock().await.len(), 1);
+}
+
+#[test]
+fn zwei_laufende_versaende_desselben_nutzers_halten_die_sperre_bis_zum_letzten() {
+    let running = RunningDispatches::default();
+    let first = running.start(USER);
+    let second = running.start(USER);
+    drop(first);
+    assert!(running.contains(USER));
+    drop(second);
+    assert!(!running.contains(USER));
+}
+
+#[tokio::test]
 async fn dank_ist_kein_audit_beleg_und_stoppt_keine_raumbitte() {
     let (watcher, _, _, invite) = setup();
     watcher

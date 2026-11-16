@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -440,7 +440,7 @@ pub struct InviteLoungeWatcher {
 }
 
 #[derive(Default, Clone)]
-struct RunningDispatches(Arc<std::sync::Mutex<HashSet<u64>>>);
+struct RunningDispatches(Arc<std::sync::Mutex<HashMap<u64, usize>>>);
 
 struct RunningDispatch {
     running: RunningDispatches,
@@ -448,18 +448,18 @@ struct RunningDispatch {
 }
 
 impl RunningDispatches {
-    fn users(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
+    fn users(&self) -> std::sync::MutexGuard<'_, HashMap<u64, usize>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn contains(&self, user_id: u64) -> bool {
-        self.users().contains(&user_id)
+        self.users().contains_key(&user_id)
     }
 
     fn start(&self, user_id: u64) -> RunningDispatch {
-        self.users().insert(user_id);
+        *self.users().entry(user_id).or_insert(0) += 1;
         RunningDispatch {
             running: self.clone(),
             user_id,
@@ -469,7 +469,13 @@ impl RunningDispatches {
 
 impl Drop for RunningDispatch {
     fn drop(&mut self) {
-        self.running.users().remove(&self.user_id);
+        let mut users = self.running.users();
+        if let Some(count) = users.get_mut(&self.user_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                users.remove(&self.user_id);
+            }
+        }
     }
 }
 
