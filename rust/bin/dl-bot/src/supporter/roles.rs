@@ -72,9 +72,12 @@ pub async fn apply_roles(
     users: &[u64],
     grant: bool,
     timeout: Duration,
-) {
+) -> Result<(), String> {
     let guild = GuildId::new(guild_id);
     let role = RoleId::new(SUPPORTER_ROLE_ID);
+    let mut failed = 0_usize;
+    let mut timed_out = 0_usize;
+    let mut first_error = None;
     for user_id in users {
         let operation = async {
             if grant {
@@ -95,15 +98,25 @@ pub async fn apply_roles(
                 .await
             }
         };
-        match tokio::time::timeout(timeout, operation).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(user_id, grant, %error, "Server-Unterstützer: Rollenänderung fehlgeschlagen")
+        let error = match tokio::time::timeout(timeout, operation).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => {
+                timed_out += 1;
+                "Zeitlimit überschritten".to_string()
             }
-            Err(error) => {
-                tracing::warn!(user_id, grant, %error, "Server-Unterstützer: Zeitlimit für Rollenänderung überschritten")
-            }
-        }
+        };
+        tracing::debug!(user_id, grant, %error, "Server-Unterstützer: Rollenänderung fehlgeschlagen");
+        failed += 1;
+        first_error.get_or_insert(error);
+    }
+    match first_error {
+        None => Ok(()),
+        Some(error) => Err(format!(
+            "{}: {failed} von {} fehlgeschlagen, davon {timed_out} mit Zeitlimit; erster Fehler: {error}",
+            if grant { "Rollenvergabe" } else { "Rollenentzug" },
+            users.len()
+        )),
     }
 }
 
@@ -140,13 +153,16 @@ mod tests {
         let seen = calls.clone();
         let app = axum::Router::new().route(
             "/api/v10/guilds/{guild}/members",
-            axum::routing::get(move || {
+            axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
                 let seen = seen.clone();
                 async move {
+                    if query.contains_key("after") {
+                        return axum::Json(serde_json::json!([]));
+                    }
                     if seen.fetch_add(1, Ordering::SeqCst) < 2 {
                         std::future::pending::<()>().await;
                     }
-                    axum::Json(serde_json::json!([]))
+                    axum::Json(serde_json::json!([{"user": {"id": "7", "username": "member", "discriminator": "0001", "avatar": null}, "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0}]))
                 }
             }),
         );
@@ -162,10 +178,15 @@ mod tests {
                 .expect_err("incomplete snapshot rejected")
                 .contains("Zeitlimit"));
         }
-        assert!(fetch_members(&http, 1, limits())
-            .await
-            .expect("later snapshot")
-            .is_empty());
+        assert_eq!(
+            fetch_members(&http, 1, limits())
+                .await
+                .expect("later snapshot")
+                .iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            vec![7]
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
     }
@@ -197,24 +218,7 @@ mod tests {
             }
         }));
         let (http, server) = discord(app).await;
-        let serversync = crate::serversync::ServerSyncService::new(
-            db.pool().clone(),
-            dl_discord::DiscordAdapter::new("test"),
-            "test".to_string(),
-            1,
-            Arc::new(crate::serversync::FixedFundingSource::standard()),
-        )
-        .expect("serversync");
-        let mut config =
-            super::super::SupporterConfig::new(&Default::default(), "http://localhost", |_| None);
-        config.discord_timeout = limits();
-        let sync = super::super::SupporterSync::new(
-            db.pool().clone(),
-            Arc::new(http),
-            1,
-            serversync,
-            config,
-        );
+        let sync = supporter_sync(&db, http);
         for _ in 0..2 {
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), sync.tick())
                 .await
@@ -230,6 +234,70 @@ mod tests {
             .await
             .expect("active")
             .contains(&99));
+        server.abort();
+    }
+
+    fn supporter_sync(
+        db: &dl_central_db::TestDb,
+        http: serenity::http::Http,
+    ) -> super::super::SupporterSync {
+        let serversync = crate::serversync::ServerSyncService::new(
+            db.pool().clone(),
+            dl_discord::DiscordAdapter::new("test"),
+            "test".to_string(),
+            1,
+            std::sync::Arc::new(crate::serversync::FixedFundingSource::standard()),
+        )
+        .expect("serversync");
+        let mut config =
+            super::super::SupporterConfig::new(&Default::default(), "http://localhost", |_| None);
+        config.discord_timeout = limits();
+        super::super::SupporterSync::new(
+            db.pool().clone(),
+            std::sync::Arc::new(http),
+            1,
+            serversync,
+            config,
+        )
+    }
+
+    #[tokio::test]
+    async fn tick_ohne_aktiven_datenschutz_trigger_fragt_discord_nicht_und_schreibt_nichts() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let db = dl_central_db::testing::test_pool().await.expect("database");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = axum::Router::new().route(
+            "/api/v10/guilds/{guild}/members",
+            axum::routing::get(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!([]))
+                }
+            }),
+        );
+        let (http, server) = discord(app).await;
+        let sync = supporter_sync(&db, http);
+        sqlx::query(
+            "ALTER TABLE core.supporter_sources DISABLE TRIGGER supporter_sources_privacy_gate",
+        )
+        .execute(db.pool())
+        .await
+        .expect("disable trigger");
+        assert!(matches!(
+            sync.tick().await,
+            Err(super::super::store::StoreError::GateDisabled)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM core.supporter_sources")
+            .fetch_one(db.pool())
+            .await
+            .expect("rows");
+        assert_eq!(rows, 0);
         server.abort();
     }
 
@@ -256,12 +324,24 @@ mod tests {
         );
         let (http, server) = discord(app).await;
         for grant in [true, false, true] {
-            tokio::time::timeout(
+            let outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 apply_roles(&http, 1, &[1, 2, 3], grant, limits()),
             )
             .await
             .expect("cycle completed");
+            let action = if grant {
+                "Rollenvergabe"
+            } else {
+                "Rollenentzug"
+            };
+            assert_eq!(
+                outcome
+                    .expect_err("failures are reported")
+                    .split("; erster Fehler")
+                    .next(),
+                Some(format!("{action}: 2 von 3 fehlgeschlagen, davon 1 mit Zeitlimit").as_str())
+            );
         }
         assert_eq!(
             *calls.lock().expect("calls"),
@@ -293,12 +373,15 @@ mod tests {
         let routes = limiter.routes();
         let guard = routes.write().await;
         http.ratelimiter = Some(limiter);
-        tokio::time::timeout(
+        let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             apply_roles(&http, 1, &[1, 2], true, limits()),
         )
         .await
         .expect("limiter waits completed");
+        assert!(outcome
+            .expect_err("bounded waits are failures")
+            .starts_with("Rollenvergabe: 2 von 2 fehlgeschlagen, davon 2 mit Zeitlimit"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         drop(guard);
         server.abort();

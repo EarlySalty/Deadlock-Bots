@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 const KV_NS: &str = "supporter";
 const MANUAL_IMPORT_KEY: &str = "manual_import_at";
@@ -47,12 +47,29 @@ impl From<sqlx::Error> for StoreError {
 }
 
 pub async fn require_table(pool: &PgPool) -> Result<(), StoreError> {
+    let mut tx = pool.begin().await?;
+    let gate = lock_gated_table(&mut tx).await;
+    tx.rollback().await?;
+    gate
+}
+
+async fn lock_gated_table(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    let present: bool =
+        sqlx::query_scalar("SELECT to_regclass('core.supporter_sources') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if !present {
+        return Err(StoreError::Missing);
+    }
+    sqlx::query("LOCK TABLE core.supporter_sources IN ROW EXCLUSIVE MODE")
+        .execute(&mut **tx)
+        .await?;
     let state: Option<String> = sqlx::query_scalar(
         "SELECT tgenabled::text FROM pg_catalog.pg_trigger
-          WHERE tgrelid = to_regclass('core.supporter_sources')
+          WHERE tgrelid = 'core.supporter_sources'::regclass
             AND tgname = 'supporter_sources_privacy_gate'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     gate_state(state.as_deref())
 }
@@ -83,6 +100,7 @@ pub async fn active_supporters(pool: &PgPool) -> Result<HashSet<u64>, StoreError
 pub async fn sync_boost_rows(pool: &PgPool, boosters: &[u64]) -> Result<BoostSync, StoreError> {
     let ids = to_db_ids(boosters);
     let mut tx = pool.begin().await?;
+    lock_gated_table(&mut tx).await?;
     sqlx::query(
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
@@ -120,6 +138,7 @@ pub async fn manual_import_done(pool: &PgPool) -> Result<bool, StoreError> {
 pub async fn import_manual(pool: &PgPool, holders: &[u64]) -> Result<u64, StoreError> {
     let ids = to_db_ids(holders);
     let mut tx = pool.begin().await?;
+    lock_gated_table(&mut tx).await?;
     let claimed = sqlx::query(
         "INSERT INTO bot.kv_store(ns, k, v)
          VALUES($1, $2, now()::text)
@@ -192,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ohne_datenschutz_trigger_pausiert_der_abgleich() -> TestResult {
+    async fn require_table_meldet_jeden_triggerzustand() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         require_table(pool).await?;
@@ -237,16 +256,54 @@ mod tests {
         Ok(())
     }
 
-    async fn block_member(pool: &PgPool, user_id: i64, deleted: bool) -> TestResult {
+    #[tokio::test]
+    async fn schreibpfade_pruefen_den_trigger_in_der_eigenen_transaktion() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        for state in ["DISABLE TRIGGER", "ENABLE REPLICA TRIGGER"] {
+            sqlx::query(&format!(
+                "ALTER TABLE core.supporter_sources {state} supporter_sources_privacy_gate"
+            ))
+            .execute(pool)
+            .await?;
+            assert!(
+                matches!(
+                    sync_boost_rows(pool, &[51]).await,
+                    Err(StoreError::GateDisabled)
+                ),
+                "{state}"
+            );
+            assert!(
+                matches!(
+                    import_manual(pool, &[52]).await,
+                    Err(StoreError::GateDisabled)
+                ),
+                "{state}"
+            );
+            assert_eq!(source_rows(pool, 51).await?, 0);
+            assert_eq!(source_rows(pool, 52).await?, 0);
+            assert!(!manual_import_done(pool).await?);
+        }
         sqlx::query(
-            "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-             VALUES ($1, NOT $2, CASE WHEN $2 THEN now() END, 'test', now())",
+            "ALTER TABLE core.supporter_sources ENABLE TRIGGER supporter_sources_privacy_gate",
         )
-        .bind(user_id)
-        .bind(deleted)
         .execute(pool)
         .await?;
+        sync_boost_rows(pool, &[51]).await?;
+        assert_eq!(import_manual(pool, &[52]).await?, 1);
+        sqlx::query("DROP TRIGGER supporter_sources_privacy_gate ON core.supporter_sources")
+            .execute(pool)
+            .await?;
+        assert!(matches!(
+            sync_boost_rows(pool, &[53]).await,
+            Err(StoreError::Missing)
+        ));
+        assert_eq!(source_rows(pool, 53).await?, 0);
         Ok(())
+    }
+
+    async fn block_member(pool: &PgPool, user_id: i64, deleted: bool) -> TestResult {
+        Ok(dl_central_db::testing::block_member(pool, user_id, deleted).await?)
     }
 
     async fn source_rows(pool: &PgPool, user_id: i64) -> Result<i64, sqlx::Error> {

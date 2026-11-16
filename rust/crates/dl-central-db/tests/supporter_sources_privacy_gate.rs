@@ -1,7 +1,7 @@
 #![cfg(feature = "testing")]
 use std::time::Duration;
 
-use dl_central_db::{lock_user_privacy, test_pool};
+use dl_central_db::{lock_user_privacy, test_pool, testing::block_member};
 use sqlx::{PgPool, Postgres, Transaction};
 
 const STEP: Duration = Duration::from_secs(10);
@@ -35,18 +35,6 @@ async fn seed_row(pool: &PgPool, discord_id: i64, source: &str, source_ref: &str
     .bind(discord_id)
     .bind(source)
     .bind(source_ref)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-async fn block_member(pool: &PgPool, discord_id: i64, deleted: bool) -> TestResult {
-    sqlx::query(
-        "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
-         VALUES ($1, NOT $2, CASE WHEN $2 THEN now() END, 'test', now())",
-    )
-    .bind(discord_id)
-    .bind(deleted)
     .execute(pool)
     .await?;
     Ok(())

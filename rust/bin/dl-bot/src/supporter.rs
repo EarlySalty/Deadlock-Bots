@@ -199,11 +199,6 @@ impl SupporterSync {
         let members = roles::fetch_members(&self.http, self.guild_id, self.config.discord_timeout)
             .await
             .map_err(store::StoreError::Discord)?;
-        if members.is_empty() {
-            return Err(store::StoreError::Discord(
-                "Mitgliederliste ist leer".to_string(),
-            ));
-        }
         let boosters: Vec<u64> = members.iter().filter(|m| m.booster).map(|m| m.id).collect();
         let boost = store::sync_boost_rows(&self.pool, &boosters).await?;
         let holders: Vec<u64> = members
@@ -240,27 +235,31 @@ impl SupporterSync {
             revoke_ids = ?plan.revokes,
             "Server-Unterstützer: Rollenabgleich"
         );
-        if self.config.role_grant_apply {
-            roles::apply_roles(
+        let mut failures = Vec::new();
+        for (apply, users, grant) in [
+            (self.config.role_grant_apply, &plan.grants, true),
+            (self.config.role_sync_apply, &plan.revokes, false),
+        ] {
+            if !apply {
+                continue;
+            }
+            if let Err(error) = roles::apply_roles(
                 &self.http,
                 self.guild_id,
-                &plan.grants,
-                true,
+                users,
+                grant,
                 self.config.discord_timeout,
             )
-            .await;
+            .await
+            {
+                failures.extend([error]);
+            }
         }
-        if self.config.role_sync_apply {
-            roles::apply_roles(
-                &self.http,
-                self.guild_id,
-                &plan.revokes,
-                false,
-                self.config.discord_timeout,
-            )
-            .await;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(store::StoreError::Discord(failures.join("; ")))
         }
-        Ok(())
     }
 
     async fn refresh_funding(&self, previous: RefreshState) -> RefreshState {

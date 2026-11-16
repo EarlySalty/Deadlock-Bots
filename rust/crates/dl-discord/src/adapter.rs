@@ -1446,10 +1446,13 @@ pub async fn fetch_all_guild_members(
         members.extend(page);
         match next {
             Some(cursor) => after = Some(cursor),
+            None if members.is_empty() => return Err(EMPTY_MEMBER_LIST.to_string()),
             None => return Ok(members),
         }
     }
 }
+
+pub const EMPTY_MEMBER_LIST: &str = "Mitgliederliste ist leer";
 
 fn next_member_cursor(
     after: Option<u64>,
@@ -1575,6 +1578,11 @@ mod tests {
             hanging.err().as_deref(),
             Some("Zeitlimit für eine Seite der Mitgliederliste überschritten")
         );
+
+        let (http, server) = member_pages_server(vec![Some(json!([]))]).await?;
+        let empty = fetch_all_guild_members(&http, GuildId::new(1), short).await;
+        server.abort();
+        assert_eq!(empty.err().as_deref(), Some(EMPTY_MEMBER_LIST));
 
         let (http, server) = member_pages_server(vec![
             Some(json!([member_json(10), member_json(11)])),
