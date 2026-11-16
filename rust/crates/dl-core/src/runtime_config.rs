@@ -61,6 +61,8 @@ pub mod supporter_wire {
     pub const TIP_NOT_CONFIGURED: &str = "tip_not_configured";
     pub const PRICES_UNVERIFIED: &str = "prices_unverified";
     pub const AUTH_NOT_CONFIGURED: &str = "auth_not_configured";
+    pub const TIP_REF_PREFIX: &str = "tip:";
+    pub const TIP_VALID_DAYS: i64 = 31;
 }
 
 pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
