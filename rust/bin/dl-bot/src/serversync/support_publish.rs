@@ -827,15 +827,15 @@ impl ResolvedSupportConfig {
 }
 
 const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "prozent", "stand", "ziel"];
-const PAY_PLACEHOLDERS: &[&str] = &["stufen", "rolle"];
-const PAY_PLACEHOLDERS_WITHOUT_ROLE: &[&str] = &["stufen"];
+const ROLE_PLACEHOLDER: &str = "rolle";
+const PAY_PLACEHOLDERS: &[&str] = &["stufen", ROLE_PLACEHOLDER];
 const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
 
 type PlaceholderCheck<'a> = (
     bool,
     &'a str,
     &'static str,
-    &'static [&'static str],
+    &'a [&'static str],
     &'static [&'static str],
 );
 
@@ -844,11 +844,7 @@ fn placeholder_warnings(
     options: &SupportPanelOptions,
     warnings: &mut Vec<String>,
 ) {
-    let pay_required = if options.role_grant {
-        PAY_PLACEHOLDERS
-    } else {
-        PAY_PLACEHOLDERS_WITHOUT_ROLE
-    };
+    let pay_required = pay_required_placeholders(options.role_grant);
     let checks: [PlaceholderCheck; 9] = [
         (true, &texts.intro, "intro", &[], &[]),
         (options.role_grant, &texts.perks, "perks", &[], &[]),
@@ -862,7 +858,7 @@ fn placeholder_warnings(
             FUNDING_PLACEHOLDERS,
             FUNDING_PLACEHOLDERS,
         ),
-        (true, &texts.pay, "pay", pay_required, PAY_PLACEHOLDERS),
+        (true, &texts.pay, "pay", &pay_required, PAY_PLACEHOLDERS),
         (
             options.twitch,
             &texts.twitch,
@@ -885,6 +881,14 @@ fn placeholder_warnings(
             ));
         }
     }
+}
+
+fn pay_required_placeholders(role_grant: bool) -> Vec<&'static str> {
+    PAY_PLACEHOLDERS
+        .iter()
+        .copied()
+        .filter(|name| role_grant || *name != ROLE_PLACEHOLDER)
+        .collect()
 }
 
 fn placeholder_names(text: &str) -> Vec<&str> {

@@ -1165,8 +1165,16 @@ mod tests {
             "https://evil.example@checkout.stripe.com/c",
             "https://checkout.stripe.com@evil.example/c",
             "https://checkout.stripe.com:8443/c",
+            "https://evil.example:1.stripe.com/c",
+            "https://evil.example:443@checkout.stripe.com/c",
         ] {
             assert!(!is_stripe_url(bypass), "{bypass}");
+        }
+        for ported in [
+            "https://checkout.stripe.com:8443/c",
+            "https://deutsche-deadlock-community.de:8443/x",
+        ] {
+            assert_eq!(url_host(ported), None, "{ported}");
         }
         assert!(is_public_url(
             "https://deutsche-deadlock-community.de/twitch/x"
