@@ -1400,16 +1400,30 @@ impl ServerSyncService {
         payload_hash: &str,
         message_ids: &[u64],
     ) -> ServerSyncResult<()> {
+        self.replace_static_v2_message_ids_and_state(
+            message_id_prefix,
+            message_ids,
+            &[(format_key, payload_format), (hash_key, payload_hash)],
+        )
+        .await
+    }
+
+    async fn replace_static_v2_message_ids_and_state(
+        &self,
+        message_id_prefix: &str,
+        message_ids: &[u64],
+        state: &[(&str, &str)],
+    ) -> ServerSyncResult<()> {
+        let state_keys: Vec<&str> = state.iter().map(|(key, _)| *key).collect();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "DELETE FROM bot.kv_store
               WHERE ns = $1
-                AND (k LIKE $2 OR k = $3 OR k = $4)",
+                AND (k LIKE $2 OR k = ANY($3::text[]))",
         )
         .bind(SERVERSYNC_KV_NS)
         .bind(format!("{message_id_prefix}%"))
-        .bind(format_key)
-        .bind(hash_key)
+        .bind(&state_keys)
         .execute(&mut *tx)
         .await?;
 
@@ -1424,17 +1438,9 @@ impl ServerSyncService {
             .execute(&mut *tx)
             .await?;
         }
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3), ($1, $4, $5)",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(format_key)
-        .bind(payload_format)
-        .bind(hash_key)
-        .bind(payload_hash)
-        .execute(&mut *tx)
-        .await?;
+        for (key, value) in state {
+            upsert_serversync_kv(&mut *tx, key, value).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -2311,7 +2317,6 @@ impl ServerSyncService {
         let Ok(_claim) = self.support_panel_lock.try_lock() else {
             return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
         };
-        let fetched = source.funding().await;
         let options = source.panel_options();
         let stored_payload_format = self
             .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
@@ -2348,7 +2353,33 @@ impl ServerSyncService {
                     "veröffentlichte Panel-Optionen unlesbar: {error}"
                 ))
             })?;
-        let funding = match fetched {
+        let stored_payload_hash = self
+            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_HASH_KEY)
+            .await?;
+        let stored = support_publish::SupportStoredState {
+            message_ids: &stored_message_ids,
+            payload_format: stored_payload_format.as_deref(),
+            payload_hash: stored_payload_hash.as_deref(),
+        };
+        let snapshot = support_publish::load_support_snapshot(&self.rang_guide_repo_root)
+            .map_err(ServerSyncError::internal)?;
+        let current = support_publish::build_support_output_from(
+            &snapshot,
+            &stored,
+            live,
+            &published_options,
+            true,
+        )
+        .map_err(ServerSyncError::internal)?;
+        if current.messages.len() != stored_message_ids.len() {
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
+        }
+        if !support_publish::support_payload_is_unchanged(&current) {
+            return Ok(FundingRefresh::Skipped(
+                "Panel-Text weicht vom veröffentlichten Stand ab",
+            ));
+        }
+        let funding = match source.funding().await {
             Ok(funding) => funding,
             Err(error) => {
                 let fallback = support_fallback_funding(live, source.goal_cents());
@@ -2367,35 +2398,9 @@ impl ServerSyncService {
         if live == funding && published_options == options {
             return Ok(FundingRefresh::Unchanged);
         }
-        let stored_payload_hash = self
-            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_HASH_KEY)
-            .await?;
-        let stored = support_publish::SupportStoredState {
-            message_ids: &stored_message_ids,
-            payload_format: stored_payload_format.as_deref(),
-            payload_hash: stored_payload_hash.as_deref(),
-        };
-        let current = support_publish::build_support_publish_output(
-            &self.rang_guide_repo_root,
-            &stored,
-            live,
-            &published_options,
-            true,
-        )
-        .map_err(ServerSyncError::internal)?;
-        if !support_publish::support_payload_is_unchanged(&current) {
-            return Ok(FundingRefresh::Skipped(
-                "Panel-Text weicht vom veröffentlichten Stand ab",
-            ));
-        }
-        let next = support_publish::build_support_publish_output(
-            &self.rang_guide_repo_root,
-            &stored,
-            funding,
-            &options,
-            true,
-        )
-        .map_err(ServerSyncError::internal)?;
+        let next =
+            support_publish::build_support_output_from(&snapshot, &stored, funding, &options, true)
+                .map_err(ServerSyncError::internal)?;
         let Some(edits) = support_publish::changed_messages(&current, &next, &stored_message_ids)
         else {
             return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
@@ -2407,6 +2412,12 @@ impl ServerSyncService {
                 .await?
                 .is_none()
             {
+                self.delete_serversync_kv(&format!(
+                    "{}{}",
+                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                    message.message_index
+                ))
+                .await?;
                 return Ok(FundingRefresh::Skipped("Panel-Nachricht nicht gefunden"));
             }
         }
@@ -4365,12 +4376,12 @@ impl ServerSyncOps for ServerSyncService {
                 "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
             )));
         };
-        let _apply_guard = self.panel_apply_lock.lock().await;
         let source = self.supporter_funding.clone();
         let options = source.panel_options();
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
-        let (funding, funding_warning) = match self.support_funding_for_apply(source.as_ref()).await
-        {
+        let funding_result = self.support_funding_for_apply(source.as_ref()).await;
+        let _apply_guard = self.panel_apply_lock.lock().await;
+        let (funding, funding_warning) = match funding_result {
             Ok(found) => found,
             Err(error) if confirm => {
                 return Err(ServerSyncError::bad_request(format!(
@@ -4482,6 +4493,26 @@ impl ServerSyncOps for ServerSyncService {
         for warning in &output.warnings {
             tracing::warn!(%warning, "Support-Publish-Warnung");
         }
+        let payload_hash = output.payload_hash.clone();
+        let funding_kv = output.funding.to_kv();
+        let published_state = [
+            (
+                support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                support_publish::SUPPORT_PAYLOAD_FORMAT,
+            ),
+            (
+                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                payload_hash.as_str(),
+            ),
+            (
+                support_publish::SUPPORT_FUNDING_LIVE_KEY,
+                funding_kv.as_str(),
+            ),
+            (
+                support_publish::SUPPORT_PANEL_OPTIONS_KEY,
+                options_kv.as_str(),
+            ),
+        ];
 
         if output.repost_required {
             let mut posted_message_ids = Vec::new();
@@ -4508,13 +4539,10 @@ impl ServerSyncOps for ServerSyncService {
                 output.posted_message_ids.push(message_id);
             }
             if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
+                .replace_static_v2_message_ids_and_state(
                     support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
                     &posted_message_ids,
+                    &published_state,
                 )
                 .await
             {
@@ -4569,13 +4597,7 @@ impl ServerSyncOps for ServerSyncService {
                         message.message_id = Some(message_id);
                     }
                 }
-                self.store_static_v2_metadata(
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                )
-                .await?;
+                self.store_serversync_kv_pairs(&published_state).await?;
             } else {
                 let mut message_ids = Vec::new();
                 for message_index in 0..output.messages.len() {
@@ -4620,38 +4642,17 @@ impl ServerSyncOps for ServerSyncService {
                     output.posted_message_ids.push(message_id);
                 }
                 if adopted_from_history {
-                    self.replace_static_v2_message_ids_and_metadata(
+                    self.replace_static_v2_message_ids_and_state(
                         support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT,
-                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
                         &message_ids,
+                        &published_state,
                     )
                     .await?;
                 } else {
-                    self.store_static_v2_metadata(
-                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT,
-                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                    )
-                    .await?;
+                    self.store_serversync_kv_pairs(&published_state).await?;
                 }
             }
         }
-        let funding_kv = output.funding.to_kv();
-        self.store_serversync_kv_pairs(&[
-            (
-                support_publish::SUPPORT_FUNDING_LIVE_KEY,
-                funding_kv.as_str(),
-            ),
-            (
-                support_publish::SUPPORT_PANEL_OPTIONS_KEY,
-                options_kv.as_str(),
-            ),
-        ])
-        .await?;
 
         output.dry_run = false;
         output.repost_required = false;
@@ -9587,7 +9588,7 @@ mod tests {
             .lock()
             .expect("post calls")
             .push(channel_id);
-        let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        let parsed_body = fake_request_payload(&body);
         state
             .post_bodies
             .lock()
@@ -9630,6 +9631,18 @@ mod tests {
                 (status, Json(json!({"message": "forced failure"}))).into_response()
             }
         }
+    }
+
+    fn fake_request_payload(body: &[u8]) -> Value {
+        if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+            return parsed;
+        }
+        let text = String::from_utf8_lossy(body);
+        text.split_once("name=\"payload_json\"")
+            .and_then(|(_, part)| part.split_once("\r\n\r\n"))
+            .and_then(|(_, rest)| rest.split_once("\r\n--"))
+            .and_then(|(json, _)| serde_json::from_str::<Value>(json).ok())
+            .unwrap_or(Value::Null)
     }
 
     async fn fake_discord_create_thread(
@@ -12571,10 +12584,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     async fn delete_serversync_kv_for_test(pool: &PgPool, key: &str) {
-        sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
-            .bind(SERVERSYNC_KV_NS)
-            .bind(key)
-            .execute(pool)
+        dl_central_db::kv::delete(pool, SERVERSYNC_KV_NS, key)
             .await
             .expect("delete kv");
     }
@@ -12669,9 +12679,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             service.support_funding_refresh().await.expect("refresh"),
             FundingRefresh::Skipped("kein veröffentlichter Monatsstand")
         );
+        let patches_before_repair = patch_count(&fake);
         let repaired = service.support_apply(true).await.expect("second apply");
         assert_eq!(repaired.payload_hash, stored_hash);
         assert!(repaired.posted_message_ids.is_empty());
+        assert!(repaired
+            .messages
+            .iter()
+            .all(|message| message.action == "no_op"));
+        assert_eq!(patch_count(&fake), patches_before_repair);
         assert_eq!(
             get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
                 .await
@@ -12794,6 +12810,61 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             FundingRefresh::Skipped("Panel-Text weicht vom veröffentlichten Stand ab")
         );
         assert_eq!(patch_count(&fake), before);
+    }
+
+    #[tokio::test]
+    async fn service_support_refresh_vergisst_eine_verschwundene_nachricht_statt_sie_endlos_zu_suchen(
+    ) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(
+            42,
+            Vec::new(),
+            vec![
+                FakePostResponse::Ok(9811),
+                FakePostResponse::Ok(9812),
+                FakePostResponse::Ok(9813),
+            ],
+        )
+        .await;
+        let source = Arc::new(FixedFundingSource::standard());
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source.clone(),
+        );
+        service.support_apply(true).await.expect("apply");
+        fake.state.messages.lock().expect("messages").remove(&9813);
+        source.set(
+            Ok(support_publish::SupportFunding {
+                raised_cents: 7_000,
+                goal_cents: FixedFundingSource::standard_funding().goal_cents,
+            }),
+            FixedFundingSource::standard_options(),
+        );
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("Panel-Nachricht nicht gefunden")
+        );
+        assert_eq!(
+            service
+                .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
+                .await
+                .expect("ids"),
+            vec![9811, 9812]
+        );
+        let before = patch_count(&fake);
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("Panel-Nachrichten fehlen")
+        );
+        assert_eq!(patch_count(&fake), before);
+        let repaired = service.support_apply(true).await.expect("repost");
+        assert_eq!(repaired.posted_message_ids.len(), 3);
     }
 
     #[tokio::test]

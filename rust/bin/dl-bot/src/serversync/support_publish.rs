@@ -445,6 +445,35 @@ pub struct SupportStoredState<'a> {
     pub payload_hash: Option<&'a str>,
 }
 
+pub struct SupportSnapshot {
+    config: ResolvedSupportConfig,
+    config_warnings: Vec<String>,
+    banner: Option<SupportBannerOutput>,
+    banner_warnings: Vec<String>,
+    attachment_sha256: Vec<(String, String)>,
+}
+
+pub fn load_support_snapshot(repo_root: &Path) -> Result<SupportSnapshot, String> {
+    let mut config_warnings = Vec::new();
+    let config = load_support_runtime_config(repo_root, &mut config_warnings)?;
+    let mut banner_warnings = Vec::new();
+    let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, &mut banner_warnings);
+    let attachment_sha256 = banner
+        .iter()
+        .map(|banner| {
+            attachment_sha256(repo_root, &banner.relative_path)
+                .map(|sha256| (banner.relative_path.clone(), sha256))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SupportSnapshot {
+        config,
+        config_warnings,
+        banner,
+        banner_warnings,
+        attachment_sha256,
+    })
+}
+
 pub fn build_support_publish_output(
     repo_root: &Path,
     stored: &SupportStoredState<'_>,
@@ -452,10 +481,22 @@ pub fn build_support_publish_output(
     options: &SupportPanelOptions,
     dry_run: bool,
 ) -> Result<SupportPublishOutput, String> {
-    let mut warnings = Vec::new();
-    let config = load_support_runtime_config(repo_root, &mut warnings)?;
-    placeholder_warnings(&config.texts, options, &mut warnings);
-    let built_messages = support_messages(repo_root, &config, funding, options, &mut warnings);
+    let snapshot = load_support_snapshot(repo_root)?;
+    build_support_output_from(&snapshot, stored, funding, options, dry_run)
+}
+
+pub fn build_support_output_from(
+    snapshot: &SupportSnapshot,
+    stored: &SupportStoredState<'_>,
+    funding: SupportFunding,
+    options: &SupportPanelOptions,
+    dry_run: bool,
+) -> Result<SupportPublishOutput, String> {
+    let mut warnings = snapshot.config_warnings.clone();
+    placeholder_warnings(&snapshot.config.texts, options, &mut warnings);
+    warnings.extend(snapshot.banner_warnings.iter().cloned());
+    let built_messages =
+        support_messages(snapshot.banner.clone(), &snapshot.config, funding, options);
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -479,7 +520,7 @@ pub fn build_support_publish_output(
         validate_support_message_budget(&message.payload)?;
     }
 
-    let payload_hash = support_payload_hash(repo_root, &messages)?;
+    let payload_hash = support_payload_hash(&snapshot.attachment_sha256, &messages)?;
     let repost_required =
         !support_storage_matches(stored.payload_format, stored.message_ids, messages.len());
     let hash_matches = stored.payload_hash == Some(payload_hash.as_str());
@@ -597,8 +638,19 @@ fn group_thousands(value: u64) -> String {
     grouped
 }
 
-pub fn support_payload_hash(
-    repo_root: &Path,
+fn attachment_sha256(repo_root: &Path, relative_path: &str) -> Result<String, String> {
+    let path = repo_root.join(relative_path);
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "Support-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn support_payload_hash(
+    attachment_sha256: &[(String, String)],
     messages: &[SupportMessageOutput],
 ) -> Result<String, String> {
     let payloads = messages
@@ -609,17 +661,20 @@ pub fn support_payload_hash(
                 .attachments
                 .iter()
                 .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Support-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
+                    let sha256 = attachment_sha256
+                        .iter()
+                        .find(|(path, _)| *path == attachment.relative_path)
+                        .map(|(_, sha256)| sha256.clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "Support-Attachment `{}` fehlt im geladenen Stand",
+                                attachment.relative_path
+                            )
+                        })?;
                     Ok(SupportPayloadHashAttachment {
                         id: attachment.id,
                         filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                        sha256,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -837,13 +892,11 @@ fn apply_optional(target: &mut String, value: Option<String>) {
 }
 
 fn support_messages(
-    repo_root: &Path,
+    banner: Option<SupportBannerOutput>,
     config: &ResolvedSupportConfig,
     funding: SupportFunding,
     options: &SupportPanelOptions,
-    warnings: &mut Vec<String>,
 ) -> Vec<SupportBuiltMessage> {
-    let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, warnings);
     let messages = vec![
         main_message(banner, config, options),
         message_from_container(
