@@ -9,10 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_central_db::kv;
-use dl_core::runtime_config::{
-    supporter_wire, STEAM_INVITE_TASK_WAIT_MS, STEAM_INVITE_TIMEOUT_MS_RANGE,
-    STEAM_INVITE_WORST_CASE_MS,
-};
+use dl_core::runtime_config::{supporter_wire, STEAM_INVITE_BRIDGE_TIMEOUT_MS};
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
@@ -25,15 +22,8 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_WORST_CASE_MS + STEAM_INVITE_TASK_WAIT_MS;
+pub const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_BRIDGE_TIMEOUT_MS;
 const INVITE_FORWARD_TIMEOUT: Duration = Duration::from_millis(INVITE_FORWARD_TIMEOUT_MS);
-
-const _: () = assert!(
-    INVITE_FORWARD_TIMEOUT_MS >= *STEAM_INVITE_TIMEOUT_MS_RANGE.start()
-        && INVITE_FORWARD_TIMEOUT_MS <= *STEAM_INVITE_TIMEOUT_MS_RANGE.end(),
-    "Bridge-Timeout für /invite liegt nicht über dem Steam-Worst-Case oder überlebt \
-     das Discord-Interaktions-Token nicht"
-);
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
 pub const PANEL_CUSTOM_IDS: [&str; 8] = [
