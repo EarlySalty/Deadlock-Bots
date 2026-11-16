@@ -16,7 +16,10 @@ pub enum StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing => write!(f, "core.supporter_sources fehlt"),
+            Self::Missing => write!(
+                f,
+                "core.supporter_sources oder ihr Datenschutz-Trigger supporter_sources_privacy_gate fehlt"
+            ),
             Self::Db(error) => write!(f, "Datenbank: {error}"),
             Self::Discord(error) => write!(f, "Discord: {error}"),
         }
@@ -39,10 +42,16 @@ impl From<sqlx::Error> for StoreError {
 }
 
 pub async fn require_table(pool: &PgPool) -> Result<(), StoreError> {
-    let present: bool =
-        sqlx::query_scalar("SELECT to_regclass('core.supporter_sources') IS NOT NULL")
-            .fetch_one(pool)
-            .await?;
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_trigger
+              WHERE tgrelid = to_regclass('core.supporter_sources')
+                AND tgname = 'supporter_sources_privacy_gate'
+                AND tgenabled <> 'D'
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
     if present {
         Ok(())
     } else {
@@ -173,6 +182,37 @@ mod tests {
         require_table(pool).await?;
         let expected: HashSet<u64> = [11, 13, 15].into_iter().collect();
         assert_eq!(active_supporters(pool).await?, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ohne_datenschutz_trigger_pausiert_der_abgleich() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        require_table(pool).await?;
+        sqlx::query(
+            "ALTER TABLE core.supporter_sources DISABLE TRIGGER supporter_sources_privacy_gate",
+        )
+        .execute(pool)
+        .await?;
+        assert!(matches!(
+            require_table(pool).await,
+            Err(StoreError::Missing)
+        ));
+        sqlx::query("DROP TRIGGER supporter_sources_privacy_gate ON core.supporter_sources")
+            .execute(pool)
+            .await?;
+        assert!(matches!(
+            require_table(pool).await,
+            Err(StoreError::Missing)
+        ));
+        sqlx::query("DROP TABLE core.supporter_sources CASCADE")
+            .execute(pool)
+            .await?;
+        assert!(matches!(
+            require_table(pool).await,
+            Err(StoreError::Missing)
+        ));
         Ok(())
     }
 

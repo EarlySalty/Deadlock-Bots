@@ -187,7 +187,7 @@ impl SupporterSync {
                 Err(store::StoreError::Missing) => {
                     if !table_missing_logged {
                         tracing::warn!(
-                            "Server-Unterstützer: core.supporter_sources fehlt, Abgleich pausiert bis zur Migration"
+                            "Server-Unterstützer: core.supporter_sources oder ihr Datenschutz-Trigger fehlt, Abgleich pausiert bis zur Migration"
                         );
                         table_missing_logged = true;
                     }
