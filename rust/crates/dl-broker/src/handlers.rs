@@ -2944,10 +2944,13 @@ pub(crate) mod tests {
             "/home/nathanael/.config/deadlock-bots/bot.toml",
         ))
         .expect("Privater Betriebs-Snapshot");
-        let token = dl_core::runtime_config::token_by_names(
-            |name| dl_core::token_snapshot::value(name).map(str::to_owned),
-            &dl_core::runtime_config::BROKER_TOKEN_NAMES,
-        )
+        let token = [
+            "MASTER_BROKER_TOKEN",
+            "MAIN_BOT_INTERNAL_TOKEN",
+            "TWITCH_INTERNAL_API_TOKEN",
+        ]
+        .into_iter()
+        .find_map(dl_core::token_snapshot::value)
         .expect("Vorhandener Broker-Token");
         assert!(!token.contains(['\r', '\n']), "Gültiger Broker-Header");
         for authorized in [false, true] {

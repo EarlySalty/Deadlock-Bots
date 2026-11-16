@@ -412,8 +412,6 @@ pub struct LfgPanelAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -818,7 +816,7 @@ impl LfgPanelInterface {
             return Ok(output);
         }
 
-        let attachments = load_lfg_panel_attachments(attachments)?;
+        validate_lfg_panel_attachments(&attachments)?;
         let channel_id = self.panel_channel_id.expect("checked channel_id");
         let mut ignored_history_message_id = None;
         if let Some(message_id) = stored_message_id {
@@ -953,7 +951,6 @@ pub fn lfg_panel_attachments() -> Vec<LfgPanelAttachment> {
         id: 0,
         filename: LFG_PANEL_BANNER_FILENAME.to_string(),
         relative_path: format!("{LFG_BANNER_DIR}/{LFG_PANEL_BANNER_FILENAME}"),
-        bytes: Vec::new(),
     }]
 }
 
@@ -1037,19 +1034,18 @@ fn lfg_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &str)
     })
 }
 
-fn load_lfg_panel_attachments(
-    attachments: Vec<LfgPanelAttachment>,
-) -> Result<Vec<LfgPanelAttachment>, String> {
-    attachments
-        .into_iter()
-        .map(|attachment| {
-            let bytes = crate::router::load_panel_banner(&attachment.relative_path, "LFG")?;
-            Ok(LfgPanelAttachment {
-                bytes,
-                ..attachment
-            })
-        })
-        .collect()
+fn validate_lfg_panel_attachments(attachments: &[LfgPanelAttachment]) -> Result<(), String> {
+    let repo_root = lfg_repo_root();
+    for attachment in attachments {
+        let path = repo_root.join(&attachment.relative_path);
+        if !path.is_file() {
+            return Err(format!(
+                "LFG-Banner `{}` fehlt; LFG-Panel wird nicht gepostet/editiert",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn find_existing_lfg_v2_panel(messages: &[LfgPanelMessage]) -> Option<u64> {
@@ -3300,23 +3296,6 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(defaults, vec![expected]);
-    }
-
-    #[test]
-    fn lfg_banner_wird_einmal_mit_bytes_geladen_und_fehlender_banner_bricht_ab() {
-        for attachment in load_lfg_panel_attachments(lfg_panel_attachments()).expect("LFG-Banner") {
-            let on_disk = std::fs::read(lfg_repo_root().join(&attachment.relative_path))
-                .expect("Banner im Repo");
-            assert_eq!(attachment.bytes, on_disk);
-        }
-        let err = load_lfg_panel_attachments(vec![LfgPanelAttachment {
-            id: 0,
-            filename: "fehlt.png".to_string(),
-            relative_path: format!("{LFG_BANNER_DIR}/fehlt.png"),
-            bytes: Vec::new(),
-        }])
-        .expect_err("fehlender Banner");
-        assert!(err.contains("LFG-Banner") && err.contains("fehlt"), "{err}");
     }
 
     #[test]

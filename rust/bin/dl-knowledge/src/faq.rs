@@ -63,12 +63,13 @@ pub(crate) fn load(
         .parent()
         .context("FAQ-Snapshotwurzel fehlt")?
         .join("faq-manifest.json");
-    let present = dl_core::optional_file::present(&path)
-        .map_err(|reason| anyhow::anyhow!("FAQ-Manifest `{}` {reason}", path.display()))?;
-    if !present {
-        return Ok((Vec::new(), None));
-    }
-    let file = std::fs::File::open(&path).context("FAQ-Manifest öffnen")?;
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None))
+        }
+        Err(error) => return Err(error).context("FAQ-Manifest öffnen"),
+    };
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 1024 * 1024, "FAQ-Manifest zu groß");

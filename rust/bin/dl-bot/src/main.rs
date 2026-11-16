@@ -2030,7 +2030,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         let _member_directory_sweep = vanity::spawn_member_directory_sweep(
             central_pool.clone(),
-            adapter.http.clone(),
+            discord_token.clone(),
             &dispatcher,
         );
         let mut panel_cache_ready = dispatcher.subscribe_gateway();

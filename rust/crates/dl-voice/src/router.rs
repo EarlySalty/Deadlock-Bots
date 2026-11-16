@@ -214,8 +214,6 @@ pub struct RouterPanelAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,23 +252,8 @@ pub fn router_panel_attachments() -> Vec<RouterPanelAttachment> {
             id: u8::try_from(id).unwrap_or(u8::MAX),
             filename: filename.to_string(),
             relative_path: format!("{ROUTER_BANNER_DIR}/{filename}"),
-            bytes: Vec::new(),
         })
         .collect()
-}
-
-pub(crate) fn load_panel_banner(relative_path: &str, label: &str) -> Result<Vec<u8>, String> {
-    let path = router_repo_root().join(relative_path);
-    let reason = match dl_core::optional_file::read(&path) {
-        Ok(Some(bytes)) if !bytes.is_empty() => return Ok(bytes),
-        Ok(Some(_)) => "ist leer".to_string(),
-        Ok(None) => "fehlt".to_string(),
-        Err(reason) => reason,
-    };
-    Err(format!(
-        "{label}-Banner `{}` {reason}; {label}-Panel wird nicht gepostet/editiert",
-        path.display()
-    ))
 }
 
 pub fn router_mode(mode: &str) -> Option<RouterMode> {
@@ -539,33 +522,17 @@ pub fn voice_guide_detail_text() -> String {
     )
 }
 
-fn voice_guide_banner(path: &std::path::Path) -> Option<Vec<u8>> {
-    match dl_core::optional_file::read(path) {
-        Ok(Some(bytes)) if !bytes.is_empty() => Some(bytes),
-        Ok(Some(_)) => {
-            tracing::error!(path = %path.display(), "Voice-Guide-Banner ist leer; Antwort geht ohne Bild raus");
-            None
-        }
-        Ok(None) => {
-            tracing::warn!(path = %path.display(), "Voice-Guide-Banner fehlt; Antwort geht ohne Bild raus");
-            None
-        }
-        Err(reason) => {
-            tracing::error!(path = %path.display(), %reason, "Voice-Guide-Banner ist kaputt; Antwort geht ohne Bild raus");
-            None
-        }
-    }
-}
-
 pub fn voice_guide_detail_reply() -> BridgeReply {
     let text = voice_guide_detail_text();
     let banner_path = router_repo_root()
         .join(ROUTER_BANNER_DIR)
         .join(ROUTER_GUIDE_BANNER_FILENAME);
-    let banner = voice_guide_banner(&banner_path).map(|data| BridgeAttachment {
-        filename: ROUTER_GUIDE_BANNER_FILENAME.to_string(),
-        data,
-    });
+    let banner = std::fs::read(banner_path)
+        .ok()
+        .map(|data| BridgeAttachment {
+            filename: ROUTER_GUIDE_BANNER_FILENAME.to_string(),
+            data,
+        });
     let mut components = Vec::new();
     if banner.is_some() {
         components.push(router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME));
@@ -699,7 +666,7 @@ impl RouterInterface {
             return Ok(output);
         }
 
-        let attachments = load_router_panel_attachments(attachments)?;
+        validate_router_panel_attachments(&attachments)?;
 
         if let Some(message_id) = kv_message_id {
             if self
@@ -876,19 +843,18 @@ impl RouterInterface {
     }
 }
 
-fn load_router_panel_attachments(
-    attachments: Vec<RouterPanelAttachment>,
-) -> Result<Vec<RouterPanelAttachment>, String> {
-    attachments
-        .into_iter()
-        .map(|attachment| {
-            let bytes = load_panel_banner(&attachment.relative_path, "Router")?;
-            Ok(RouterPanelAttachment {
-                bytes,
-                ..attachment
-            })
-        })
-        .collect()
+fn validate_router_panel_attachments(attachments: &[RouterPanelAttachment]) -> Result<(), String> {
+    let repo_root = router_repo_root();
+    for attachment in attachments {
+        let path = repo_root.join(&attachment.relative_path);
+        if !path.is_file() {
+            return Err(format!(
+                "Router-Banner `{}` fehlt; Router-Panel wird nicht gepostet/editiert",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn find_existing_router_v2_panel(messages: &[RouterPanelMessage]) -> Option<u64> {
@@ -1971,19 +1937,6 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex as StdMutex;
 
-    fn loaded_router_panel_attachments() -> Vec<RouterPanelAttachment> {
-        load_router_panel_attachments(router_panel_attachments()).expect("Router-Banner im Repo")
-    }
-
-    #[test]
-    fn router_banner_werden_einmal_mit_bytes_geladen() {
-        for attachment in loaded_router_panel_attachments() {
-            let on_disk = std::fs::read(router_repo_root().join(&attachment.relative_path))
-                .expect("Banner im Repo");
-            assert_eq!(attachment.bytes, on_disk, "{}", attachment.filename);
-        }
-    }
-
     #[test]
     #[ignore = "Hilfsausgabe: druckt die echte Onboarding-DM zum Gegenlesen"]
     fn dump_intro_dm() {
@@ -2778,7 +2731,7 @@ mod tests {
         {
             let posts = port.posts.lock().expect("posts");
             assert_eq!(posts.len(), 1);
-            assert_eq!(posts[0].2, loaded_router_panel_attachments());
+            assert_eq!(posts[0].2, router_panel_attachments());
         }
         assert_eq!(
             dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
@@ -2800,7 +2753,7 @@ mod tests {
         {
             let edits = port.edits.lock().expect("edits");
             assert_eq!(edits.len(), 1);
-            assert_eq!(edits[0].3, loaded_router_panel_attachments());
+            assert_eq!(edits[0].3, router_panel_attachments());
         }
 
         *port.fail_edits.lock().expect("fail") = true;
@@ -2837,7 +2790,7 @@ mod tests {
         let edits = port.edits.lock().expect("edits");
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].1, 7004);
-        assert_eq!(edits[0].3, loaded_router_panel_attachments());
+        assert_eq!(edits[0].3, router_panel_attachments());
         assert_eq!(
             dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
                 .await
@@ -2883,7 +2836,7 @@ mod tests {
         {
             let posts = port.posts.lock().expect("posts");
             assert_eq!(posts.len(), 1);
-            assert_eq!(posts[0].2, loaded_router_panel_attachments());
+            assert_eq!(posts[0].2, router_panel_attachments());
         }
         assert_eq!(
             dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
@@ -3032,11 +2985,10 @@ mod tests {
 
     #[test]
     fn router_panel_attachment_validation_meldet_fehlende_banner_datei() {
-        let err = load_router_panel_attachments(vec![RouterPanelAttachment {
+        let err = validate_router_panel_attachments(&[RouterPanelAttachment {
             id: 0,
             filename: "fehlt.png".to_string(),
             relative_path: format!("{ROUTER_BANNER_DIR}/fehlt.png"),
-            bytes: Vec::new(),
         }])
         .expect_err("missing banner");
 

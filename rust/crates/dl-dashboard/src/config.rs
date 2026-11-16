@@ -93,14 +93,16 @@ impl DashboardConfig {
                 .filter(|v| !v.is_empty())
         };
 
-        let turnier_tokens = dl_core::runtime_config::tokens_by_names(
-            &lookup,
-            &dl_core::runtime_config::TURNIER_TOKEN_NAMES,
+        let turnier_tokens = collect_tokens(
+            &get,
+            &[
+                "TURNIER_INTERNAL_API_TOKEN",
+                "MASTER_BROKER_TOKEN",
+                "MAIN_BOT_INTERNAL_TOKEN",
+                "TWITCH_INTERNAL_API_TOKEN",
+            ],
         );
-        let twitch_tokens = dl_core::runtime_config::tokens_by_names(
-            &lookup,
-            &[dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME],
-        );
+        let twitch_tokens = collect_tokens(&get, &["TWITCH_INTERNAL_API_TOKEN"]);
 
         let public_base_url = Some(
             get("MASTER_DASHBOARD_PUBLIC_URL")
@@ -181,6 +183,18 @@ impl DashboardConfig {
     pub fn accepts_twitch_token(&self, token: &str) -> bool {
         token_matches(&self.twitch_tokens, token)
     }
+}
+
+fn collect_tokens(get: &impl Fn(&str) -> Option<String>, keys: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in keys {
+        if let Some(value) = get(key) {
+            if !out.contains(&value) {
+                out.push(value);
+            }
+        }
+    }
+    out
 }
 
 fn token_matches(tokens: &[String], candidate: &str) -> bool {
@@ -318,7 +332,8 @@ mod tests {
 
     #[test]
     fn turnier_token_fallbackkette_dedupliziert() {
-        let map = HashMap::from([(dl_core::runtime_config::MASTER_BROKER_TOKEN_NAME, "brk")]);
+        // Nur MASTER_BROKER_TOKEN gesetzt → landet in der Turnier-Kette.
+        let map = HashMap::from([("MASTER_BROKER_TOKEN", "brk")]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
         assert!(cfg.accepts_turnier_token("brk"));
         assert!(!cfg.accepts_turnier_token(""));
@@ -326,11 +341,8 @@ mod tests {
 
         // Gleicher Wert in mehreren Variablen → nur einmal.
         let map = HashMap::from([
-            (dl_core::runtime_config::TURNIER_TOKEN_NAME, "same"),
-            (
-                dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME,
-                "same",
-            ),
+            ("TURNIER_INTERNAL_API_TOKEN", "same"),
+            ("TWITCH_INTERNAL_API_TOKEN", "same"),
         ]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
         assert_eq!(cfg.turnier_tokens.len(), 1);

@@ -2100,19 +2100,24 @@ struct PatePanelText {
     inhalt: String,
 }
 
-fn load_pate_panel(repo_root: &std::path::Path) -> Result<PatePanelText, String> {
+fn load_pate_panel(repo_root: &std::path::Path) -> PatePanelText {
     let runtime_path = repo_root.join("assets/paten_panel.toml");
-    let raw = dl_core::optional_file::read_to_string(&runtime_path)
-        .map_err(|reason| format!("Paten-Panel-Datei `{}` {reason}", runtime_path.display()))?
-        .unwrap_or_else(|| include_str!("../../../../assets/paten_panel.toml").to_string());
-    toml::from_str::<PatePanelFile>(&raw)
-        .map(|file| file.panel)
-        .map_err(|err| {
-            format!(
-                "Paten-Panel-Texte in `{}` sind ungültig: {err}",
-                runtime_path.display()
-            )
-        })
+    let raw = match std::fs::read_to_string(&runtime_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(%err, path = %runtime_path.display(), "Concierge: Paten-Panel-Datei nicht lesbar; eingebetteter Entwurf wird verwendet");
+            include_str!("../../../../assets/paten_panel.toml").to_string()
+        }
+    };
+    match toml::from_str::<PatePanelFile>(&raw) {
+        Ok(file) => file.panel,
+        Err(err) => {
+            tracing::error!(%err, "Concierge: Paten-Panel-Texte sind ungueltig; eingebetteter Entwurf wird verwendet");
+            toml::from_str::<PatePanelFile>(include_str!("../../../../assets/paten_panel.toml"))
+                .map(|file| file.panel)
+                .unwrap_or_default()
+        }
+    }
 }
 
 fn pate_panel_body(text: &PatePanelText) -> Map<String, Value> {
@@ -2161,24 +2166,26 @@ pub fn validate_pate_leitfaden(repo_root: &std::path::Path) -> Result<(), String
     Ok(())
 }
 
-fn load_pate_leitfaden(repo_root: &std::path::Path) -> Result<PateLeitfadenText, String> {
+fn load_pate_leitfaden(repo_root: &std::path::Path) -> PateLeitfadenText {
     let runtime_path = repo_root.join("assets/paten_leitfaden.toml");
-    let raw = dl_core::optional_file::read_to_string(&runtime_path)
-        .map_err(|reason| {
-            format!(
-                "Paten-Leitfaden-Datei `{}` {reason}",
-                runtime_path.display()
-            )
-        })?
-        .unwrap_or_else(|| include_str!("../../../../assets/paten_leitfaden.toml").to_string());
-    toml::from_str::<PateLeitfadenFile>(&raw)
-        .map(|file| file.leitfaden)
-        .map_err(|err| {
-            format!(
-                "Paten-Leitfaden-Texte in `{}` sind ungültig: {err}",
-                runtime_path.display()
-            )
-        })
+    let raw = match std::fs::read_to_string(&runtime_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(%err, path = %runtime_path.display(), "Concierge: Paten-Leitfaden-Datei nicht lesbar; eingebetteter Entwurf wird verwendet");
+            include_str!("../../../../assets/paten_leitfaden.toml").to_string()
+        }
+    };
+    match toml::from_str::<PateLeitfadenFile>(&raw) {
+        Ok(file) => file.leitfaden,
+        Err(err) => {
+            tracing::error!(%err, "Concierge: Paten-Leitfaden-Texte sind ungueltig; eingebetteter Entwurf wird verwendet");
+            toml::from_str::<PateLeitfadenFile>(include_str!(
+                "../../../../assets/paten_leitfaden.toml"
+            ))
+            .map(|file| file.leitfaden)
+            .unwrap_or_default()
+        }
+    }
 }
 
 fn render_pate_leitfaden_content(text: &PateLeitfadenText) -> String {
@@ -5685,13 +5692,7 @@ impl Concierge {
         if !self.config.enabled {
             return;
         }
-        let text = match load_pate_leitfaden(repo_root) {
-            Ok(text) => text,
-            Err(reason) => {
-                tracing::error!(%reason, "Concierge: Paten-Leitfaden nicht geladen; nichts gepostet");
-                return;
-            }
-        };
+        let text = load_pate_leitfaden(repo_root);
         let content = render_pate_leitfaden_content(&text);
         let fingerprint = leitfaden_fingerprint(&content);
         let body = v2_body(&content, Vec::new());
@@ -5824,13 +5825,7 @@ impl Concierge {
         let Some(channel_id) = self.config.pate_panel_channel_id else {
             return;
         };
-        let text = match load_pate_panel(repo_root) {
-            Ok(text) => text,
-            Err(reason) => {
-                tracing::error!(%reason, "Concierge: Paten-Panel nicht geladen; nichts gepostet");
-                return;
-            }
-        };
+        let text = load_pate_panel(repo_root);
         if text.inhalt.trim().is_empty() || text.button.trim().is_empty() {
             tracing::error!("Concierge: Paten-Panel ohne Text oder Button; nichts gepostet");
             return;
@@ -14664,7 +14659,7 @@ mod tests {
     #[test]
     fn paten_panel_asset_hat_text_und_button() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let text = load_pate_panel(&root).expect("eingebetteter Paten-Panel-Entwurf");
+        let text = load_pate_panel(&root);
         assert_eq!(text.button, "Ich brauche einen Deadlock-Paten");
         assert!(text.inhalt.contains("Die Patenschaft läuft 30 Tage."));
         let raw = serde_json::to_string(&pate_panel_body(&text)).expect("body");
@@ -15378,9 +15373,7 @@ mod tests {
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(pool.clone(), port.clone(), test_config(true, &[]));
         let repo_root = std::path::Path::new("/nonexistent-paten-leitfaden-root");
-        let content = render_pate_leitfaden_content(
-            &load_pate_leitfaden(repo_root).expect("eingebetteter Paten-Leitfaden"),
-        );
+        let content = render_pate_leitfaden_content(&load_pate_leitfaden(repo_root));
         let fingerprint = leitfaden_fingerprint(&content);
         dl_central_db::kv::set(&pool, CONCIERGE_PATE_LEITFADEN_NS, "message_id", "9001")
             .await

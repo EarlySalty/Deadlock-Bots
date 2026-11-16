@@ -14,7 +14,6 @@ dl-activity.workspace = true
 dl-bridges.workspace = true
 dl-community.workspace = true
 dl-central-db.workspace = true
-dl-core.workspace = true
 dl-discord.workspace = true
 hound.workspace = true
 libc = "0.2"

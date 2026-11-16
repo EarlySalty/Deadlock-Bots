@@ -678,14 +678,10 @@ async fn load_static_html(app: &DashboardApp, name: &str) -> Option<String> {
         return Some(include_str!("../../../../service/static/dashboard.html").to_string());
     }
 
-    let path = app.repo_root()?.join("service/static").join(name);
-    match dl_core::optional_file::read_to_string(&path) {
-        Ok(html) => html,
-        Err(reason) => {
-            tracing::error!(path = %path.display(), %reason, "SPA-Datei ist kaputt");
-            None
-        }
-    }
+    let repo_root = app.repo_root()?;
+    tokio::fs::read_to_string(repo_root.join("service/static").join(name))
+        .await
+        .ok()
 }
 
 /// Setzt die drei Auth-Platzhalter in eine SPA-Datei ein (Nutzer-Label
@@ -2433,7 +2429,7 @@ mod tests {
         DashboardConfig::from_lookup(move |key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("client".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            dl_core::runtime_config::MASTER_BROKER_TOKEN_NAME => Some("brk".to_string()),
+            "MASTER_BROKER_TOKEN" => Some("brk".to_string()),
             "DISCORD_API_BASE" => Some(api_base.clone()),
             _ => None,
         })
@@ -3040,9 +3036,7 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
-                Some("test-token".to_string())
-            }
+            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
             _ => None,
         });
         let (_dir, db, app_state) = test_app(cfg).await;
@@ -3087,9 +3081,7 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
-                Some("test-token".to_string())
-            }
+            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
             _ => None,
         });
         let (_dir, db, app_state) = test_app(cfg).await;
@@ -3148,9 +3140,7 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
-                Some("twitch-test-token".to_string())
-            }
+            "TWITCH_INTERNAL_API_TOKEN" => Some("twitch-test-token".to_string()),
             _ => None,
         });
         let (_dir, _db, app) = test_app(cfg).await;

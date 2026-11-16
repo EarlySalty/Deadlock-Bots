@@ -62,10 +62,13 @@ async fn active_bot_fingerprint() -> Option<(String, u64)> {
         "{}/internal/master/v1/health",
         dl_core::runtime_config::lookup("MASTER_BROKER_BASE_URL")?.trim_end_matches('/')
     );
-    let token = dl_core::runtime_config::token_by_names(
-        dl_core::runtime_config::secret_value,
-        &dl_core::runtime_config::BROKER_TOKEN_NAMES,
-    )?;
+    let token = [
+        "MASTER_BROKER_TOKEN",
+        "MAIN_BOT_INTERNAL_TOKEN",
+        "TWITCH_INTERNAL_API_TOKEN",
+    ]
+    .into_iter()
+    .find_map(dl_core::runtime_config::secret_value)?;
     fetch_bot_fingerprint(&url, &token).await
 }
 
@@ -227,7 +230,16 @@ async fn steam_request(save: Option<dl_bridges::steam_operating::WriteRequest>) 
             ))
         }
     };
-    let token = dl_bridges::steam::internal_token_from_lookup(|name| std::env::var(name).ok());
+    // Bestehende Infisical-Secrets, kein zweiter Token oder Browserzugriff.
+    let token = [
+        "TWITCH_INTERNAL_API_TOKEN",
+        "STEAM_INTERNAL_API_TOKEN",
+        "INTERNAL_API_TOKEN",
+    ]
+    .into_iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .map(|value| value.trim().to_owned())
+    .find(|value| !value.is_empty());
     let client = dl_bridges::steam::SteamBotClient::new(&config.services.steam_api_url, token);
     match client.operating_config_write(save.as_ref()).await {
         Ok(value) => no_store(Json(value).into_response()),
