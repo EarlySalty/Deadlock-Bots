@@ -24,7 +24,7 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
-const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_WORST_CASE_MS + STEAM_INVITE_TASK_WAIT_MS;
+pub const INVITE_FORWARD_TIMEOUT_MS: u64 = STEAM_INVITE_WORST_CASE_MS + STEAM_INVITE_TASK_WAIT_MS;
 const INVITE_FORWARD_TIMEOUT: Duration = Duration::from_millis(INVITE_FORWARD_TIMEOUT_MS);
 
 const _: () = assert!(

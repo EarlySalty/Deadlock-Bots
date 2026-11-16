@@ -28,6 +28,7 @@ const ACTIONS_SINCE_KEY: &str = "actions_since_v1";
 const ROOM_WAIT_SECONDS: i64 = 60 * 60;
 pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
 const REQUEST_WINDOW_SECONDS: i64 = NEWCOMER_MAX_JOIN_SECONDS;
+const ACTIVE_DISPATCH_MILLIS: i64 = dl_bridges::steam::INVITE_FORWARD_TIMEOUT_MS as i64;
 const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
 const DISCORD_ANSWER_CHARS: usize = 2000;
 
@@ -1437,9 +1438,9 @@ fn update_state(
                 .is_some_and(|finished| event.created_at_millis <= finished);
         let replace = state.request.as_ref().is_none_or(|request| {
             let active_dispatch = request.phase == Phase::Dispatching
-                && state
-                    .dispatch_started_at_millis
-                    .is_some_and(|started| now_millis.saturating_sub(started) < 120_000);
+                && state.dispatch_started_at_millis.is_some_and(|started| {
+                    now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
+                });
             !active_dispatch
                 && !arrived_during_dispatch
                 && (direct || request.phase == Phase::WaitingForCode)
@@ -1908,6 +1909,54 @@ mod tests {
             Some(now - 60),
             now,
         ));
+    }
+
+    #[test]
+    fn laufender_versand_bleibt_bis_zum_bridge_timeout_bestehen() {
+        let started = 1_700_000_000_000;
+        for (elapsed, replaced) in [
+            (ACTIVE_DISPATCH_MILLIS - 1, false),
+            (ACTIVE_DISPATCH_MILLIS, true),
+        ] {
+            let mut state = LoungeState {
+                friend_code: Some("123456789".into()),
+                request: Some(Request {
+                    message_id: 1,
+                    created_at: started / 1000,
+                    direct: true,
+                    phase: Phase::Dispatching,
+                }),
+                dispatch_started_at_millis: Some(started),
+                ..LoungeState::default()
+            };
+            let at = started + elapsed;
+            let event = LoungeMessage {
+                guild_id: Some(1),
+                channel_id: 2,
+                message_id: 3,
+                author_id: 4,
+                content: String::new(),
+                created_at: at / 1000,
+                created_at_millis: at,
+                is_bot: false,
+                reply_message_id: None,
+            };
+            update_state(
+                &mut state,
+                &event,
+                Some(RequestKind::Direct),
+                None,
+                false,
+                at / 1000,
+                at,
+            );
+            let expected = if replaced { 3 } else { 1 };
+            assert_eq!(
+                state.request.map(|request| request.message_id),
+                Some(expected),
+                "{elapsed} ms nach dem Versandstart"
+            );
+        }
     }
 }
 
