@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use serenity::model::guild::Member;
 use serenity::model::id::{GuildId, RoleId, UserId};
 
 use super::{BOOSTER_ROLE_ID, SUPPORTER_ROLE_ID};
@@ -47,44 +46,6 @@ pub fn plan_roles(members: &[MemberSnapshot], active: &HashSet<u64>, max_revokes
     }
 }
 
-const MEMBER_PAGE_LIMIT: usize = 1000;
-
-fn next_cursor(after: Option<u64>, page: &[Member]) -> Result<Option<u64>, String> {
-    if page.len() < MEMBER_PAGE_LIMIT {
-        return Ok(None);
-    }
-    let cursor = page.iter().map(|member| member.user.id.get()).max();
-    match (after, cursor) {
-        (Some(previous), Some(next)) if next > previous => Ok(Some(next)),
-        (None, Some(next)) => Ok(Some(next)),
-        _ => Err("Mitgliederliste blättert nicht weiter".to_string()),
-    }
-}
-
-async fn fetch_all_members(
-    http: &serenity::http::Http,
-    guild: GuildId,
-    timeout: Duration,
-) -> Result<Vec<Member>, String> {
-    let mut members = Vec::new();
-    let mut after = None;
-    loop {
-        let page = tokio::time::timeout(
-            timeout,
-            http.get_guild_members(guild, Some(MEMBER_PAGE_LIMIT as u64), after),
-        )
-        .await
-        .map_err(|_| "Zeitlimit für eine Seite der Mitgliederliste überschritten".to_string())?
-        .map_err(|error| error.to_string())?;
-        let next = next_cursor(after, &page)?;
-        members.extend(page);
-        match next {
-            Some(cursor) => after = Some(cursor),
-            None => return Ok(members),
-        }
-    }
-}
-
 pub async fn fetch_members(
     http: &serenity::http::Http,
     guild_id: u64,
@@ -92,7 +53,9 @@ pub async fn fetch_members(
 ) -> Result<Vec<MemberSnapshot>, String> {
     let supporter_role = RoleId::new(SUPPORTER_ROLE_ID);
     let booster_role = RoleId::new(BOOSTER_ROLE_ID);
-    let members = fetch_all_members(http, GuildId::new(guild_id), timeout).await?;
+    let members =
+        dl_discord::adapter::fetch_all_guild_members(http, GuildId::new(guild_id), Some(timeout))
+            .await?;
     Ok(members
         .into_iter()
         .filter(|member| !member.user.bot)
@@ -168,27 +131,6 @@ mod tests {
         Duration::from_millis(150)
     }
 
-    fn page(ids: impl Iterator<Item = u64>) -> Vec<Member> {
-        let rows: Vec<serde_json::Value> = ids
-            .map(|id| {
-                serde_json::json!({
-                    "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
-                    "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
-                })
-            })
-            .collect();
-        serde_json::from_value(serde_json::Value::Array(rows)).expect("members")
-    }
-
-    #[test]
-    fn mitgliederseiten_blaettern_bis_zur_kurzen_seite_und_brechen_bei_stehendem_cursor_ab() {
-        let full = page((1..=MEMBER_PAGE_LIMIT as u64).rev());
-        assert_eq!(next_cursor(None, &full), Ok(Some(MEMBER_PAGE_LIMIT as u64)));
-        assert_eq!(next_cursor(Some(7), &page([3, 9, 5].into_iter())), Ok(None));
-        assert_eq!(next_cursor(None, &[]), Ok(None));
-        assert!(next_cursor(Some(MEMBER_PAGE_LIMIT as u64), &full).is_err());
-    }
-
     #[tokio::test]
     async fn hanging_member_snapshot_times_out_and_later_cycles_retry() {
         use std::sync::{
@@ -241,12 +183,13 @@ mod tests {
             .expect("boost source");
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
-        let app = axum::Router::new().route("/api/v10/guilds/{guild}/members", axum::routing::get(move || {
+        let app = axum::Router::new().route("/api/v10/guilds/{guild}/members", axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
             let seen = seen.clone();
             async move {
                 match seen.fetch_add(1, Ordering::SeqCst) {
                     0 => std::future::pending::<axum::Json<serde_json::Value>>().await,
                     1 => axum::Json(serde_json::json!([])),
+                    _ if query.contains_key("after") => axum::Json(serde_json::json!([])),
                     _ => axum::Json(serde_json::json!([{
                         "user": {"id": "2", "username": "member", "discriminator": "0001", "avatar": null},
                         "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0

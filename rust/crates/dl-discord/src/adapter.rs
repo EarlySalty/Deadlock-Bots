@@ -1068,32 +1068,16 @@ impl DiscordPort for DiscordAdapter {
             .iter()
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
-        let mut members = Vec::new();
-        let mut after = None;
-        loop {
-            let page = self
-                .http
-                .get_guild_members(gid, Some(1000), after)
-                .await
-                .map_err(|err| PortError::Discord(err.to_string()))?;
-            let Some(cursor) = page.iter().map(|member| member.user.id.get()).max() else {
-                break;
-            };
-            if after.is_some_and(|previous| cursor <= previous) {
-                return Err(PortError::Discord(
-                    "member pagination did not advance".into(),
-                ));
-            }
-            members.extend(
-                page.iter()
-                    .filter(|member| role_id == guild_id || member.roles.contains(&rid))
-                    .map(|member| MemberInfo {
-                        user_id: member.user.id.get(),
-                        display_name: member.display_name().to_string(),
-                    }),
-            );
-            after = Some(cursor);
-        }
+        let members = fetch_all_guild_members(&self.http, gid, None)
+            .await
+            .map_err(PortError::Discord)?
+            .iter()
+            .filter(|member| role_id == guild_id || member.roles.contains(&rid))
+            .map(|member| MemberInfo {
+                user_id: member.user.id.get(),
+                display_name: member.display_name().to_string(),
+            })
+            .collect();
         Ok(RoleMembers {
             role_id,
             name: role.name.clone(),
@@ -1409,6 +1393,46 @@ impl ChangelogDiscord for DiscordAdapter {
 }
 
 /// Serialisierung im Format von ChangelogPublisher._serialize_message.
+pub const GUILD_MEMBER_PAGE_LIMIT: u64 = 1000;
+
+pub async fn fetch_all_guild_members(
+    http: &Http,
+    guild: GuildId,
+    page_timeout: Option<std::time::Duration>,
+) -> Result<Vec<serenity::all::Member>, String> {
+    let mut members = Vec::new();
+    let mut after = None;
+    loop {
+        let request = http.get_guild_members(guild, Some(GUILD_MEMBER_PAGE_LIMIT), after);
+        let page = match page_timeout {
+            Some(limit) => tokio::time::timeout(limit, request).await.map_err(|_| {
+                "Zeitlimit für eine Seite der Mitgliederliste überschritten".to_string()
+            })?,
+            None => request.await,
+        }
+        .map_err(|error| error.to_string())?;
+        let next = next_member_cursor(after, &page)?;
+        members.extend(page);
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(members),
+        }
+    }
+}
+
+fn next_member_cursor(
+    after: Option<u64>,
+    page: &[serenity::all::Member],
+) -> Result<Option<u64>, String> {
+    let Some(next) = page.iter().map(|member| member.user.id.get()).max() else {
+        return Ok(None);
+    };
+    if after.is_some_and(|previous| next <= previous) {
+        return Err("Mitgliederliste blättert nicht weiter".to_string());
+    }
+    Ok(Some(next))
+}
+
 fn serialize_message_py(message: &serenity::all::Message) -> Value {
     let author_name = match message.author.discriminator {
         Some(d) => format!("{}#{:04}", message.author.name, d),
@@ -1434,6 +1458,35 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member_page(ids: impl Iterator<Item = u64>) -> Vec<serenity::all::Member> {
+        let rows: Vec<Value> = ids
+            .map(|id| {
+                json!({
+                    "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
+                    "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
+                })
+            })
+            .collect();
+        serde_json::from_value(Value::Array(rows)).expect("members")
+    }
+
+    #[test]
+    fn mitgliederseiten_blaettern_bis_zur_leeren_seite_und_brechen_bei_stehendem_cursor_ab() {
+        let full = member_page((1..=GUILD_MEMBER_PAGE_LIMIT).rev());
+        assert_eq!(
+            next_member_cursor(None, &full),
+            Ok(Some(GUILD_MEMBER_PAGE_LIMIT))
+        );
+        assert_eq!(
+            next_member_cursor(Some(7), &member_page([3, 9, 5].into_iter())),
+            Ok(Some(9))
+        );
+        assert_eq!(next_member_cursor(None, &[]), Ok(None));
+        assert_eq!(next_member_cursor(Some(9), &[]), Ok(None));
+        assert!(next_member_cursor(Some(9), &member_page([3, 9].into_iter())).is_err());
+        assert!(next_member_cursor(Some(GUILD_MEMBER_PAGE_LIMIT), &full).is_err());
+    }
 
     #[test]
     fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
