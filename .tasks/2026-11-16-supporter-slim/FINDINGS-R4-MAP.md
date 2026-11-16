@@ -1,6 +1,6 @@
 # Supporter P1 slim: round-4 finding map
 
-Findings 157 to 260 of `p1-slim-r3b-findings.txt` (gate run `gate-p1-slim-r3b.log`), each with its class and the commit that fixes it. A finding listed twice is fixed in parts by both commits. 157 is the last hook line of the file (`adapter.rs::member_json`, stale_state); the stalled member cursor it names stops through `next_page_cursor` since 09e742f6, tested by `mitgliederliste_bricht_bei_haengender_oder_wiederholter_seite_ohne_teilstand_ab`.
+Findings 157 to 260 of `p1-slim-r3b-findings.txt` (gate run `gate-p1-slim-r3b.log`), each with its class and the commit that fixes it. A finding listed twice is fixed in parts by both commits. 157 is the last hook line of the file: the hook flags the unit `adapter.rs::member_json` because reviewer finding 257 names it (the member JSON fixture written twice in the adapter tests and a third time in role_members_tests.rs). Since 09e742f6 `member_json` and `member_page` call the one `member_fixture`, which role_members_tests.rs uses too.
 
 | Class | Defect family | Commit | Findings |
 |---|---|---|---|
