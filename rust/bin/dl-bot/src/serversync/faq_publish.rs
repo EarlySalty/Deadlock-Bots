@@ -383,12 +383,12 @@ pub fn faq_payload_hash(messages: &[FaqMessageOutput]) -> Result<String, String>
                     sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
                 .collect::<Vec<_>>();
-            Ok(FaqPayloadHashMessage {
+            FaqPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("FAQ-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
