@@ -54,8 +54,7 @@ pub async fn fetch_members(
     let supporter_role = RoleId::new(SUPPORTER_ROLE_ID);
     let booster_role = RoleId::new(BOOSTER_ROLE_ID);
     let members =
-        dl_discord::adapter::fetch_all_guild_members(http, GuildId::new(guild_id), Some(timeout))
-            .await?;
+        dl_discord::adapter::fetch_all_guild_members(http, GuildId::new(guild_id), timeout).await?;
     Ok(members
         .into_iter()
         .filter(|member| !member.user.bot)

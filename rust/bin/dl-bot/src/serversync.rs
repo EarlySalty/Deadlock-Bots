@@ -1155,36 +1155,30 @@ impl ServerSyncService {
         format!("{}{}", self.discord_api_base.trim_end_matches('/'), path)
     }
 
+    async fn fetch_guild_members(&self) -> ServerSyncResult<Vec<serenity::all::Member>> {
+        dl_discord::adapter::fetch_all_guild_members(
+            &self.adapter.http,
+            GuildId::new(self.guild_id),
+            dl_discord::adapter::default_member_page_timeout(),
+        )
+        .await
+        .map_err(ServerSyncError::internal)
+    }
+
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut assignments = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
-                .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            assignments.extend(page.into_iter().map(|member| {
+        let mut assignments: Vec<MemberRoleAssignment> = self
+            .fetch_guild_members()
+            .await?
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 MemberRoleAssignment {
                     member_id: member.user.id.get(),
                     role_ids,
                 }
-            }));
-            if assignments.last().is_none() || after.is_none() {
-                break;
-            }
-            if assignments.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         assignments.sort_unstable_by_key(|entry| entry.member_id);
         Ok(assignments)
     }
@@ -1692,21 +1686,11 @@ impl ServerSyncService {
     }
 
     async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut members = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
-                .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            members.extend(page.into_iter().map(|member| {
+        let mut members: Vec<WelcomeTeamMember> = self
+            .fetch_guild_members()
+            .await?
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 WelcomeTeamMember {
@@ -1714,14 +1698,8 @@ impl ServerSyncService {
                     role_ids,
                     bot: member.user.bot,
                 }
-            }));
-            if members.last().is_none() || after.is_none() {
-                break;
-            }
-            if members.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         members.sort_unstable_by_key(|entry| entry.user_id);
         Ok(members)
     }

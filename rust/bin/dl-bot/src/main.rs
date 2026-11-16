@@ -2012,7 +2012,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         let _member_directory_sweep = vanity::spawn_member_directory_sweep(
             central_pool.clone(),
-            discord_token.clone(),
+            adapter.http.clone(),
             &dispatcher,
         );
         let mut panel_cache_ready = dispatcher.subscribe_gateway();

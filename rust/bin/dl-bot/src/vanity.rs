@@ -25,18 +25,6 @@ struct VanitySnapshot {
     captured_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
-struct DirectoryMember {
-    user: DirectoryUser,
-    joined_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DirectoryUser {
-    id: String,
-    bot: Option<bool>,
-}
-
 pub fn spawn_vanity_snapshots(
     pool: PgPool,
     token: String,
@@ -76,11 +64,10 @@ pub fn spawn_vanity_snapshots(
 
 pub fn spawn_member_directory_sweep(
     pool: PgPool,
-    token: String,
+    http: std::sync::Arc<serenity::http::Http>,
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
     tokio::spawn(async move {
         let mut guilds = BTreeSet::new();
         let start = tokio::time::Instant::now() + MEMBER_DIRECTORY_INTERVAL;
@@ -92,7 +79,7 @@ pub fn spawn_member_directory_sweep(
                     match event {
                         Ok(dl_discord::GatewayEvent::CacheReady { guild_ids }) => {
                             guilds.extend(guild_ids);
-                            run_directory_sweeps(&pool, &client, &token, &guilds).await;
+                            run_directory_sweeps(&pool, &http, &guilds).await;
                         }
                         Ok(dl_discord::GatewayEvent::Ready { .. }) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
@@ -102,7 +89,7 @@ pub fn spawn_member_directory_sweep(
                     }
                 }
                 _ = interval.tick(), if !guilds.is_empty() => {
-                    run_directory_sweeps(&pool, &client, &token, &guilds).await;
+                    run_directory_sweeps(&pool, &http, &guilds).await;
                 }
             }
         }
@@ -270,14 +257,9 @@ async fn purge_old_vanity_snapshots(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn run_directory_sweeps(
-    pool: &PgPool,
-    client: &reqwest::Client,
-    token: &str,
-    guilds: &BTreeSet<u64>,
-) {
+async fn run_directory_sweeps(pool: &PgPool, http: &serenity::http::Http, guilds: &BTreeSet<u64>) {
     for guild_id in guilds.iter().copied().collect::<Vec<_>>() {
-        if let Err(err) = sync_member_directory(pool, client, token, guild_id).await {
+        if let Err(err) = sync_member_directory(pool, http, guild_id).await {
             tracing::warn!(%err, guild_id, "Guild-Member-Directory-Sweep fehlgeschlagen");
         }
     }
@@ -285,31 +267,21 @@ async fn run_directory_sweeps(
 
 async fn sync_member_directory(
     pool: &PgPool,
-    client: &reqwest::Client,
-    token: &str,
+    http: &serenity::http::Http,
     guild_id: u64,
 ) -> TaskResult<()> {
     let guild_id_i64 = i64::try_from(guild_id)?;
     let sweep_started_at = Utc::now();
-    let mut after = None;
-    let mut seen = 0usize;
-
-    loop {
-        let page = fetch_member_page(client, token, guild_id, after).await?;
-        if page.is_empty() {
-            break;
-        }
-        for member in &page {
-            upsert_directory_member(pool, guild_id_i64, member, sweep_started_at).await?;
-        }
-        seen += page.len();
-        after = page
-            .last()
-            .and_then(|member| member.user.id.parse::<u64>().ok());
-        if page.len() < 1000 || after.is_none() {
-            break;
-        }
+    let members = dl_discord::adapter::fetch_all_guild_members(
+        http,
+        serenity::all::GuildId::new(guild_id),
+        dl_discord::adapter::default_member_page_timeout(),
+    )
+    .await?;
+    for member in &members {
+        upsert_directory_member(pool, guild_id_i64, member, sweep_started_at).await?;
     }
+    let seen = members.len();
 
     let absent = sqlx::query(
         r#"
@@ -335,38 +307,17 @@ async fn sync_member_directory(
     Ok(())
 }
 
-async fn fetch_member_page(
-    client: &reqwest::Client,
-    token: &str,
-    guild_id: u64,
-    after: Option<u64>,
-) -> TaskResult<Vec<DirectoryMember>> {
-    let mut url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/members?limit=1000");
-    if let Some(after) = after {
-        url.push_str("&after=");
-        url.push_str(&after.to_string());
-    }
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bot {token}"))
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        return Err(format!("discord status {}", response.status()).into());
-    }
-    Ok(response.json::<Vec<DirectoryMember>>().await?)
-}
-
 async fn upsert_directory_member(
     pool: &PgPool,
     guild_id: i64,
-    member: &DirectoryMember,
+    member: &serenity::all::Member,
     synced_at: DateTime<Utc>,
 ) -> TaskResult<()> {
-    let user_id_u64 = member.user.id.parse::<u64>()?;
+    let user_id_u64 = member.user.id.get();
     let user_id = i64::try_from(user_id_u64)?;
     let joined_at = member
         .joined_at
+        .and_then(|timestamp| timestamp.to_rfc3339())
         .as_deref()
         .and_then(parse_discord_timestamp);
     let account_created_at = discord_snowflake_created_at(user_id_u64);
@@ -388,7 +339,7 @@ async fn upsert_directory_member(
     .bind(user_id)
     .bind(joined_at)
     .bind(account_created_at)
-    .bind(member.user.bot.unwrap_or(false))
+    .bind(member.user.bot)
     .bind(synced_at)
     .execute(pool)
     .await?;

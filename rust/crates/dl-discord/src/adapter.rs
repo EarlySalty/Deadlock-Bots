@@ -1068,7 +1068,7 @@ impl DiscordPort for DiscordAdapter {
             .iter()
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
-        let members = fetch_all_guild_members(&self.http, gid, None)
+        let members = fetch_all_guild_members(&self.http, gid, default_member_page_timeout())
             .await
             .map_err(PortError::Discord)?
             .iter()
@@ -1392,25 +1392,25 @@ impl ChangelogDiscord for DiscordAdapter {
     }
 }
 
-/// Serialisierung im Format von ChangelogPublisher._serialize_message.
 pub const GUILD_MEMBER_PAGE_LIMIT: u64 = 1000;
+
+pub fn default_member_page_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(dl_core::runtime_config::HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+}
 
 pub async fn fetch_all_guild_members(
     http: &Http,
     guild: GuildId,
-    page_timeout: Option<std::time::Duration>,
+    page_timeout: std::time::Duration,
 ) -> Result<Vec<serenity::all::Member>, String> {
     let mut members = Vec::new();
     let mut after = None;
     loop {
         let request = http.get_guild_members(guild, Some(GUILD_MEMBER_PAGE_LIMIT), after);
-        let page = match page_timeout {
-            Some(limit) => tokio::time::timeout(limit, request).await.map_err(|_| {
-                "Zeitlimit für eine Seite der Mitgliederliste überschritten".to_string()
-            })?,
-            None => request.await,
-        }
-        .map_err(|error| error.to_string())?;
+        let page = tokio::time::timeout(page_timeout, request)
+            .await
+            .map_err(|_| "Zeitlimit für eine Seite der Mitgliederliste überschritten".to_string())?
+            .map_err(|error| error.to_string())?;
         let next = next_member_cursor(after, &page)?;
         members.extend(page);
         match next {
@@ -1433,6 +1433,7 @@ fn next_member_cursor(
     Ok(Some(next))
 }
 
+/// Serialisierung im Format von ChangelogPublisher._serialize_message.
 fn serialize_message_py(message: &serenity::all::Message) -> Value {
     let author_name = match message.author.discriminator {
         Some(d) => format!("{}#{:04}", message.author.name, d),
@@ -1486,6 +1487,91 @@ mod tests {
         assert_eq!(next_member_cursor(Some(9), &[]), Ok(None));
         assert!(next_member_cursor(Some(9), &member_page([3, 9].into_iter())).is_err());
         assert!(next_member_cursor(Some(GUILD_MEMBER_PAGE_LIMIT), &full).is_err());
+    }
+
+    async fn member_pages_server(
+        pages: Vec<Option<Value>>,
+    ) -> std::io::Result<(Http, tokio::task::JoinHandle<()>)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            for page in pages {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    if socket.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    request.push(byte[0]);
+                }
+                let Some(page) = page else {
+                    std::future::pending::<()>().await;
+                    return;
+                };
+                let body = page.to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                if socket.write_all(response.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let http = serenity::http::HttpBuilder::new("test-only")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .build();
+        Ok((http, server))
+    }
+
+    fn member_json(id: u64) -> Value {
+        json!({
+            "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
+            "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
+        })
+    }
+
+    #[tokio::test]
+    async fn mitgliederliste_bricht_bei_haengender_oder_wiederholter_seite_ohne_teilstand_ab(
+    ) -> std::io::Result<()> {
+        let short = std::time::Duration::from_millis(200);
+        let (http, server) = member_pages_server(vec![
+            Some(json!([member_json(10), member_json(11)])),
+            Some(json!([member_json(12)])),
+            Some(json!([])),
+        ])
+        .await?;
+        let members = fetch_all_guild_members(&http, GuildId::new(1), short).await;
+        server.abort();
+        assert_eq!(
+            members.map(|page| page.iter().map(|m| m.user.id.get()).collect::<Vec<_>>()),
+            Ok(vec![10, 11, 12])
+        );
+
+        let (http, server) =
+            member_pages_server(vec![Some(json!([member_json(10), member_json(11)])), None])
+                .await?;
+        let hanging = fetch_all_guild_members(&http, GuildId::new(1), short).await;
+        server.abort();
+        assert_eq!(
+            hanging.err().as_deref(),
+            Some("Zeitlimit für eine Seite der Mitgliederliste überschritten")
+        );
+
+        let (http, server) = member_pages_server(vec![
+            Some(json!([member_json(10), member_json(11)])),
+            Some(json!([member_json(10), member_json(11)])),
+        ])
+        .await?;
+        let repeated = fetch_all_guild_members(&http, GuildId::new(1), short).await;
+        server.abort();
+        assert_eq!(
+            repeated.err().as_deref(),
+            Some("Mitgliederliste blättert nicht weiter")
+        );
+        Ok(())
     }
 
     #[test]
