@@ -10022,11 +10022,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![rang_guide_publish::RangGuidePayloadAttachment {
                 id: 0,
                 filename: rang_guide_publish::RANG_GUIDE_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    rang_guide_publish::RANG_GUIDE_BANNER_DIR,
-                    rang_guide_publish::RANG_GUIDE_HERO_FILENAME
-                ),
                 bytes: Vec::new(),
             }],
         };
@@ -10109,11 +10104,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![regelwerk_publish::RegelwerkPayloadAttachment {
                 id: 0,
                 filename: regelwerk_publish::REGELWERK_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    regelwerk_publish::REGELWERK_BANNER_DIR,
-                    regelwerk_publish::REGELWERK_HERO_FILENAME
-                ),
                 bytes: Vec::new(),
             }],
         };
@@ -10236,11 +10226,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![faq_publish::FaqPayloadAttachment {
                 id: 0,
                 filename: faq_publish::FAQ_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    faq_publish::FAQ_BANNER_DIR,
-                    faq_publish::FAQ_HERO_FILENAME
-                ),
                 bytes: Vec::new(),
             }],
         };
