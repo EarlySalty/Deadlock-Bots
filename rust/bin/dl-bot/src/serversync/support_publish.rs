@@ -590,28 +590,36 @@ pub fn render_funding_text(template: &str, funding: SupportFunding) -> String {
         .replace("{ziel}", &format_euro(funding.goal_cents))
 }
 
-fn funding_percent(funding: SupportFunding) -> i64 {
-    if funding.goal_cents <= 0 {
-        return 0;
-    }
-    funding.raised_cents.max(0).saturating_mul(100) / funding.goal_cents
+fn funding_percent(funding: SupportFunding) -> i128 {
+    funding_share(funding, 100)
 }
 
 fn funding_bar(funding: SupportFunding) -> String {
-    let raised = funding.raised_cents.max(0);
-    let filled = if funding.goal_cents <= 0 {
-        0
-    } else {
-        let exact = raised.saturating_mul(FUNDING_BAR_SEGMENTS) / funding.goal_cents;
-        let at_least_one = if raised > 0 { exact.max(1) } else { exact };
-        at_least_one.min(FUNDING_BAR_SEGMENTS)
-    };
-    let empty = FUNDING_BAR_SEGMENTS - filled;
+    let segments = i128::from(FUNDING_BAR_SEGMENTS);
+    let filled = funding_share(funding, segments).min(segments);
     format!(
         "`{}{}`",
-        "█".repeat(filled as usize),
-        "░".repeat(empty as usize)
+        "█".repeat(segment_count(filled)),
+        "░".repeat(segment_count(segments - filled))
     )
+}
+
+fn funding_share(funding: SupportFunding, scale: i128) -> i128 {
+    let raised = i128::from(funding.raised_cents.max(0));
+    let goal = i128::from(funding.goal_cents);
+    if goal <= 0 {
+        return 0;
+    }
+    let exact = raised * scale / goal;
+    if raised > 0 {
+        exact.max(1)
+    } else {
+        exact
+    }
+}
+
+fn segment_count(value: i128) -> usize {
+    usize::try_from(value).unwrap_or(0)
 }
 
 pub fn format_euro(cents: i64) -> String {
@@ -1721,6 +1729,20 @@ enabled = false
             render_funding_text(template, big),
             "`░░░░░░░░░░░░░░░░░░░░` 0 % 1.234.567 € von 0 €"
         );
+        let tiny = SupportFunding {
+            raised_cents: 500,
+            goal_cents: 100_000,
+        };
+        assert_eq!(
+            render_funding_text(template, tiny),
+            "`█░░░░░░░░░░░░░░░░░░░` 1 % 5 € von 1.000 €"
+        );
+        let huge = SupportFunding {
+            raised_cents: i64::MAX,
+            goal_cents: 7,
+        };
+        assert_eq!(funding_percent(huge), i128::from(i64::MAX) * 100 / 7);
+        assert!(render_funding_text(template, huge).starts_with("`████████████████████` "));
     }
 
     #[test]
