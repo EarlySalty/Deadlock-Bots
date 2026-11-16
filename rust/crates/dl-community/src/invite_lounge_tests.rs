@@ -5046,3 +5046,25 @@ async fn hilfe_kurz_vor_der_nachfrage_schliesst_die_bitte() {
     assert!(notices(&brain).is_empty());
     assert!(invite.calls.lock().await.is_empty());
 }
+
+#[tokio::test]
+async fn code_fuer_die_wartende_bitte_gilt_nicht_als_ignorierte_antwort() {
+    let (watcher, store, _, _, brain) = setup_check_ins(Vec::new());
+    watcher
+        .handle_message(message(1, NOW, IMPERSONAL_REQUEST), NOW, Some(false))
+        .await
+        .expect("Bitte wird angelegt");
+    let (capture, guard) = capture_logs();
+    watcher
+        .handle_message(message(2, NOW + 60, "123456789"), NOW + 60, Some(false))
+        .await
+        .expect("Code wird gelesen");
+    drop(guard);
+    assert!(!capture
+        .text()
+        .contains("Invite-Lounge wertet Nachricht des Mitglieds nicht als Antwort"));
+    assert!(check_in_texts(&brain).is_empty());
+    let state = stored(&store).await;
+    assert_eq!(state.friend_code.as_deref(), Some("123456789"));
+    assert_eq!(state.request.expect("Bitte bleibt").phase, Phase::Pending);
+}
