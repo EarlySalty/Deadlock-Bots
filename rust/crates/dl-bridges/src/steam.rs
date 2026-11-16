@@ -99,9 +99,15 @@ pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<
 }
 
 pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    supporter_wire::SUPPORTER_TOKEN_NAMES
-        .iter()
-        .find_map(|name| trimmed(&lookup, name))
+    token_by_names(lookup, &supporter_wire::SUPPORTER_TOKEN_NAMES)
+}
+
+pub fn internal_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    token_by_names(lookup, &supporter_wire::STEAM_INTERNAL_TOKEN_NAMES)
+}
+
+pub fn token_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| trimmed(&lookup, name))
 }
 
 fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
@@ -1575,12 +1581,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn supporter_token_follows_the_shared_name_order() {
-        let names = supporter_wire::SUPPORTER_TOKEN_NAMES;
+    fn assert_follows_name_order(
+        names: &[&str],
+        read: impl Fn(&dyn Fn(&str) -> Option<String>) -> Option<String>,
+    ) {
         for first in 0..names.len() {
             let answering = &names[first..];
-            let token = token_from_lookup(|key| {
+            let token = read(&|key| {
                 answering
                     .iter()
                     .position(|name| *name == key)
@@ -1588,13 +1595,26 @@ mod tests {
             });
             assert_eq!(token, Some(format!("value-{first}")), "{}", names[first]);
         }
-        let blank_first =
-            token_from_lookup(|key| match names.iter().position(|name| *name == key) {
-                Some(0) => Some("   ".to_string()),
-                Some(index) => Some(format!("value-{index}")),
-                None => None,
-            });
+        let blank_first = read(&|key| match names.iter().position(|name| *name == key) {
+            Some(0) => Some("   ".to_string()),
+            Some(index) => Some(format!("value-{index}")),
+            None => None,
+        });
         assert_eq!(blank_first.as_deref(), Some("value-1"));
-        assert_eq!(token_from_lookup(|_| None), None);
+        assert_eq!(read(&|_| None), None);
+    }
+
+    #[test]
+    fn supporter_token_follows_the_shared_name_order() {
+        assert_follows_name_order(&supporter_wire::SUPPORTER_TOKEN_NAMES, |lookup| {
+            token_from_lookup(lookup)
+        });
+    }
+
+    #[test]
+    fn steam_internal_token_follows_the_shared_name_order() {
+        assert_follows_name_order(&supporter_wire::STEAM_INTERNAL_TOKEN_NAMES, |lookup| {
+            internal_token_from_lookup(lookup)
+        });
     }
 }

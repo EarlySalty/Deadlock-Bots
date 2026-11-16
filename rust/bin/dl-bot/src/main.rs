@@ -41,6 +41,13 @@ fn env(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn shared_broker_token() -> Option<String> {
+    dl_bridges::steam::token_by_names(
+        operating_value,
+        &dl_core::runtime_config::BROKER_TOKEN_NAMES,
+    )
+}
+
 fn warn_if_lagebild_token_empty(token: &str) {
     if token.is_empty() {
         tracing::warn!(
@@ -666,9 +673,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
-        env("MASTER_BROKER_TOKEN")
-            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+        shared_broker_token(),
     );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
@@ -1399,11 +1404,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
     };
 
-    // Master-Broker :8770 — Token-Kette wie das Original
-    let broker_token = env("MASTER_BROKER_TOKEN")
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
-        .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let broker_token = shared_broker_token().with_context(|| {
+        format!(
+            "Broker-Token fehlt ({})",
+            dl_core::runtime_config::BROKER_TOKEN_NAMES.join("/")
+        )
+    })?;
     let twitch_invites = twitch_invites::TwitchInvites::new(
         central_pool.clone(),
         adapter.clone(),
@@ -1480,13 +1486,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
     // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN")
-        .or_else(|| env("MASTER_BROKER_TOKEN"))
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"));
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(shared_broker_token);
     if serversync_token.is_none() {
         tracing::warn!(
-            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
+            names = %dl_core::runtime_config::BROKER_TOKEN_NAMES.join("/"),
+            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN oder Broker-Token), Server-Sync-HTTP-Routen liefern 403"
         );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);

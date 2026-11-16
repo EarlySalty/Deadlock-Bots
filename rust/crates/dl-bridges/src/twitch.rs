@@ -79,14 +79,13 @@ pub struct TwitchApiClient {
 }
 
 impl TwitchApiClient {
-    /// ENVs wie das Original; `None` wenn kein TWITCH_INTERNAL_API_TOKEN gesetzt ist.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let token = get("TWITCH_INTERNAL_API_TOKEN")?;
+        let token = crate::steam::twitch_internal_token(&lookup)?;
         let base_url = get("TWITCH_INTERNAL_API_BASE_URL").unwrap_or_else(|| {
             let host = get("TWITCH_INTERNAL_API_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
             let port = get("TWITCH_INTERNAL_API_PORT")
