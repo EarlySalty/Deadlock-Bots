@@ -88,10 +88,7 @@ mod tests {
             crate::runtime_config::secret_value("DISCORD_TOKEN").as_deref(),
             Some("synthetic-token")
         );
-        assert!(crate::runtime_config::secret_value(
-            crate::runtime_config::MASTER_BROKER_TOKEN_NAME
-        )
-        .is_none());
+        assert!(crate::runtime_config::secret_value("MASTER_BROKER_TOKEN").is_none());
         assert!(crate::runtime_config::secret_value("RUST_LOG").is_none());
         assert!(value("MISSING_DSN").is_none());
         assert!(value("EMPTY_DSN").is_none());

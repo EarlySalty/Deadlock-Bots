@@ -473,7 +473,7 @@ impl DiscordAdapter {
                 ChannelId::new(channel_id),
                 MessageId::new(message_id),
                 emoji,
-                REACTION_USERS_PAGE_LIMIT,
+                100,
                 after,
             )
             .await?;
@@ -1068,16 +1068,32 @@ impl DiscordPort for DiscordAdapter {
             .iter()
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
-        let members = fetch_all_guild_members(&self.http, gid, discord_call_timeout())
-            .await
-            .map_err(PortError::Discord)?
-            .iter()
-            .filter(|member| role_id == guild_id || member.roles.contains(&rid))
-            .map(|member| MemberInfo {
-                user_id: member.user.id.get(),
-                display_name: member.display_name().to_string(),
-            })
-            .collect();
+        let mut members = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .http
+                .get_guild_members(gid, Some(1000), after)
+                .await
+                .map_err(|err| PortError::Discord(err.to_string()))?;
+            let Some(cursor) = page.iter().map(|member| member.user.id.get()).max() else {
+                break;
+            };
+            if after.is_some_and(|previous| cursor <= previous) {
+                return Err(PortError::Discord(
+                    "member pagination did not advance".into(),
+                ));
+            }
+            members.extend(
+                page.iter()
+                    .filter(|member| role_id == guild_id || member.roles.contains(&rid))
+                    .map(|member| MemberInfo {
+                        user_id: member.user.id.get(),
+                        display_name: member.display_name().to_string(),
+                    }),
+            );
+            after = Some(cursor);
+        }
         Ok(RoleMembers {
             role_id,
             name: role.name.clone(),
@@ -1393,7 +1409,6 @@ impl ChangelogDiscord for DiscordAdapter {
 }
 
 pub const GUILD_MEMBER_PAGE_LIMIT: u64 = 1000;
-pub const REACTION_USERS_PAGE_LIMIT: u8 = 100;
 
 pub fn discord_call_timeout() -> std::time::Duration {
     std::time::Duration::from_millis(dl_core::runtime_config::DISCORD_CALL_TIMEOUT_MS)

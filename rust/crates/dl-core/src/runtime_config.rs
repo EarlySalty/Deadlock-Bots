@@ -49,18 +49,6 @@ pub const DISCORD_CALL_TIMEOUT_MS: u64 =
     DISCORD_REQUEST_TIMEOUT_MS + DISCORD_RATE_LIMIT_WAIT_BUDGET_MS;
 const _: () =
     assert!(DISCORD_CALL_TIMEOUT_MS < *SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() * 1_000);
-pub const DISCORD_INTERACTION_TOKEN_MS: u64 = 15 * 60 * 1_000;
-pub const STEAM_INVITE_TASK_WAIT_MS: u64 = 90_000;
-pub const STEAM_INVITE_WORST_CASE_MS: u64 = 2 * STEAM_INVITE_TASK_WAIT_MS;
-pub const STEAM_INVITE_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
-    STEAM_INVITE_WORST_CASE_MS + 1..=DISCORD_INTERACTION_TOKEN_MS;
-pub const STEAM_INVITE_HANDLER_SLACK_MS: u64 = STEAM_INVITE_TASK_WAIT_MS;
-pub const STEAM_INVITE_BRIDGE_TIMEOUT_MS: u64 =
-    STEAM_INVITE_WORST_CASE_MS + STEAM_INVITE_HANDLER_SLACK_MS;
-const _: () = assert!(
-    STEAM_INVITE_BRIDGE_TIMEOUT_MS >= *STEAM_INVITE_TIMEOUT_MS_RANGE.start()
-        && STEAM_INVITE_BRIDGE_TIMEOUT_MS <= *STEAM_INVITE_TIMEOUT_MS_RANGE.end()
-);
 
 pub const MASTER_BROKER_TOKEN_NAME: &str = "MASTER_BROKER_TOKEN";
 pub const MAIN_BOT_TOKEN_NAME: &str = "MAIN_BOT_INTERNAL_TOKEN";
@@ -70,43 +58,8 @@ pub const SERVERSYNC_TOKEN_NAME: &str = "SERVERSYNC_INTERNAL_TOKEN";
 pub const STEAM_INTERNAL_API_TOKEN_NAME: &str = "STEAM_INTERNAL_API_TOKEN";
 pub const INTERNAL_API_TOKEN_NAME: &str = "INTERNAL_API_TOKEN";
 
-pub const BROKER_TOKEN_NAMES: [&str; 3] = [
-    MASTER_BROKER_TOKEN_NAME,
-    MAIN_BOT_TOKEN_NAME,
-    supporter_wire::TWITCH_TOKEN_NAME,
-];
-
-pub const TURNIER_TOKEN_NAMES: [&str; 4] = [
-    TURNIER_TOKEN_NAME,
-    BROKER_TOKEN_NAMES[0],
-    BROKER_TOKEN_NAMES[1],
-    BROKER_TOKEN_NAMES[2],
-];
-
-pub const PUBLIC_STATS_RELAY_TOKEN_NAMES: [&str; 3] = [
-    TURNIER_TOKEN_NAME,
-    MAIN_BOT_TOKEN_NAME,
-    supporter_wire::TWITCH_TOKEN_NAME,
-];
-
-pub const COACHING_WEBSITE_TOKEN_NAMES: [&str; 3] = [
-    supporter_wire::TWITCH_TOKEN_NAME,
-    MASTER_BROKER_TOKEN_NAME,
-    COACHING_BOT_TOKEN_NAME,
-];
-
 pub fn token_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| token_value(&lookup, name))
-}
-
-pub fn tokens_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    for value in names.iter().filter_map(|name| token_value(&lookup, name)) {
-        if !tokens.contains(&value) {
-            tokens.push(value);
-        }
-    }
-    tokens
 }
 
 fn token_value(lookup: impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
@@ -121,11 +74,6 @@ pub mod supporter_wire {
         TWITCH_TOKEN_NAME,
         super::MASTER_BROKER_TOKEN_NAME,
         super::MAIN_BOT_TOKEN_NAME,
-    ];
-    pub const STEAM_INTERNAL_TOKEN_NAMES: [&str; 3] = [
-        TWITCH_TOKEN_NAME,
-        super::STEAM_INTERNAL_API_TOKEN_NAME,
-        super::INTERNAL_API_TOKEN_NAME,
     ];
     pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
     pub const TIP_PATH: &str = "/supporter/v1/tip";

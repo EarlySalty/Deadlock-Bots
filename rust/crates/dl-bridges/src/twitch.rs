@@ -79,13 +79,14 @@ pub struct TwitchApiClient {
 }
 
 impl TwitchApiClient {
+    /// ENVs wie das Original; `None` wenn kein TWITCH_INTERNAL_API_TOKEN gesetzt ist.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let token = crate::steam::twitch_internal_token(&lookup)?;
+        let token = get("TWITCH_INTERNAL_API_TOKEN")?;
         let base_url = get("TWITCH_INTERNAL_API_BASE_URL").unwrap_or_else(|| {
             let host = get("TWITCH_INTERNAL_API_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
             let port = get("TWITCH_INTERNAL_API_PORT")
@@ -999,7 +1000,7 @@ mod tests {
             ))
             .expect("Loopback-Konfiguration");
             let client = super::TwitchApiClient::from_env(|key| {
-                if key == dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME {
+                if key == "TWITCH_INTERNAL_API_TOKEN" {
                     Some("synthetic-test-token".into())
                 } else {
                     config.runtime_value(key)

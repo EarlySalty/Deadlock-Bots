@@ -1,6 +1,6 @@
 //! Revisionsgesicherter Editor für katalogisierte Betriebswerte.
 //! Laufende Prozesse behalten ihren Stand bis zum kontrollierten Neustart.
-use crate::bot_config::{BotConfig, BotConfigError, BotConfigStore, CONCIERGE_TIMEOUT_ERROR};
+use crate::bot_config::{BotConfig, BotConfigError, BotConfigStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -87,9 +87,9 @@ impl BotConfigStore {
             ]),
         )
         .map_err(|error| match error {
-            EditError::Catalog(_) => {
-                EditError::Invalid(BotConfigError::Validation(CONCIERGE_TIMEOUT_ERROR))
-            }
+            EditError::Catalog(_) => EditError::Invalid(BotConfigError::Validation(
+                "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
+            )),
             other => other,
         })
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -28,7 +28,6 @@ const ACTIONS_SINCE_KEY: &str = "actions_since_v1";
 const ROOM_WAIT_SECONDS: i64 = 60 * 60;
 pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
 const REQUEST_WINDOW_SECONDS: i64 = NEWCOMER_MAX_JOIN_SECONDS;
-const ACTIVE_DISPATCH_MILLIS: i64 = dl_bridges::steam::INVITE_FORWARD_TIMEOUT_MS as i64;
 const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
 const DISCORD_ANSWER_CHARS: usize = 2000;
 
@@ -436,47 +435,6 @@ pub struct InviteLoungeWatcher {
     brain: Arc<dyn dl_brain::AiAnswerer>,
     guild_id: u64,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
-    running: RunningDispatches,
-}
-
-#[derive(Default, Clone)]
-struct RunningDispatches(Arc<std::sync::Mutex<HashMap<u64, usize>>>);
-
-struct RunningDispatch {
-    running: RunningDispatches,
-    user_id: u64,
-}
-
-impl RunningDispatches {
-    fn users(&self) -> std::sync::MutexGuard<'_, HashMap<u64, usize>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn contains(&self, user_id: u64) -> bool {
-        self.users().contains_key(&user_id)
-    }
-
-    fn start(&self, user_id: u64) -> RunningDispatch {
-        *self.users().entry(user_id).or_insert(0) += 1;
-        RunningDispatch {
-            running: self.clone(),
-            user_id,
-        }
-    }
-}
-
-impl Drop for RunningDispatch {
-    fn drop(&mut self) {
-        let mut users = self.running.users();
-        if let Some(count) = users.get_mut(&self.user_id) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                users.remove(&self.user_id);
-            }
-        }
-    }
 }
 
 impl InviteLoungeWatcher {
@@ -494,7 +452,6 @@ impl InviteLoungeWatcher {
             brain,
             guild_id,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
-            running: RunningDispatches::default(),
         }
     }
 
@@ -566,10 +523,7 @@ impl InviteLoungeWatcher {
                 code,
                 existing_hint.unwrap_or(false),
                 now,
-                DispatchClock {
-                    now_millis: (self.clock_millis)(),
-                    running: self.running.contains(event.author_id),
-                },
+                (self.clock_millis)(),
             );
             if wants_hint
                 && existing_hint.is_none()
@@ -1186,7 +1140,6 @@ impl InviteLoungeWatcher {
         {
             return Ok(());
         }
-        let _running = self.running.start(user_id);
         let dispatch_at = (self.clock_millis)();
         if !is_fresh(
             created_at,
@@ -1456,21 +1409,6 @@ enum RequestKind {
     Room,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DispatchClock {
-    now_millis: i64,
-    running: bool,
-}
-
-impl DispatchClock {
-    fn active(self, started_at_millis: Option<i64>) -> bool {
-        self.running
-            || started_at_millis.is_some_and(|started| {
-                self.now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
-            })
-    }
-}
-
 fn update_state(
     state: &mut LoungeState,
     event: &LoungeMessage,
@@ -1478,7 +1416,7 @@ fn update_state(
     code: Option<String>,
     existing_hint: bool,
     now: i64,
-    dispatch: DispatchClock,
+    now_millis: i64,
 ) -> bool {
     state.last_seen = event.message_id;
     let request_before = state.request.as_ref().map(|request| request.message_id);
@@ -1499,7 +1437,9 @@ fn update_state(
                 .is_some_and(|finished| event.created_at_millis <= finished);
         let replace = state.request.as_ref().is_none_or(|request| {
             let active_dispatch = request.phase == Phase::Dispatching
-                && dispatch.active(state.dispatch_started_at_millis);
+                && state
+                    .dispatch_started_at_millis
+                    .is_some_and(|started| now_millis.saturating_sub(started) < 120_000);
             !active_dispatch
                 && !arrived_during_dispatch
                 && (direct || request.phase == Phase::WaitingForCode)
@@ -1968,61 +1908,6 @@ mod tests {
             Some(now - 60),
             now,
         ));
-    }
-
-    #[test]
-    fn laufender_versand_bleibt_bis_zum_bridge_timeout_bestehen() {
-        let started = 1_700_000_000_000;
-        let window = i64::try_from(dl_bridges::steam::INVITE_FORWARD_TIMEOUT_MS)
-            .expect("Bridge-Zeitlimit passt in i64");
-        for (elapsed, running, replaced) in [
-            (window - 1, false, false),
-            (window, false, true),
-            (window, true, false),
-            (window * 10, true, false),
-        ] {
-            let mut state = LoungeState {
-                friend_code: Some("123456789".into()),
-                request: Some(Request {
-                    message_id: 1,
-                    created_at: started / 1000,
-                    direct: true,
-                    phase: Phase::Dispatching,
-                }),
-                dispatch_started_at_millis: Some(started),
-                ..LoungeState::default()
-            };
-            let at = started + elapsed;
-            let event = LoungeMessage {
-                guild_id: Some(1),
-                channel_id: 2,
-                message_id: 3,
-                author_id: 4,
-                content: String::new(),
-                created_at: at / 1000,
-                created_at_millis: at,
-                is_bot: false,
-                reply_message_id: None,
-            };
-            update_state(
-                &mut state,
-                &event,
-                Some(RequestKind::Direct),
-                None,
-                false,
-                at / 1000,
-                DispatchClock {
-                    now_millis: at,
-                    running,
-                },
-            );
-            let expected = if replaced { 3 } else { 1 };
-            assert_eq!(
-                state.request.map(|request| request.message_id),
-                Some(expected),
-                "{elapsed} ms nach dem Versandstart, laufend {running}"
-            );
-        }
     }
 }
 
