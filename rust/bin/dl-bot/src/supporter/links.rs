@@ -594,42 +594,66 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dl_discord::InteractionHandler;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     struct Fixed {
         checkout: fn(u64) -> LinkResult,
-        other: LinkResult,
-        checkouts: AtomicUsize,
+        tip: LinkResult,
+        portal: LinkResult,
+        twitch: LinkResult,
+        calls: Mutex<Vec<(&'static str, u64)>>,
     }
 
     fn fixed(checkout: fn(u64) -> LinkResult, other: LinkResult) -> Fixed {
         Fixed {
             checkout,
-            other,
-            checkouts: AtomicUsize::new(0),
+            tip: other.clone(),
+            portal: other.clone(),
+            twitch: other,
+            calls: Mutex::default(),
+        }
+    }
+
+    impl Fixed {
+        fn record(&self, method: &'static str, discord_id: u64) {
+            self.calls.lock().expect("calls").push((method, discord_id));
+        }
+
+        fn calls(&self) -> Vec<(&'static str, u64)> {
+            self.calls.lock().expect("calls").clone()
+        }
+
+        fn count(&self, method: &str) -> usize {
+            self.calls()
+                .iter()
+                .filter(|(called, _)| *called == method)
+                .count()
         }
     }
 
     #[async_trait::async_trait]
     impl SupporterLinks for Fixed {
-        async fn checkout(&self, _discord_id: u64, tier: u64) -> LinkResult {
-            self.checkouts.fetch_add(1, Ordering::SeqCst);
+        async fn checkout(&self, discord_id: u64, tier: u64) -> LinkResult {
+            self.record("checkout", discord_id);
             (self.checkout)(tier)
         }
-        async fn tip(&self, _discord_id: u64) -> LinkResult {
-            self.other.clone()
+        async fn tip(&self, discord_id: u64) -> LinkResult {
+            self.record("tip", discord_id);
+            self.tip.clone()
         }
-        async fn portal(&self, _discord_id: u64) -> LinkResult {
-            self.other.clone()
+        async fn portal(&self, discord_id: u64) -> LinkResult {
+            self.record("portal", discord_id);
+            self.portal.clone()
         }
-        async fn twitch_connect(&self, _discord_id: u64) -> LinkResult {
-            self.other.clone()
+        async fn twitch_connect(&self, discord_id: u64) -> LinkResult {
+            self.record("twitch_connect", discord_id);
+            self.twitch.clone()
         }
     }
 
     const TIERS: [u64; 5] = [5, 10, 20, 50, 1000];
     const TEST_INTERVAL: Duration = Duration::from_secs(300);
+    const CLICKER: u64 = 4_242;
 
     fn failure() -> LinkError {
         LinkError::Failed("down".to_string())
@@ -641,32 +665,35 @@ mod tests {
         )))
     }
 
-    async fn click(
-        links: Arc<dyn SupporterLinks>,
-        button: SupportButton,
-        custom_id: &str,
-    ) -> dl_discord::BridgeReply {
-        click_with_grant(links, button, custom_id, true).await
+    fn url(value: &str) -> LinkResult {
+        Ok(LinkOutcome::Url(value.to_string()))
+    }
+
+    async fn click(links: Arc<dyn SupporterLinks>, custom_id: &str) -> dl_discord::BridgeReply {
+        click_with_grant(links, custom_id, true).await
     }
 
     async fn click_with_grant(
         links: Arc<dyn SupporterLinks>,
-        button: SupportButton,
         custom_id: &str,
         role_grant: bool,
     ) -> dl_discord::BridgeReply {
-        let handler = SupportButtonHandler {
-            links,
-            button,
-            tiers_eur: Arc::from(&TIERS[..]),
-            role_note: RoleNote {
-                grant: role_grant,
-                interval: TEST_INTERVAL,
+        let config = config_from(
+            dl_core::runtime_config::CommunityOptions {
+                supporter_tiers_eur: Some(TIERS.to_vec()),
+                supporter_role_grant_apply: Some(role_grant),
+                supporter_sync_interval_seconds: Some(TEST_INTERVAL.as_secs()),
+                ..Default::default()
             },
-        };
-        handler
+            |_| None,
+        );
+        let mut router = dl_discord::InteractionRouter::new();
+        register(&mut router, links, &config);
+        router
+            .resolve_component(custom_id)
+            .expect("Knopf registriert")
             .handle(dl_discord::BridgeInteraction {
-                user_id: 42,
+                user_id: CLICKER,
                 custom_id: custom_id.to_string(),
                 ..dl_discord::BridgeInteraction::default()
             })
@@ -688,10 +715,17 @@ mod tests {
             .collect()
     }
 
+    fn reply_labels(reply: &dl_discord::BridgeReply) -> Vec<String> {
+        reply_buttons(reply)
+            .iter()
+            .filter_map(|button| button["label"].as_str().map(str::to_string))
+            .collect()
+    }
+
     #[tokio::test]
     async fn supporter_werden_zeigt_alle_stufen_ohne_checkout() {
         let links = Arc::new(fixed(stripe, Err(failure())));
-        let reply = click(links.clone(), SupportButton::Become, SUPPORT_BUTTON_BECOME).await;
+        let reply = click(links.clone(), SUPPORT_BUTTON_BECOME).await;
         assert!(reply.ephemeral);
         assert_eq!(reply.content.as_deref(), Some(REPLY_BECOME));
         let ids: Vec<String> = reply_buttons(&reply)
@@ -708,66 +742,150 @@ mod tests {
                 "support:tier:1000"
             ]
         );
-        let labels: Vec<String> = reply_buttons(&reply)
-            .iter()
-            .filter_map(|button| button["label"].as_str().map(str::to_string))
-            .collect();
-        assert_eq!(labels[4], "1.000 € im Monat");
-        assert_eq!(links.checkouts.load(Ordering::SeqCst), 0);
+        assert_eq!(reply_labels(&reply)[4], "1.000 € im Monat");
+        assert!(links.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn jeder_knopf_ruft_genau_seinen_dienst_fuer_den_klickenden() {
+        let links = Arc::new(Fixed {
+            checkout: stripe,
+            tip: url("https://checkout.stripe.com/tip"),
+            portal: url("https://billing.stripe.com/portal"),
+            twitch: url("https://deutsche-deadlock-community.de/twitch/connect"),
+            calls: Mutex::default(),
+        });
+        let note = RoleNote {
+            grant: true,
+            interval: TEST_INTERVAL,
+        };
+        for (custom_id, method, text, label, link) in [
+            (
+                SUPPORT_BUTTON_TIP,
+                "tip",
+                note.append(REPLY_TIP),
+                LABEL_TIP.to_string(),
+                "https://checkout.stripe.com/tip",
+            ),
+            (
+                SUPPORT_BUTTON_MANAGE,
+                "portal",
+                REPLY_MANAGE.to_string(),
+                LABEL_MANAGE.to_string(),
+                "https://billing.stripe.com/portal",
+            ),
+            (
+                SUPPORT_BUTTON_TWITCH,
+                "twitch_connect",
+                reply_twitch(),
+                LABEL_TWITCH.to_string(),
+                "https://deutsche-deadlock-community.de/twitch/connect",
+            ),
+            (
+                "support:tier:20",
+                "checkout",
+                note.append(REPLY_TIER),
+                format!("{LABEL_PAY} (20 € im Monat)"),
+                "https://checkout.stripe.com/20",
+            ),
+        ] {
+            let before = links.calls().len();
+            let reply = click(links.clone(), custom_id).await;
+            assert_eq!(reply.content.as_deref(), Some(text.as_str()), "{custom_id}");
+            assert_eq!(reply_labels(&reply), vec![label], "{custom_id}");
+            assert_eq!(reply_urls(&reply), vec![link.to_string()], "{custom_id}");
+            assert_eq!(links.calls()[before..], [(method, CLICKER)], "{custom_id}");
+        }
     }
 
     #[tokio::test]
     async fn stufenklick_holt_genau_einen_link() {
         let links = Arc::new(fixed(stripe, Err(failure())));
-        let reply = click(links.clone(), SupportButton::Tier, "support:tier:50").await;
+        let reply = click(links.clone(), "support:tier:50").await;
         assert_eq!(
             reply.content.as_deref(),
             Some(
                 "Hier geht es zur Zahlung. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.\n-# Die Rolle kommt nach der Zahlung beim nächsten Abgleich, der alle 5 Minuten läuft."
             )
         );
-        let manual =
-            click_with_grant(links.clone(), SupportButton::Tier, "support:tier:50", false).await;
+        let manual = click_with_grant(links.clone(), "support:tier:50", false).await;
         assert_eq!(manual.content.as_deref(), Some(REPLY_TIER));
         assert!(!REPLY_TIER.contains("Rolle"));
         assert_eq!(
             reply_urls(&reply),
             vec!["https://checkout.stripe.com/50".to_string()]
         );
-        assert_eq!(links.checkouts.load(Ordering::SeqCst), 2);
+        assert_eq!(links.count("checkout"), 2);
         for stale in [
             "support:tier:3",
             "support:tier:",
             "support:tier:x",
             "support:tier:-5",
         ] {
-            let gone = click(links.clone(), SupportButton::Tier, stale).await;
+            let gone = click(links.clone(), stale).await;
             assert_eq!(gone.content.as_deref(), Some(REPLY_TIER_GONE), "{stale}");
         }
-        assert_eq!(links.checkouts.load(Ordering::SeqCst), 2);
+        assert_eq!(links.count("checkout"), 2);
     }
 
     #[tokio::test]
     async fn stufenklick_beantwortet_jede_antwort_des_steam_bots() {
         type Checkout = fn(u64) -> LinkResult;
-        let cases: [(Checkout, &str); 4] = [
-            (|_| Err(LinkError::Failed("down".to_string())), REPLY_FAILED),
+        fn answer(status: StatusCode, body: Value) -> LinkResult {
+            link_outcome(CHECKOUT_PATH, status, &body, is_stripe_url)
+        }
+        let cases: [(Checkout, &str); 9] = [
             (
-                |_| Ok(LinkOutcome::AlreadySubscribed),
+                |_| answer(StatusCode::SERVICE_UNAVAILABLE, json!({ "error": "x" })),
+                REPLY_FAILED,
+            ),
+            (
+                |_| answer(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })),
+                REPLY_FAILED,
+            ),
+            (
+                |_| {
+                    answer(
+                        StatusCode::CONFLICT,
+                        json!({ "error": "already_subscribed" }),
+                    )
+                },
                 REPLY_ALREADY_SUBSCRIBED,
             ),
-            (|_| Ok(LinkOutcome::UnknownTier), REPLY_UNAVAILABLE),
-            (|_| Ok(LinkOutcome::Unavailable), REPLY_UNAVAILABLE),
+            (
+                |_| answer(StatusCode::BAD_REQUEST, json!({ "error": "unknown_tier" })),
+                REPLY_UNAVAILABLE,
+            ),
+            (
+                |_| {
+                    answer(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "error": "prices_unverified" }),
+                    )
+                },
+                REPLY_UNAVAILABLE,
+            ),
+            (
+                |_| answer(StatusCode::NOT_FOUND, json!({ "error": "no_subscription" })),
+                REPLY_NO_SUBSCRIPTION,
+            ),
+            (
+                |_| answer(StatusCode::OK, json!({ "url": "https://evil.example/c" })),
+                REPLY_FAILED,
+            ),
+            (
+                |_| Err(LinkError::NotConfigured(MISSING_STEAM_TOKEN)),
+                REPLY_UNAVAILABLE,
+            ),
+            (|_| Err(LinkError::Failed("down".to_string())), REPLY_FAILED),
         ];
-        for (checkout, expected) in cases {
-            let reply = click(
-                Arc::new(fixed(checkout, Err(failure()))),
-                SupportButton::Tier,
-                "support:tier:10",
-            )
-            .await;
-            assert_eq!(reply.content.as_deref(), Some(expected));
+        for (index, (checkout, expected)) in cases.into_iter().enumerate() {
+            let links = Arc::new(fixed(checkout, Err(failure())));
+            let reply = click(links.clone(), "support:tier:10").await;
+            assert_eq!(reply.content.as_deref(), Some(expected), "{index}");
             assert!(reply.ephemeral);
+            assert!(reply_buttons(&reply).is_empty(), "{index}");
+            assert_eq!(links.calls(), vec![("checkout", CLICKER)], "{index}");
         }
     }
 
@@ -775,7 +893,6 @@ mod tests {
     async fn kein_abo_und_twitch_werden_freundlich_beantwortet() {
         let none = click(
             Arc::new(fixed(stripe, Ok(LinkOutcome::NoSubscription))),
-            SupportButton::Manage,
             SUPPORT_BUTTON_MANAGE,
         )
         .await;
@@ -783,11 +900,8 @@ mod tests {
         let twitch = click(
             Arc::new(fixed(
                 stripe,
-                Ok(LinkOutcome::Url(
-                    "https://deutsche-deadlock-community.de/twitch/x".to_string(),
-                )),
+                url("https://deutsche-deadlock-community.de/twitch/x"),
             )),
-            SupportButton::Twitch,
             SUPPORT_BUTTON_TWITCH,
         )
         .await;
@@ -828,13 +942,13 @@ mod tests {
             .await
             .is_err_and(|error| error.contains(MISSING_STEAM_TOKEN)));
         assert_eq!(links.twitch_connect(42).await, Ok(LinkOutcome::Unavailable));
-        for (button, custom_id) in [
-            (SupportButton::Tier, "support:tier:5"),
-            (SupportButton::Tip, SUPPORT_BUTTON_TIP),
-            (SupportButton::Manage, SUPPORT_BUTTON_MANAGE),
-            (SupportButton::Twitch, SUPPORT_BUTTON_TWITCH),
+        for custom_id in [
+            "support:tier:5",
+            SUPPORT_BUTTON_TIP,
+            SUPPORT_BUTTON_MANAGE,
+            SUPPORT_BUTTON_TWITCH,
         ] {
-            let reply = click(test_links(&config), button, custom_id).await;
+            let reply = click(test_links(&config), custom_id).await;
             assert_eq!(
                 reply.content.as_deref(),
                 Some(REPLY_UNAVAILABLE),
