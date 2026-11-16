@@ -38,6 +38,12 @@ pub const STEAM_INVITE_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
     STEAM_INVITE_WORST_CASE_MS + 1..=DISCORD_INTERACTION_TOKEN_MS;
 
 pub mod supporter_wire {
+    pub const TWITCH_TOKEN_NAME: &str = "TWITCH_INTERNAL_API_TOKEN";
+    pub const SUPPORTER_TOKEN_NAMES: [&str; 3] = [
+        TWITCH_TOKEN_NAME,
+        "MASTER_BROKER_TOKEN",
+        "MAIN_BOT_INTERNAL_TOKEN",
+    ];
     pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
     pub const TIP_PATH: &str = "/supporter/v1/tip";
     pub const PORTAL_PATH: &str = "/supporter/v1/portal";
