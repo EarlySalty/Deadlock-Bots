@@ -1003,6 +1003,13 @@ pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> St
     format!("{prefix}{message_index}")
 }
 
+pub(crate) fn read_banner_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    match dl_core::optional_file::read(path)? {
+        Some(bytes) if bytes.is_empty() => Err("ist leer".to_string()),
+        bytes => Ok(bytes),
+    }
+}
+
 pub(crate) fn read_optional_banner(
     repo_root: &std::path::Path,
     label: &str,
@@ -1011,7 +1018,7 @@ pub(crate) fn read_optional_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, String> {
     let path = repo_root.join(relative_path);
-    let bytes = dl_core::optional_file::read(&path)
+    let bytes = read_banner_file(&path)
         .map_err(|reason| format!("{label}-Banner `{}` {reason}", path.display()))?;
     if bytes.is_none() {
         warnings.push(format!(
@@ -8522,6 +8529,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let banner_dir = temp.path().join("banners");
         std::fs::create_dir_all(banner_dir.join("ordner.png")).expect("ordner");
+        std::fs::write(banner_dir.join("leer.png"), b"").expect("leer");
         std::os::unix::fs::symlink(banner_dir.join("ziel-weg.png"), banner_dir.join("link.png"))
             .expect("symlink");
         std::os::unix::fs::symlink(temp.path().join("weg"), temp.path().join("verlinkt"))
@@ -8544,6 +8552,7 @@ mod tests {
         for (relative_path, reason) in [
             ("banners/link.png", "ist ein Link ohne Ziel".to_string()),
             ("banners/ordner.png", "ist keine Datei".to_string()),
+            ("banners/leer.png", "ist leer".to_string()),
             (
                 "verlinkt/banner.png",
                 format!(
