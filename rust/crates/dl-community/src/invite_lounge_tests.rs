@@ -498,10 +498,7 @@ async fn greenlight_nachfrage_nach_dreissig_minuten_und_nein_ohne_antwortbezug_l
     lounge.poll(NOW + CHECK_IN_SECONDS).await;
     assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
     assert_eq!(lounge.calls().await, 0);
-    lounge.decide(vec![wants(
-        InviteTurnAction::Invite,
-        Some("Alles klar, die Einladung kommt gleich."),
-    )]);
+    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
     lounge
         .post(message(2, NOW + 1900, "nein, noch nicht"), NOW + 1900)
         .await;
@@ -511,11 +508,7 @@ async fn greenlight_nachfrage_nach_dreissig_minuten_und_nein_ohne_antwortbezug_l
     assert_eq!(lounge.calls().await, 1);
     assert_eq!(
         updates(&lounge.brain),
-        vec![
-            InviteLoungeUpdate::CheckIn,
-            InviteLoungeUpdate::Reply,
-            sent()
-        ]
+        vec![InviteLoungeUpdate::CheckIn, sent()]
     );
     assert_eq!(
         lounge
@@ -706,7 +699,7 @@ async fn entscheidung_waehrend_laufendem_versand_bleibt_still() {
     }
     state.dispatch_started_at_millis = Some(NOW * 1000);
     lounge.store.put(state).await;
-    lounge.decide(vec![wants(InviteTurnAction::Invite, Some("Kommt sofort."))]);
+    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
     lounge
         .post(message(2, NOW + 5, "und jetzt? 123456789"), NOW + 5)
         .await;

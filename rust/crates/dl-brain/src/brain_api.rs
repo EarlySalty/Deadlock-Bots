@@ -1032,7 +1032,7 @@ mod tests {
         let decision = crate::InviteTurnDecision {
             intent: crate::InviteIntent::WantsInvite,
             action: crate::InviteTurnAction::Invite,
-            text: Some("Kommt gleich.".into()),
+            text: None,
         };
         assert_eq!(
             project_conversation(result(BotReply::Decided {
