@@ -279,6 +279,7 @@ pub fn rang_guide_repo_root() -> PathBuf {
     crate::runtime_assets::release_root().expect("Releasewurzel des laufenden Bot-Binarys fehlt")
 }
 
+#[cfg(test)]
 pub fn rang_guide_message_id_key(message_index: usize) -> String {
     crate::serversync::static_v2_message_id_key(RANG_GUIDE_MESSAGE_ID_PREFIX, message_index)
 }
