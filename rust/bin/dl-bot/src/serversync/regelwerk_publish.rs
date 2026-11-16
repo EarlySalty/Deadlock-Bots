@@ -230,7 +230,7 @@ pub fn build_regelwerk_publish_output(
 ) -> Result<RegelwerkPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_regelwerk_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = regelwerk_messages(repo_root, &config, &mut warnings);
+    let built_messages = regelwerk_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -307,14 +307,12 @@ pub fn regelwerk_payload_hash(messages: &[RegelwerkMessageOutput]) -> Result<Str
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    Ok(RegelwerkPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
-                    })
+                .map(|attachment| RegelwerkPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Vec<_>>();
             Ok(RegelwerkPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
@@ -551,8 +549,8 @@ fn regelwerk_messages(
     repo_root: &Path,
     config: &ResolvedRegelwerkConfig,
     warnings: &mut Vec<String>,
-) -> Vec<RegelwerkBuiltMessage> {
-    let banner = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings);
+) -> Result<Vec<RegelwerkBuiltMessage>, String> {
+    let banner = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings)?;
     let mut components = Vec::new();
     let mut attachments = Vec::new();
     if let Some(banner) = &banner {
@@ -613,7 +611,7 @@ fn regelwerk_messages(
         ],
     ));
 
-    vec![RegelwerkBuiltMessage {
+    Ok(vec![RegelwerkBuiltMessage {
         banner,
         payload: RegelwerkMessagePayload {
             flags: REGELWERK_COMPONENTS_V2_FLAG,
@@ -621,7 +619,7 @@ fn regelwerk_messages(
             components,
             attachments,
         },
-    }]
+    }])
 }
 
 fn section_text(title: &str, body: &str) -> String {
@@ -636,21 +634,27 @@ fn optional_regelwerk_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<RegelwerkBannerOutput> {
+) -> Result<Option<RegelwerkBannerOutput>, String> {
     let relative_path = format!("{REGELWERK_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    let Ok(bytes) = fs::read(&path) else {
+    if !path.is_file() {
         warnings.push(format!(
             "Regelwerk-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
-        return None;
-    };
-    Some(RegelwerkBannerOutput {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "Regelwerk-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(RegelwerkBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
         bytes,
-    })
+    }))
 }
 
 fn planned_regelwerk_action(

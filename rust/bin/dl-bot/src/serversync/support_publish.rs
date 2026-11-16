@@ -458,7 +458,7 @@ pub fn load_support_snapshot(repo_root: &Path) -> Result<SupportSnapshot, String
     let mut config_warnings = Vec::new();
     let config = load_support_runtime_config(repo_root, &mut config_warnings)?;
     let mut banner_warnings = Vec::new();
-    let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, &mut banner_warnings);
+    let banner = optional_support_banner(repo_root, SUPPORT_HERO_FILENAME, &mut banner_warnings)?;
     Ok(SupportSnapshot {
         config,
         config_warnings,
@@ -1058,21 +1058,27 @@ fn optional_support_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<SupportBannerOutput> {
+) -> Result<Option<SupportBannerOutput>, String> {
     let relative_path = format!("{SUPPORT_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    let Ok(bytes) = fs::read(&path) else {
+    if !path.is_file() {
         warnings.push(format!(
             "Support-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
-        return None;
-    };
-    Some(SupportBannerOutput {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "Support-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(SupportBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
         bytes,
-    })
+    }))
 }
 
 fn planned_support_action(
@@ -1823,6 +1829,31 @@ enabled = false
         assert_eq!(output.messages[0].action, "planned_repost");
         assert_eq!(output.messages[1].action, "planned_post");
         assert_eq!(output.messages[2].action, "planned_post");
+    }
+
+    #[test]
+    fn unlesbarer_banner_bricht_ab_statt_ohne_banner_zu_posten() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = load_support_snapshot(temp.path()).expect("snapshot ohne banner");
+        assert!(missing.banner.is_none());
+        assert!(missing
+            .banner_warnings
+            .iter()
+            .any(|warning| warning.contains("fehlt")));
+
+        write_banner_bytes(temp.path(), b"banner");
+        let path = temp
+            .path()
+            .join(format!("{SUPPORT_BANNER_DIR}/{SUPPORT_HERO_FILENAME}"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        if fs::read(&path).is_ok() {
+            return;
+        }
+        let Err(err) = load_support_snapshot(temp.path()) else {
+            panic!("unlesbarer Banner muss den Snapshot abbrechen");
+        };
+        assert!(err.contains("konnte nicht gelesen werden"), "{err}");
     }
 
     #[test]

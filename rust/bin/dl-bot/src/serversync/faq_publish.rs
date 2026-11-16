@@ -304,7 +304,7 @@ pub fn build_faq_publish_output(
 ) -> Result<FaqPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_faq_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = faq_messages(repo_root, &config, &mut warnings);
+    let built_messages = faq_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -379,14 +379,12 @@ pub fn faq_payload_hash(messages: &[FaqMessageOutput]) -> Result<String, String>
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    Ok(FaqPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
-                    })
+                .map(|attachment| FaqPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Vec<_>>();
             Ok(FaqPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
@@ -621,8 +619,8 @@ fn faq_messages(
     repo_root: &Path,
     config: &ResolvedFaqConfig,
     warnings: &mut Vec<String>,
-) -> Vec<FaqBuiltMessage> {
-    let banner = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings);
+) -> Result<Vec<FaqBuiltMessage>, String> {
+    let banner = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings)?;
     let mut components = Vec::new();
     let mut attachments = Vec::new();
     if let Some(banner) = &banner {
@@ -654,7 +652,7 @@ fn faq_messages(
         ],
     ));
 
-    vec![FaqBuiltMessage {
+    Ok(vec![FaqBuiltMessage {
         banner,
         payload: FaqMessagePayload {
             flags: FAQ_COMPONENTS_V2_FLAG,
@@ -662,7 +660,7 @@ fn faq_messages(
             components,
             attachments,
         },
-    }]
+    }])
 }
 
 fn section_text(title: &str, body: &str) -> String {
@@ -677,21 +675,27 @@ fn optional_faq_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<FaqBannerOutput> {
+) -> Result<Option<FaqBannerOutput>, String> {
     let relative_path = format!("{FAQ_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    let Ok(bytes) = fs::read(&path) else {
+    if !path.is_file() {
         warnings.push(format!(
             "FAQ-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
-        return None;
-    };
-    Some(FaqBannerOutput {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "FAQ-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(FaqBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
         bytes,
-    })
+    }))
 }
 
 fn planned_faq_action(

@@ -293,7 +293,7 @@ pub fn build_rang_guide_publish_output(
 ) -> Result<RangGuidePublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_rang_guide_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = rang_guide_messages(repo_root, &config, &mut warnings);
+    let built_messages = rang_guide_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -370,14 +370,12 @@ pub fn rang_guide_payload_hash(messages: &[RangGuideMessageOutput]) -> Result<St
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    Ok(RangGuidePayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
-                    })
+                .map(|attachment| RangGuidePayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Vec<_>>();
             Ok(RangGuidePayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
@@ -567,14 +565,14 @@ fn rang_guide_messages(
     repo_root: &Path,
     config: &ResolvedRangGuideConfig,
     warnings: &mut Vec<String>,
-) -> Vec<RangGuideBuiltMessage> {
-    let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings);
+) -> Result<Vec<RangGuideBuiltMessage>, String> {
+    let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings)?;
     let step_banners: Vec<Option<RangGuideBannerOutput>> = RANG_GUIDE_STEP_BANNER_FILENAMES
         .iter()
         .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
-        .collect();
+        .collect::<Result<_, _>>()?;
     let help_banner =
-        optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings);
+        optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings)?;
 
     let mut banner_candidates: Vec<RangGuideBannerOutput> = Vec::new();
     for banner in std::iter::once(&hero_banner)
@@ -718,7 +716,11 @@ fn rang_guide_messages(
         extras_children,
     ));
 
-    chunk_rang_guide_components(components, &banner_candidates, hero_banner)
+    Ok(chunk_rang_guide_components(
+        components,
+        &banner_candidates,
+        hero_banner,
+    ))
 }
 
 /// `**Titel**\nBody` — oder nur der Body, wenn der Titel leer ist (Ueberschrift
@@ -825,21 +827,27 @@ fn optional_rang_guide_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<RangGuideBannerOutput> {
+) -> Result<Option<RangGuideBannerOutput>, String> {
     let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    let Ok(bytes) = fs::read(&path) else {
+    if !path.is_file() {
         warnings.push(format!(
             "Rang-Guide-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
-        return None;
-    };
-    Some(RangGuideBannerOutput {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "Rang-Guide-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(RangGuideBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
         bytes,
-    })
+    }))
 }
 
 fn planned_rang_guide_action(

@@ -199,7 +199,7 @@ pub fn build_voice_ux_publish_output(
     dry_run: bool,
 ) -> Result<VoiceUxPublishOutput, String> {
     let mut warnings = Vec::new();
-    let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings);
+    let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings)?;
     validate_voice_ux_messages(&base_messages)?;
     let payload_hash = voice_ux_payload_hash(&base_messages)?;
     let mut targets = Vec::new();
@@ -317,7 +317,7 @@ pub fn relink_voice_ux_forum_thread(
     thread_id: u64,
 ) -> Result<(), String> {
     let mut warnings = Vec::new();
-    let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings);
+    let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings)?;
     validate_voice_ux_messages(&fresh_messages)?;
     let payload_hash = voice_ux_payload_hash(&fresh_messages)?;
     for target in &mut output.targets {
@@ -355,14 +355,12 @@ pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    Ok(VoiceUxPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
-                    })
+                .map(|attachment| VoiceUxPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Vec<_>>();
             Ok(VoiceUxPayloadHashMessage {
                 message,
                 attachment_hashes,
@@ -521,15 +519,15 @@ fn voice_ux_messages(
     repo_root: &Path,
     forum_thread_id: Option<u64>,
     warnings: &mut Vec<String>,
-) -> Vec<VoiceUxMessageOutput> {
+) -> Result<Vec<VoiceUxMessageOutput>, String> {
     let guide_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings);
-    let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings);
+        optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings)?;
+    let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings)?;
     let spawn_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings);
+        optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings)?;
     let manage_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings);
-    vec![
+        optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings)?;
+    Ok(vec![
         message(
             "guide_lfg",
             guide_banner.clone(),
@@ -570,7 +568,7 @@ fn voice_ux_messages(
                 ],
             ),
         ),
-    ]
+    ])
 }
 
 fn voice_ux_forum_payload() -> VoiceUxMessagePayload {
@@ -957,21 +955,27 @@ fn optional_voice_ux_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<VoiceUxBannerOutput> {
+) -> Result<Option<VoiceUxBannerOutput>, String> {
     let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    let Ok(bytes) = fs::read(&path) else {
+    if !path.is_file() {
         warnings.push(format!(
             "Voice-UX-Banner `{relative_path}` fehlt; Publish laeuft ohne diesen Banner"
         ));
-        return None;
-    };
-    Some(VoiceUxBannerOutput {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|err| {
+        format!(
+            "Voice-UX-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })?;
+    Ok(Some(VoiceUxBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
         bytes,
-    })
+    }))
 }
 
 #[cfg(test)]
