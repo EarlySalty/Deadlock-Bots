@@ -24,3 +24,7 @@ Source: merge gate round 4 on `feat/supporter-p1-20261111` at c6e0b6c9 (2026-11-
 | repo-wide | About 61 hard-coded timeout literals; hand-copied cursor pagers in invite_lounge and reaction_roles. |
 
 Each fix follows ABLAUF.md "Ursache statt Symptom" and goes through the merge gate.
+
+## P2 wide branch
+
+`p2-wide-r7-findings.txt`: all 582 BLOCKING lines of the gate round on Deadlock-Steam-Bot `backup/supporter-p2-wide-0a1a0602` (2026-11-16). P2 is rebuilt slim on `feat/supporter-p2-slim-20261116`.
