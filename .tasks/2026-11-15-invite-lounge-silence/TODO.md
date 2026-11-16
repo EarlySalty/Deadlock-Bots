@@ -18,5 +18,10 @@ Branch: fix/invite-lounge-silence. Nothing merged or deployed. Alp's row is `Att
 - FAQ f5 promises the 30 min wait for every ask, but direct asks get the invite at once; a third f5 copy in `docs/onboarding-redesign/2026-07-05-server-faq-v2-texte.md` still says the bot invites automatically.
 - README: "finish_dispatch is the only closer that can leave answers held" (end_unasked_request is another), cooldown and stamp sentences, privacy retention window.
 
-## Next
-User decision needed: another round with a fix pass (the parked twins block through the hook whatever the scope), or another plan.
+## User decision 2026-11-16
+Relayed by the launching session, recorded as given: the user (owner) chose "A" = merge 7923f659 to main WITHOUT an ALLOW as the user's own exception, deploy, restart, live proof, park the open findings. No further gate round.
+
+## Integration state 2026-11-16
+- Checks on 7923f659 (merge tree equals branch tree): dl-community 389 passed, the same 4 DB-harness tests fail without `CENTRAL_TEST_DSN`; dl-discord 71 + 3 passed; dl-bot FAQ 13 passed, `service_faq_v2_repost_loescht_fremde_message_nicht` needs `CENTRAL_TEST_DSN`; `cargo fmt --check` reports no file changed by this branch; clippy reports only pre-existing warnings.
+- Deploy blocked: live `/opt/deadlock/bots/current` runs 898df907 from the unmerged `feat/supporter-p1-slim-20261116` (deployed on user order before its gate ALLOW, migrations 20261110120000 to 20261115120000 applied), and that branch's prepared installer pins 898df907 as the previous release. A release from main would remove the supporter code from live. The supporter branch conflicts with this branch in `invite_lounge.rs`, `invite_lounge_tests.rs` and `dl-bridges/src/steam.rs`. Needs a user decision: deploy main anyway, let the supporter branch rebase onto main and carry this fix in its next release, or order a combined build.
+- Open findings of round 8 are parked in claude-config `orchestrierung/OFFENE-URSACHEN.md`.
