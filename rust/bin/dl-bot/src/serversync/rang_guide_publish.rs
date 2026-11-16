@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -476,19 +474,13 @@ fn load_rang_guide_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedRangGuideConfig, String> {
     let path = repo_root.join(RANG_GUIDE_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedRangGuideConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = crate::serversync::read_optional_text(&path)
+        .map_err(|reason| format!("Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedRangGuideConfig::from_defaults());
     };
 
     let file = toml::from_str::<RangGuideTextsToml>(&raw).map_err(|err| {
@@ -1018,6 +1010,7 @@ fn link_button(id: u64, label: &str, url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     fn write_rang_guide_texts_file(repo_root: &Path, body: &str) {

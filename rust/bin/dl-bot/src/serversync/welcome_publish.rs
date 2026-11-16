@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use dl_server_as_code::{ChannelKind, ChannelSpec, GuildModel, OverwriteKey, RoleSpec, TargetKind};
@@ -675,19 +673,13 @@ fn load_welcome_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedWelcomeConfig, String> {
     let path = repo_root.join(WELCOME_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedWelcomeConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = crate::serversync::read_optional_text(&path)
+        .map_err(|reason| format!("Welcome-Textdatei `{WELCOME_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedWelcomeConfig::from_defaults());
     };
 
     let file = toml::from_str::<WelcomeTextsToml>(&raw).map_err(|err| {
@@ -1514,7 +1506,7 @@ fn welcome_banner(
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBannerOutput, String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let present = crate::serversync::banner_file_present(&repo_root.join(&relative_path))
+    let present = crate::serversync::optional_file_present(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Banner `{relative_path}` {reason}"))?;
     if !present {
         warnings.push(format!(
@@ -1537,7 +1529,7 @@ fn divider_attachment_for_category(
         return Ok(None);
     };
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let present = crate::serversync::banner_file_present(&repo_root.join(&relative_path))
+    let present = crate::serversync::optional_file_present(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Divider `{relative_path}` {reason}"))?;
     if !present {
         warnings.push(format!(

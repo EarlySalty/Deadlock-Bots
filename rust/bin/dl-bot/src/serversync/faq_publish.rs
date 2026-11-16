@@ -1,6 +1,4 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -535,19 +533,13 @@ fn load_faq_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedFaqConfig, String> {
     let path = repo_root.join(FAQ_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "FAQ-Textdatei `{FAQ_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedFaqConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "FAQ-Textdatei `{FAQ_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = crate::serversync::read_optional_text(&path)
+        .map_err(|reason| format!("FAQ-Textdatei `{FAQ_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "FAQ-Textdatei `{FAQ_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedFaqConfig::from_defaults());
     };
 
     let file = toml::from_str::<FaqTextsToml>(&raw).map_err(|err| {
@@ -874,6 +866,7 @@ fn select_option(option: &ResolvedFaqOption) -> Value {
 mod tests {
     use super::*;
     use dl_discord::InteractionHandler;
+    use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
 
