@@ -14,7 +14,8 @@ const NOW: i64 = 1_790_000_000;
 const BOT: u64 = 99;
 const GUILD: u64 = 42;
 const USER: u64 = 7;
-const IMPERSONAL_REQUEST: &str = "Jo, kann man hier einen Invite bekommen, wenn man nett fragt?😅";
+const IMPERSONAL_REQUEST: &str =
+    "Servus, kann man hier einen Invite bekommen, falls man freundlich fragt?🙂";
 const AUDIT_REPLY: &str = "ℹ️ Dieser Steam-Account wurde schon eingeladen, am <t:1700000000:D>. Hier ist nichts mehr zu tun.";
 const RUNNING_REPLY: &str = "⏳ Für diesen Steam-Account läuft gerade schon eine Einladung. Ich schicke sie nicht doppelt, sonst zählt sie zweimal gegen das Tageslimit.";
 
@@ -466,6 +467,151 @@ fn impersonal_invite_discussion_is_not_a_request() {
     ] {
         assert_eq!(request_kind(content, BOT), None, "{content}");
     }
+}
+
+#[test]
+fn wunsch_und_bedarf_sind_anfragen() {
+    for content in [
+        "Moin zusammen, ich bräuchte bitte noch einen invite",
+        "Servus hätte dann auch gern eine invite",
+        "hi würde auch gerne mit dem spiel anfangen und bräuchte dafür noch einen invite",
+        "Hallo Leutz… würde echt gerne die ?Beta? mal testen wollen",
+        "Na Leute, ich hätte auch gerne einen Deadlock invite",
+        "na ich bräuchte dann auch ein Invite",
+        "Ich brauche noch einen Invite",
+        "Ich benötige bitte eine Einladung",
+    ] {
+        assert_eq!(
+            request_kind(content, BOT),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn bedarf_mit_ich_als_subjekt_bleibt_anfrage() {
+    for content in [
+        "Einen Invite brauche ich noch",
+        "Hat jemand einen Invite? Ich brauche noch einen.",
+    ] {
+        assert_eq!(
+            request_kind(content, BOT),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn bedarf_mit_fremdem_subjekt_ist_keine_anfrage() {
+    for content in [
+        "Der Neue bräuchte noch einen Invite",
+        "Der Neue bräuchte noch einen Invite?",
+        "Bräuchte der Neue noch einen Invite",
+        "Würde der Neue gerne einen Invite bekommen?",
+    ] {
+        assert_eq!(request_kind(content, BOT), None, "{content}");
+    }
+}
+
+#[test]
+fn wunsch_mit_waere_und_wuerde_entscheidet_gleich() {
+    assert_eq!(
+        request_kind("Wäre gerne beim Playtest dabei", BOT),
+        Some(RequestKind::Room)
+    );
+    assert_eq!(
+        request_kind("Würde gerne beim Playtest mitmachen", BOT),
+        Some(RequestKind::Room)
+    );
+}
+
+#[test]
+fn neue_arme_erreichen_direct_nur_mit_ich_und_invite() {
+    assert_eq!(
+        request_kind("Ich hätte gerne einen Invite, hast du einen?", BOT),
+        Some(RequestKind::Direct)
+    );
+    for content in [
+        "Würde gerne Deadlock spielen, hast du noch Invites?",
+        "<@99> würde gerne beim Playtest mitmachen",
+        "Bräuchtest du noch einen Invite? Ich hab welche",
+    ] {
+        assert_eq!(request_kind(content, BOT), None, "{content}");
+    }
+}
+
+#[test]
+fn suche_nach_jemandem_mit_invite_bleibt_anfrage() {
+    for content in [
+        "Ich suche jemanden mit Invite, Code 123456789",
+        "ich suche jemanden der einlädt",
+    ] {
+        assert_eq!(
+            request_kind(content, BOT),
+            Some(RequestKind::Room),
+            "{content}"
+        );
+    }
+}
+
+#[test]
+fn angebote_status_und_fremde_subjekte_bleiben_ohne_anfrage() {
+    for content in [
+        "",
+        "würde gerne",
+        "bräuchte",
+        "Bräuchtest du noch einen Invite? Ich hab welche",
+        "Falls jemand noch einen Invite bräuchte, ich hab noch welche",
+        "Falls dein Kumpel noch einen Invite bräuchte, sag Bescheid",
+        "Ich hab noch Einladungen, falls wer eine brauch",
+        "Ich hab noch Einladungen, wer brauchs?",
+        "Hab die Einladung inzwischen bekommen, falls wer noch eine braucht, sagt einfach Bescheid",
+        "Ich hab die Einladung bekommen, brauchte nur etwas Geduld",
+        "Ich hab die Einladung bekommen, brauche nur etwas Geduld",
+        "Ich hab die Einladung bekommen, benötige nur etwas Geduld",
+        "Falls jemand noch eine Einladung brauche, ich hab welche",
+        "Hätte jemand gerne einen Invite?",
+        "Würde gerne ein paar Invites verteilen, wer will?",
+        "Würde dir gerne einen Invite zuschicken",
+        "Würde dir gerne einen Invite schicken",
+        "Würde euch gerne einladen, wer will?",
+        "Würde dich sehr gerne einladen",
+        "Würde dich gerne einladen",
+        "Würde gerne meine übrigen Invites verschenken, wer will einen?",
+        "Ich würde gerne jemandem einen Invite schenken",
+        "Ich würde gerne jemanden einladen, wer braucht noch?",
+        "Falls jemand eine Einladung braucht, könnte ich welche verschicken",
+        "Hätte gerne gewusst, wie lange die Einladung dauert",
+        "Würde gerne erfahren, wann meine Einladung kommt",
+        "Würde gerne wissen, ob meine Einladung schon raus ist",
+        "Ich würde gerne wissen, warum meine Einladung nicht ankommt",
+        "Hätte gerne gewusst, ob die Beta noch läuft",
+        "Hätte jemand eine Idee, warum meine Einladung nicht ankommt",
+        "Hatte jemand auch Probleme mit der Einladung?",
+        "Konnte jemand die Beta schon testen?",
+        "Könnte jemand erklären, wie man einen Invite verschicken kann?",
+        "Wie bekomme ich Zugriff auf den Voice-Kanal?",
+        "Wie bekomme ich Zugang zum Deadlock-Kanal?",
+        "Die Beta wäre mir zu stressig",
+        "Ein Invite für mich wäre cool",
+        "Würde gerne Bescheid bekommen, wann meine Einladung kommt",
+        "Würde gerne spielen, aber meine Einladung kommt nicht an",
+        "Wie nehme ich eine Freundeseinladung an?",
+        "Wer 😅 bräuchte noch einen Invite? Ich hab welche",
+        "Bräuchte noch irgendeiner einen Invite? Ich hab welche",
+        "Bräuchte der Neue noch einen Invite?",
+        "Ich hab noch einen Invite. Willst du? Schreib mir, geht dann an dich",
+    ] {
+        assert_eq!(request_kind(content, BOT), None, "{content}");
+    }
+}
+
+#[test]
+fn detektor_ausdruecke_sind_gueltig() {
+    assert!(INVITE_TERM_RE.is_some());
+    assert!(IMPERSONAL_REQUEST_RE.is_some());
 }
 
 #[tokio::test]
@@ -1477,7 +1623,7 @@ async fn rueckblick_paginiert_ueber_mehr_als_hundert_nachrichten() {
         "Kann mich jemand einladen? 123456789",
     )];
     for id in 2..=205 {
-        history.push(message(id, NOW - 100, "Guten Morgen"));
+        history.push(message(id, NOW - 100, "Bin gleich wieder da"));
     }
     port.history.lock().await.extend(history);
     watcher

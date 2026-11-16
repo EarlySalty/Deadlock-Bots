@@ -40,18 +40,98 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("gültiger URL-Ausdruck")
 });
 static INVITE_TERM_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"invite|playtest|beta|\bein\w{0,3}lad|\blad(?:e|et|t)?\s+(?:\w+\s+){0,3}\bein\b")
-        .ok()
+    Regex::new(&format!(
+        r"{}|\bein\w{{0,3}}lad|\blad(?:e|et|t)?\s+(?:\w+\s+){{0,3}}\bein\b",
+        INVITE_STEMS.join("|")
+    ))
+    .ok()
 });
-static QUESTION_SIGNAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?iu)\b(?:wer|mag|kann|könnte|koennte|jemand|würde|wuerde|hätte|haette)\b").ok()
+static IMPERSONAL_REQUEST_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    let modals = [CAN_FORMS, COULD_FORMS, MAY_FORMS].concat().join("|");
+    Regex::new(&format!(
+        r"(?:^|[.!?])\s*(?:(?:{greetings}|{time_greeting}\s+(?:{times}))(?:\s+(?:{addressees}))?(?:,\s*|\s+))?(?:{modals})\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:{nouns})\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:{verbs})\b",
+        greetings = GREETINGS.join("|"),
+        time_greeting = TIME_GREETING,
+        times = GREETING_TIMES.join("|"),
+        addressees = GREETING_ADDRESSEES.join("|"),
+        nouns = [INVITE_STEMS, &[INVITATION_NOUN]].concat().join("|"),
+        verbs = RECEIVE_VERBS.join("|"),
+    ))
+    .ok()
 });
-static IMPERSONAL_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:^|[.!?])\s*(?:(?:jo|hey|hi|hallo|moin|servus|guten\s+(?:morgen|tag|abend))(?:\s+(?:zusammen|leute|allerseits))?(?:,\s*|\s+))?(?:kann|könnte|koennte|darf)\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:invite|einladung|playtest|beta)\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:bekommen|kriegen|erhalten|haben)\b",
-    )
-    .expect("valid impersonal invite request expression")
-});
+
+const GREETINGS: &[&str] = &["jo", "hey", "hi", "hallo", "moin", "servus"];
+const TIME_GREETING: &str = "guten";
+const GREETING_TIMES: &[&str] = &["morgen", "tag", "abend"];
+const GREETING_ADDRESSEES: &[&str] = &["zusammen", "leute", "allerseits"];
+const SELF_PRONOUN: &str = "ich";
+const SUBJECTLESS_PARTICLES: &[&str] = &[
+    "auch", "noch", "echt", "super", "sehr", "bitte", "mal", "dann", "jetzt", "ja", "wirklich",
+    "gern", "gerne", "so",
+];
+const OBJECT_ARTICLES: &[&str] = &["einen", "nen"];
+const AMBIGUOUS_ARTICLES: &[&str] = &["ein", "eine", "ne"];
+const REFERRING_PRONOUNS: &[&str] = &[
+    "ein", "eine", "einen", "eins", "nen", "ne", "welche", "welchen",
+];
+
+const INVITE_STEMS: &[&str] = &["invite", "playtest", "beta"];
+const INVITATION_NOUN: &str = "einladung";
+const CAN_FORMS: &[&str] = &["kann"];
+const MAY_FORMS: &[&str] = &["darf"];
+const COULD_FORMS: &[&str] = &["könnte", "koennte"];
+const WOULD_FORMS: &[&str] = &["würde", "wuerde", "hätte", "haette"];
+const WERE_FORMS: &[&str] = &["wäre", "waere"];
+const ROOM_CORE: &[&str] = &["wer", "jemand"];
+const ROOM_EXTRA: &[&str] = &["irgendwer", "irgendjemand", "einer", "jmd"];
+const SINGULAR_ADDRESS: &str = "du";
+const SECOND_PERSON_OBJECTS: &[&str] = &["dich", "dir", "euch"];
+const SECOND_PERSON_POSSESSIVES: &[&str] = &[
+    "dein", "deine", "deinen", "deinem", "deiner", "deines", "euer", "eure", "euren", "eurem",
+    "eurer", "eures",
+];
+const OTHER_PERSONS: &[&str] = &[
+    "ihr",
+    "jemanden",
+    "jemandem",
+    "man",
+    "wem",
+    "wen",
+    "er",
+    "ihn",
+    "ihm",
+    "sie",
+    "ihnen",
+    "wir",
+    "niemand",
+    "keiner",
+    "jeder",
+    "irgendeiner",
+    "irgendeine",
+    "irgendwem",
+    "irgendwen",
+    "irgendjemanden",
+    "irgendjemandem",
+];
+const NEED_FORMS: &[&str] = &[
+    "brauche",
+    "bräuchte",
+    "braeuchte",
+    "benötige",
+    "benoetige",
+    "benotige",
+];
+const RECEIVE_VERBS: &[&str] = &["bekommen", "kriegen", "erhalten", "haben"];
+const PLAY_VERBS: &[&str] = &[
+    "ausprobieren",
+    "anfangen",
+    "mitmachen",
+    "spielen",
+    "testen",
+    "dabei",
+];
+const WISH_FILLERS: &[&str] = &["bitte", "mal", "wollen"];
+const CLAUSE_ENDS: &[char] = &['.', '!', '?', ';', ':', ',', '…'];
 
 #[derive(Debug, Clone)]
 pub struct LoungeMessage {
@@ -1684,10 +1764,224 @@ fn is_offer(content: &str) -> bool {
     words.contains(&"ich")
         && words
             .iter()
-            .any(|word| matches!(*word, "dich" | "euch" | "dir"))
+            .any(|word| SECOND_PERSON_OBJECTS.contains(word))
         && (words.iter().any(|word| {
             word.starts_with("lad") || word.starts_with("einlad") || word.starts_with("invit")
         }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClauseAsk {
+    RoomOnly,
+    DirectCapable,
+}
+
+fn words_of(text: &str) -> Vec<&str> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn split_text(text: &str, ends: fn(char) -> bool) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        let next_is_space = chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if ch == '\n' || (ends(ch) && next_is_space) {
+            parts.push(&text[start..index]);
+            start = index + ch.len_utf8();
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn ends_clause(ch: char) -> bool {
+    CLAUSE_ENDS.contains(&ch)
+}
+
+fn ends_segment(ch: char) -> bool {
+    ch == ')' || (!ch.is_ascii() && !ch.is_alphanumeric() && !ch.is_whitespace())
+}
+
+fn is_room_address(word: &str) -> bool {
+    ROOM_CORE.contains(&word) || ROOM_EXTRA.contains(&word)
+}
+
+fn is_request_modal(word: &str) -> bool {
+    COULD_FORMS.contains(&word) || WOULD_FORMS.contains(&word)
+}
+
+fn names_other_person(word: &str) -> bool {
+    is_room_address(word)
+        || word == SINGULAR_ADDRESS
+        || SECOND_PERSON_OBJECTS.contains(&word)
+        || SECOND_PERSON_POSSESSIVES.contains(&word)
+        || OTHER_PERSONS.contains(&word)
+}
+
+fn is_invite_noun(word: &str) -> bool {
+    INVITE_STEMS.iter().chain([&INVITATION_NOUN]).any(|stem| {
+        word.strip_prefix(stem)
+            .is_some_and(|rest| matches!(rest, "" | "s" | "en"))
+    })
+}
+
+fn is_opener(word: &str) -> bool {
+    GREETINGS.contains(&word)
+        || word == TIME_GREETING
+        || GREETING_TIMES.contains(&word)
+        || GREETING_ADDRESSEES.contains(&word)
+}
+
+fn is_self_pronoun(word: &str) -> bool {
+    word == SELF_PRONOUN || (word.starts_with("ic") && close_word(word, SELF_PRONOUN, 1))
+}
+
+fn leaves_subject_open(words: &[&str], index: usize) -> bool {
+    words.get(index).is_some_and(|word| {
+        SUBJECTLESS_PARTICLES.contains(word)
+            || OBJECT_ARTICLES.contains(word)
+            || (AMBIGUOUS_ARTICLES.contains(word)
+                && words
+                    .get(index + 1)
+                    .is_some_and(|next| is_invite_noun(next)))
+    })
+}
+
+fn self_subject(words: &[&str], verb: usize) -> bool {
+    let beside_self = verb
+        .checked_sub(1)
+        .and_then(|before| words.get(before))
+        .into_iter()
+        .chain(words.get(verb + 1))
+        .any(|word| is_self_pronoun(word));
+    let dropped_self =
+        words.iter().take(verb).all(|word| is_opener(word)) && leaves_subject_open(words, verb + 1);
+    beside_self || dropped_self
+}
+
+struct Segment<'a> {
+    clause: &'a [&'a str],
+    start: usize,
+    end: usize,
+}
+
+impl Segment<'_> {
+    fn words(&self) -> &[&str] {
+        self.clause.get(self.start..self.end).unwrap_or_default()
+    }
+
+    fn self_subject(&self, index: usize) -> bool {
+        self_subject(self.clause, self.start + index)
+    }
+}
+
+fn segments<'a>(clause: &str, words: &'a [&'a str]) -> Vec<Segment<'a>> {
+    let mut start = 0;
+    split_text(clause, ends_segment)
+        .into_iter()
+        .map(|part| {
+            let end = start + words_of(part).len();
+            let segment = Segment {
+                clause: words,
+                start,
+                end,
+            };
+            start = end;
+            segment
+        })
+        .collect()
+}
+
+fn need_object_fits(words: &[&str], verb: usize, invite_before: bool) -> bool {
+    words.iter().any(|word| is_invite_noun(word))
+        || (invite_before
+            && words
+                .iter()
+                .skip(verb + 1)
+                .rev()
+                .find(|word| !WISH_FILLERS.contains(word))
+                .is_some_and(|last| REFERRING_PRONOUNS.contains(last)))
+}
+
+fn need_ask(segment: &Segment, invite_before: bool) -> bool {
+    let words = segment.words();
+    words.iter().enumerate().any(|(index, word)| {
+        NEED_FORMS.contains(word)
+            && segment.self_subject(index)
+            && need_object_fits(words, index, invite_before)
+    })
+}
+
+fn wish_ask(segment: &Segment) -> bool {
+    let words = segment.words();
+    words.iter().enumerate().any(|(index, word)| {
+        (is_request_modal(word) || WERE_FORMS.contains(word))
+            && segment.self_subject(index)
+            && words
+                .iter()
+                .skip(index + 1)
+                .take(3)
+                .position(|next| next.starts_with("gern"))
+                .is_some_and(|offset| wish_complement_fits(&words[index + offset + 2..]))
+    })
+}
+
+fn wish_complement_fits(complement: &[&str]) -> bool {
+    complement.iter().any(|word| is_invite_noun(word))
+        && complement
+            .iter()
+            .rev()
+            .find(|word| {
+                !WISH_FILLERS.contains(word) && !word.chars().all(|ch| ch.is_ascii_digit())
+            })
+            .is_some_and(|last| {
+                RECEIVE_VERBS.contains(last) || PLAY_VERBS.contains(last) || is_invite_noun(last)
+            })
+}
+
+fn clause_ask(clause: &str, invite_before: bool) -> Option<ClauseAsk> {
+    let words = words_of(clause);
+    if words.iter().any(|word| names_other_person(word)) {
+        return None;
+    }
+    let own = words.contains(&SELF_PRONOUN);
+    let asked = segments(clause, &words)
+        .iter()
+        .any(|segment| need_ask(segment, invite_before) || wish_ask(segment));
+    if !asked {
+        None
+    } else if own && words.iter().any(|word| is_invite_noun(word)) {
+        Some(ClauseAsk::DirectCapable)
+    } else {
+        Some(ClauseAsk::RoomOnly)
+    }
+}
+
+fn mentions_invite(text: &str) -> bool {
+    words_of(text).iter().any(|word| is_invite_noun(word))
+}
+
+fn own_clause_ask(lower: &str) -> Option<ClauseAsk> {
+    let clauses = split_text(lower, ends_clause);
+    let asks: Vec<ClauseAsk> = clauses
+        .iter()
+        .enumerate()
+        .filter_map(|(index, clause)| {
+            let invite_before = clauses
+                .iter()
+                .take(index)
+                .any(|earlier| mentions_invite(earlier));
+            clause_ask(clause, invite_before)
+        })
+        .collect();
+    if asks.contains(&ClauseAsk::DirectCapable) {
+        Some(ClauseAsk::DirectCapable)
+    } else {
+        asks.first().copied()
+    }
 }
 
 fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
@@ -1696,10 +1990,7 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     }
     let lower = content.to_lowercase();
     let folded = fold_german_umlauts(&lower);
-    let words: Vec<&str> = folded
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
+    let words = words_of(&folded);
     let invite = INVITE_TERM_RE
         .as_ref()
         .is_some_and(|regex| regex.is_match(&folded))
@@ -1709,7 +2000,7 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
     let asks = words.iter().any(|word| {
         matches!(
             *word,
-            "wie" | "benotige" | "brauche" | "krieg" | "kriege" | "mochte" | "will" | "suche"
+            "wie" | "krieg" | "kriege" | "mochte" | "will" | "suche"
         )
     });
     let self_request = (asks && words.contains(&"ich"))
@@ -1717,16 +2008,16 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
             matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
                 || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
         });
-    let impersonal_request = IMPERSONAL_REQUEST_RE.is_match(&lower);
-    if !invite || !(self_request || impersonal_request) {
+    let impersonal_request = IMPERSONAL_REQUEST_RE
+        .as_ref()
+        .is_some_and(|regex| regex.is_match(&lower));
+    let clause_ask = own_clause_ask(&lower);
+    if !invite || !(self_request || impersonal_request || clause_ask.is_some()) {
         return None;
     }
-    let room_address = words.iter().any(|word| {
-        matches!(
-            *word,
-            "jemand" | "wer" | "irgendwer" | "irgendjemand" | "einer" | "jmd"
-        )
-    });
+    let direct_capable =
+        self_request || impersonal_request || clause_ask == Some(ClauseAsk::DirectCapable);
+    let room_address = words.iter().any(|word| is_room_address(word));
     let bot_mention =
         content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
     let direct_verb = words.iter().any(|word| {
@@ -1734,9 +2025,14 @@ fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
             .iter()
             .any(|candidate| close_word(word, candidate, 1))
     });
-    if bot_mention || (!room_address && (direct_verb || words.contains(&"du"))) {
-        Some(RequestKind::Direct)
-    } else if has_question_signal(&lower) || room_address || asks || impersonal_request {
+    if bot_mention || (!room_address && (direct_verb || words.contains(&SINGULAR_ADDRESS))) {
+        direct_capable.then_some(RequestKind::Direct)
+    } else if has_question_signal(&lower)
+        || room_address
+        || asks
+        || impersonal_request
+        || clause_ask.is_some()
+    {
         Some(RequestKind::Room)
     } else {
         None
@@ -1793,9 +2089,12 @@ fn is_invite_request(content: &str) -> bool {
 }
 fn has_question_signal(lower_content: &str) -> bool {
     lower_content.contains('?')
-        || QUESTION_SIGNAL_RE
-            .as_ref()
-            .is_some_and(|regex| regex.is_match(lower_content))
+        || words_of(lower_content).iter().any(|word| {
+            ROOM_CORE.contains(word)
+                || CAN_FORMS.contains(word)
+                || *word == "mag"
+                || is_request_modal(word)
+        })
 }
 fn has_friend_code(content: &str) -> bool {
     FRIEND_CODE_RE
