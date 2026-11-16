@@ -104,11 +104,27 @@ struct ReactionRoleMapping {
 pub struct ReactionRoleService {
     pool: PgPool,
     port: Arc<dyn ReactionRolePort>,
+    page_timeout: Duration,
+}
+
+fn backfill_page_failed(mapping: &ReactionRoleMapping, reason: &str) {
+    tracing::warn!(
+        reason,
+        mapping_id = mapping.id,
+        channel_id = mapping.source_channel_id,
+        message_id = mapping.message_id,
+        emoji = %mapping.emoji,
+        "Reaction-Role-Backfill: Reaktoren konnten nicht geladen werden"
+    );
 }
 
 impl ReactionRoleService {
     pub fn new(pool: PgPool, port: Arc<dyn ReactionRolePort>) -> Arc<Self> {
-        Arc::new(Self { pool, port })
+        Arc::new(Self {
+            pool,
+            port,
+            page_timeout: dl_discord::adapter::discord_call_timeout(),
+        })
     }
 
     pub async fn handle_reaction_add(
@@ -192,27 +208,33 @@ impl ReactionRoleService {
             let mut after = None;
             let mut failed = false;
             loop {
-                let page = match self
-                    .port
-                    .reaction_users(mapping.source_channel_id, mapping.message_id, &emoji, after)
-                    .await
-                {
-                    Ok(page) => page,
-                    Err(err) => {
-                        tracing::warn!(
-                            %err,
-                            mapping_id = mapping.id,
-                            channel_id = mapping.source_channel_id,
-                            message_id = mapping.message_id,
-                            emoji = %mapping.emoji,
-                            "Reaction-Role-Backfill: Reaktoren konnten nicht geladen werden"
-                        );
+                let request = self.port.reaction_users(
+                    mapping.source_channel_id,
+                    mapping.message_id,
+                    &emoji,
+                    after,
+                );
+                let page = match tokio::time::timeout(self.page_timeout, request).await {
+                    Ok(Ok(page)) => page,
+                    Ok(Err(err)) => {
+                        backfill_page_failed(&mapping, &err.to_string());
+                        failed = true;
+                        break;
+                    }
+                    Err(_) => {
+                        backfill_page_failed(&mapping, "Zeitlimit für eine Seite überschritten");
                         failed = true;
                         break;
                     }
                 };
                 let page_len = page.len();
-                let next_after = page.last().map(|user| user.id);
+                let Ok(next_after) =
+                    dl_discord::adapter::next_page_cursor(after, page.iter().map(|user| user.id))
+                else {
+                    backfill_page_failed(&mapping, "Reaktorenliste blättert nicht weiter");
+                    failed = true;
+                    break;
+                };
                 for user in page {
                     if user.is_bot {
                         continue;
@@ -228,7 +250,7 @@ impl ReactionRoleService {
                     }
                 }
                 after = next_after;
-                if page_len < 100 {
+                if page_len < usize::from(dl_discord::adapter::REACTION_USERS_PAGE_LIMIT) {
                     break;
                 }
             }
@@ -762,6 +784,7 @@ mod tests {
         add_role_results: Mutex<VecDeque<Result<(), PortErr>>>,
         dm_results: Mutex<VecDeque<Result<(), DmErr>>>,
         reaction_pages: Mutex<VecDeque<Result<Vec<ReactedUser>, PortErr>>>,
+        hang_reaction_pages: std::sync::atomic::AtomicBool,
     }
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -831,6 +854,12 @@ mod tests {
                 canonical_emoji(emoji),
                 after,
             ));
+            if self
+                .hang_reaction_pages
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                std::future::pending::<()>().await;
+            }
             lock(&self.reaction_pages)
                 .pop_front()
                 .unwrap_or_else(|| Ok(Vec::new()))
@@ -1417,7 +1446,7 @@ mod tests {
         let mut first_page: Vec<ReactedUser> = (1_000..1_099).map(reacted_user).collect();
         first_page.push(reacted_bot(9_999));
         port.push_reaction_page(Ok(first_page));
-        port.push_reaction_page(Ok(vec![reacted_user(2_000), reacted_user(2_001)]));
+        port.push_reaction_page(Ok(vec![reacted_user(10_000), reacted_user(10_001)]));
 
         service.run_pending_backfills().await?;
 
@@ -1433,6 +1462,56 @@ mod tests {
             .iter()
             .any(|(_, user_id, _)| *user_id == 9_999));
         assert!(!backfill_pending(&db, mapping_id).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backfill_bricht_bei_stehendem_cursor_und_haengender_seite_ab_und_bleibt_offen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, db, port, _service) = test_service().await?;
+        let service = Arc::new(ReactionRoleService {
+            pool: db.clone(),
+            port: port.clone(),
+            page_timeout: Duration::from_millis(100),
+        });
+        let mapping_id = insert_mapping(
+            &db,
+            MappingInsert {
+                message_id: 100,
+                emoji: "✅".to_string(),
+                role_id: 500,
+                dm_enabled: false,
+                remove_on_unreact: true,
+                backfill_pending: true,
+            },
+        )
+        .await?;
+        let full_page = || -> Vec<ReactedUser> {
+            (1_000..1_000 + u64::from(dl_discord::adapter::REACTION_USERS_PAGE_LIMIT))
+                .map(reacted_user)
+                .collect()
+        };
+        port.push_reaction_page(Ok(full_page()));
+        port.push_reaction_page(Ok(full_page()));
+
+        service.run_pending_backfills().await?;
+
+        let stalled = mock_state(&port);
+        assert_eq!(stalled.reaction_fetches.len(), 2);
+        assert_eq!(
+            stalled.add_roles.len(),
+            usize::from(dl_discord::adapter::REACTION_USERS_PAGE_LIMIT)
+        );
+        assert!(backfill_pending(&db, mapping_id).await?);
+
+        port.hang_reaction_pages
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        service.run_pending_backfills().await?;
+
+        let hanging = mock_state(&port);
+        assert_eq!(hanging.reaction_fetches.len(), 3);
+        assert_eq!(hanging.add_roles.len(), stalled.add_roles.len());
+        assert!(backfill_pending(&db, mapping_id).await?);
         Ok(())
     }
 

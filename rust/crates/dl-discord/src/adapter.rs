@@ -473,7 +473,7 @@ impl DiscordAdapter {
                 ChannelId::new(channel_id),
                 MessageId::new(message_id),
                 emoji,
-                100,
+                REACTION_USERS_PAGE_LIMIT,
                 after,
             )
             .await?;
@@ -1068,7 +1068,7 @@ impl DiscordPort for DiscordAdapter {
             .iter()
             .find(|role| role.id == rid)
             .ok_or(PortError::RoleNotFound)?;
-        let members = fetch_all_guild_members(&self.http, gid, default_member_page_timeout())
+        let members = fetch_all_guild_members(&self.http, gid, discord_call_timeout())
             .await
             .map_err(PortError::Discord)?
             .iter()
@@ -1393,9 +1393,40 @@ impl ChangelogDiscord for DiscordAdapter {
 }
 
 pub const GUILD_MEMBER_PAGE_LIMIT: u64 = 1000;
+pub const REACTION_USERS_PAGE_LIMIT: u8 = 100;
 
-pub fn default_member_page_timeout() -> std::time::Duration {
-    std::time::Duration::from_millis(dl_core::runtime_config::HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+pub fn discord_call_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(dl_core::runtime_config::DISCORD_CALL_TIMEOUT_MS)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StalledCursor;
+
+pub fn next_page_cursor(
+    after: Option<u64>,
+    ids: impl IntoIterator<Item = u64>,
+) -> Result<Option<u64>, StalledCursor> {
+    advance_after(after.as_ref(), ids.into_iter().max())
+}
+
+pub fn advance_after<T: Ord>(
+    previous: Option<&T>,
+    next: Option<T>,
+) -> Result<Option<T>, StalledCursor> {
+    match (previous, next) {
+        (Some(previous), Some(next)) if next <= *previous => Err(StalledCursor),
+        (_, next) => Ok(next),
+    }
+}
+
+pub fn advance_before<T: Ord>(
+    previous: Option<&T>,
+    next: Option<T>,
+) -> Result<Option<T>, StalledCursor> {
+    match (previous, next) {
+        (Some(previous), Some(next)) if next >= *previous => Err(StalledCursor),
+        (_, next) => Ok(next),
+    }
 }
 
 pub async fn fetch_all_guild_members(
@@ -1424,13 +1455,8 @@ fn next_member_cursor(
     after: Option<u64>,
     page: &[serenity::all::Member],
 ) -> Result<Option<u64>, String> {
-    let Some(next) = page.iter().map(|member| member.user.id.get()).max() else {
-        return Ok(None);
-    };
-    if after.is_some_and(|previous| next <= previous) {
-        return Err("Mitgliederliste blättert nicht weiter".to_string());
-    }
-    Ok(Some(next))
+    next_page_cursor(after, page.iter().map(|member| member.user.id.get()))
+        .map_err(|StalledCursor| "Mitgliederliste blättert nicht weiter".to_string())
 }
 
 /// Serialisierung im Format von ChangelogPublisher._serialize_message.
@@ -1461,14 +1487,7 @@ mod tests {
     use super::*;
 
     fn member_page(ids: impl Iterator<Item = u64>) -> Vec<serenity::all::Member> {
-        let rows: Vec<Value> = ids
-            .map(|id| {
-                json!({
-                    "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
-                    "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
-                })
-            })
-            .collect();
+        let rows: Vec<Value> = ids.map(member_json).collect();
         serde_json::from_value(Value::Array(rows)).expect("members")
     }
 
@@ -1527,10 +1546,7 @@ mod tests {
     }
 
     fn member_json(id: u64) -> Value {
-        json!({
-            "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
-            "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
-        })
+        super::member_fixture(id, &[])
     }
 
     #[tokio::test]
@@ -1857,6 +1873,14 @@ mod tests {
             "Internal Server Error"
         ));
     }
+}
+
+#[cfg(test)]
+fn member_fixture(id: u64, roles: &[&str]) -> Value {
+    json!({
+        "user": {"id": id.to_string(), "username": "member", "discriminator": "0001", "avatar": null},
+        "roles": roles, "joined_at": "2026-10-08T00:00:00Z", "deaf": false, "mute": false, "flags": 0
+    })
 }
 
 #[cfg(test)]

@@ -621,7 +621,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         discord_token.clone(),
         serversync::GUILD_ID,
         supporter_links.clone(),
-    );
+    )
+    .context("HTTP-Client für Discord-Aufrufe der Serversync")?;
     let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_role_port: Arc<dyn dl_community::reaction_roles::ReactionRolePort> =

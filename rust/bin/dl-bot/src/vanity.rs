@@ -31,8 +31,14 @@ pub fn spawn_vanity_snapshots(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut gateway = dispatcher.subscribe_gateway();
-    let client = reqwest::Client::new();
     tokio::spawn(async move {
+        let client = match crate::serversync::discord_http_client() {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!(%err, "Vanity-Snapshot: HTTP-Client nicht gebaut; Snapshots aus");
+                return;
+            }
+        };
         let mut guilds = BTreeSet::new();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -275,7 +281,7 @@ async fn sync_member_directory(
     let members = dl_discord::adapter::fetch_all_guild_members(
         http,
         serenity::all::GuildId::new(guild_id),
-        dl_discord::adapter::default_member_page_timeout(),
+        dl_discord::adapter::discord_call_timeout(),
     )
     .await?;
     for member in &members {

@@ -203,10 +203,11 @@ mod tests {
             "test".to_string(),
             1,
             Arc::new(crate::serversync::FixedFundingSource::standard()),
-        );
+        )
+        .expect("serversync");
         let mut config =
             super::super::SupporterConfig::new(&Default::default(), "http://localhost", |_| None);
-        config.request_timeout = limits();
+        config.discord_timeout = limits();
         let sync = super::super::SupporterSync::new(
             db.pool().clone(),
             Arc::new(http),

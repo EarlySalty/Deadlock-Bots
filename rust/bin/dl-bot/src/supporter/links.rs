@@ -1004,7 +1004,7 @@ mod tests {
         assert!(!token_without_base.panel_options().twitch);
         assert_eq!(
             defaults.request_timeout,
-            Duration::from_millis(dl_core::runtime_config::HTTP_DEFAULT_REQUEST_TIMEOUT_MS)
+            Duration::from_millis(dl_core::runtime_config::SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS)
         );
         let slow = config_from(
             dl_core::runtime_config::CommunityOptions {

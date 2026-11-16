@@ -2640,7 +2640,7 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
         match dl_discord::adapter::fetch_all_guild_members(
             &self.adapter.http,
             GuildId::new(self.guild_id),
-            dl_discord::adapter::default_member_page_timeout(),
+            dl_discord::adapter::discord_call_timeout(),
         )
         .await
         {
@@ -3430,7 +3430,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         Ok(dl_discord::adapter::fetch_all_guild_members(
             &self.adapter.http,
             guild,
-            dl_discord::adapter::default_member_page_timeout(),
+            dl_discord::adapter::discord_call_timeout(),
         )
         .await?
         .into_iter()
@@ -4541,7 +4541,8 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
                 .map_err(|err| err.to_string())?;
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = reqwest::Client::new()
+        let response = crate::serversync::discord_http_client()
+            .map_err(|err| format!("Coaching-HTTP-Client: {err}"))?
             .post(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages"
             ))
@@ -4595,7 +4596,14 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             };
             form = form.part(format!("files[{id}]"), part);
         }
-        let response = match reqwest::Client::new()
+        let client = match crate::serversync::discord_http_client() {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, message_id, "Coaching: HTTP-Client nicht gebaut");
+                return;
+            }
+        };
+        let response = match client
             .patch(format!(
                 "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
             ))

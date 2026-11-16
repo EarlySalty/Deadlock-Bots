@@ -99,6 +99,7 @@ pub enum ServerSyncErrorKind {
 }
 
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
+const DISCORD_HISTORY_PAGE_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
@@ -1067,13 +1068,13 @@ impl ServerSyncService {
         discord_token: String,
         guild_id: u64,
         supporter_funding: Arc<dyn crate::supporter::FundingSource>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> Result<Arc<Self>, reqwest::Error> {
+        Ok(Arc::new(Self {
             pool,
             adapter,
             discord_token,
             guild_id,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client()?,
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
@@ -1081,7 +1082,7 @@ impl ServerSyncService {
             panel_apply_lock: tokio::sync::Mutex::new(()),
             supporter_funding,
             support_panel_lock: tokio::sync::Mutex::new(()),
-        })
+        }))
     }
 
     #[cfg(test)]
@@ -1110,7 +1111,7 @@ impl ServerSyncService {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client().expect("Discord-HTTP-Client"),
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
@@ -1181,7 +1182,7 @@ impl ServerSyncService {
         dl_discord::adapter::fetch_all_guild_members(
             &self.adapter.http,
             GuildId::new(self.guild_id),
-            dl_discord::adapter::default_member_page_timeout(),
+            dl_discord::adapter::discord_call_timeout(),
         )
         .await
         .map_err(ServerSyncError::internal)
@@ -1579,23 +1580,21 @@ impl ServerSyncService {
         ids.extend(thread_ids(active_in_rules)?);
 
         for endpoint in ["archived/public", "archived/private"] {
-            let mut before: Option<String> = None;
+            let mut before: Option<DateTime<chrono::FixedOffset>> = None;
             loop {
                 let mut url = format!(
-                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit=100"
+                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit={DISCORD_HISTORY_PAGE_LIMIT}"
                 );
-                if let Some(before) = before.as_deref() {
+                if let Some(before) = before {
                     url.push_str("&before=");
-                    // archive_timestamp enthaelt `+00:00` — das `+` muss
-                    // percent-encodiert werden, sonst liest Discord ein Leerzeichen.
-                    url.push_str(&before.replace('+', "%2B"));
+                    url.push_str(
+                        &before
+                            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+                            .replace('+', "%2B"),
+                    );
                 }
                 let page: DiscordThreadPage = self.discord_get_json(url).await?;
-                let next_before = page
-                    .threads
-                    .last()
-                    .and_then(|thread| thread.thread_metadata.as_ref())
-                    .and_then(|metadata| metadata.archive_timestamp.clone());
+                let next_before = archive_before_cursor(before, &page.threads)?;
                 ids.extend(thread_ids(page.threads)?);
                 if !page.has_more || next_before.is_none() {
                     break;
@@ -1618,7 +1617,7 @@ impl ServerSyncService {
         let mut before: Option<u64> = None;
         loop {
             let mut url =
-                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages?limit=100");
+                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}");
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -1641,11 +1640,8 @@ impl ServerSyncService {
                     });
                 }
             }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
                 break;
             }
         }
@@ -2495,9 +2491,10 @@ impl ServerSyncService {
         let mut truncated = false;
         for page_index in 0..HISTORY_SCAN_MAX_PAGES {
             let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
+                "{}/channels/{}/messages?limit={}",
                 self.discord_api_base.trim_end_matches('/'),
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+                rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                DISCORD_HISTORY_PAGE_LIMIT
             );
             if let Some(before) = before {
                 url.push_str("&before=");
@@ -2527,11 +2524,8 @@ impl ServerSyncService {
                     });
                 }
             }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
                 break;
             }
             truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
@@ -2553,8 +2547,9 @@ impl ServerSyncService {
         let mut message_ids = Vec::new();
         let mut truncated = false;
         for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url =
-                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
+            let mut url = self.discord_api_url(&format!(
+                "/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
+            ));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -2570,11 +2565,8 @@ impl ServerSyncService {
                     message_ids.push(message_id);
                 }
             }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
                 break;
             }
             truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
@@ -3104,7 +3096,7 @@ impl ServerSyncService {
         let mut messages = BTreeMap::new();
         let mut before: Option<u64> = None;
         loop {
-            let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit=100");
+            let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}");
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -3147,11 +3139,8 @@ impl ServerSyncService {
                     }
                 }
             }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
                 break;
             }
         }
@@ -4307,7 +4296,6 @@ impl ServerSyncOps for ServerSyncService {
         let options = source.panel_options();
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
         let funding_result = self.support_funding_for_apply(source.as_ref()).await;
-        let _apply_guard = self.panel_apply_lock.lock().await;
         let (funding, funding_warning) = match funding_result {
             Ok(found) => found,
             Err(error) if confirm => {
@@ -4325,6 +4313,7 @@ impl ServerSyncOps for ServerSyncService {
                 )),
             ),
         };
+        let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
             .await?;
@@ -6178,6 +6167,50 @@ impl DiscordRestResponse {
     }
 }
 
+pub(crate) fn discord_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(
+            dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS,
+        ))
+        .build()
+}
+
+fn archive_before_cursor(
+    before: Option<DateTime<chrono::FixedOffset>>,
+    threads: &[DiscordThread],
+) -> ServerSyncResult<Option<DateTime<chrono::FixedOffset>>> {
+    let oldest = threads
+        .last()
+        .and_then(|thread| thread.thread_metadata.as_ref())
+        .and_then(|metadata| metadata.archive_timestamp.as_deref())
+        .map(|stamp| {
+            DateTime::parse_from_rfc3339(stamp).map_err(|err| {
+                ServerSyncError::internal(format!(
+                    "Discord-Thread-Archiv liefert ungültigen Zeitstempel `{stamp}`: {err}"
+                ))
+            })
+        })
+        .transpose()?;
+    dl_discord::adapter::advance_before(before.as_ref(), oldest).map_err(|_| {
+        ServerSyncError::internal("Discord-Thread-Archiv blättert nicht weiter".to_string())
+    })
+}
+
+fn history_before_cursor(
+    before: Option<u64>,
+    page: &[DiscordMessage],
+) -> ServerSyncResult<Option<u64>> {
+    let oldest = page
+        .iter()
+        .map(|message| parse_discord_id("Message-ID", &message.id))
+        .collect::<ServerSyncResult<Vec<_>>>()?
+        .into_iter()
+        .min();
+    dl_discord::adapter::advance_before(before.as_ref(), oldest).map_err(|_| {
+        ServerSyncError::internal("Discord-Nachrichtenverlauf blättert nicht weiter".to_string())
+    })
+}
+
 async fn discord_regelwerk_send_with_retry<S, Fut>(
     mut send: S,
     method: &str,
@@ -6186,6 +6219,8 @@ where
     S: FnMut() -> Fut,
     Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
 {
+    let budget = Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS);
+    let mut waited = Duration::ZERO;
     for attempt in 1..=REGELWERK_DISCORD_MAX_ATTEMPTS {
         let response = send().await?;
         if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -6195,6 +6230,17 @@ where
             return Ok(response);
         }
         let retry_after = regelwerk_retry_after(&response).unwrap_or(Duration::from_secs(1));
+        if waited + retry_after > budget {
+            tracing::warn!(
+                method,
+                attempt,
+                retry_after_ms = retry_after.as_millis(),
+                waited_ms = waited.as_millis(),
+                "Discord REST rate-limited; Wartebudget erschöpft"
+            );
+            return Ok(response);
+        }
+        waited += retry_after;
         tracing::warn!(
             method,
             attempt,
@@ -10927,6 +10973,63 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
         assert_eq!(body, json!({"ok": true}));
         assert_eq!(*attempts.lock().expect("attempts"), 2);
+    }
+
+    #[tokio::test]
+    async fn regelwerk_discord_retry_gibt_429_zurueck_wenn_wartezeit_das_budget_sprengt() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_sender = Arc::clone(&attempts);
+        let over_budget =
+            dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS as f64 / 1_000.0 + 1.0;
+
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts_for_call = Arc::clone(&attempts_for_sender);
+                async move {
+                    *attempts_for_call.lock().expect("attempts") += 1;
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        json!({"retry_after": over_budget}).to_string(),
+                    ))
+                }
+            },
+            "GET",
+        )
+        .await
+        .expect("429 response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 1);
+    }
+
+    #[test]
+    fn verlaufs_cursor_bricht_ab_wenn_discord_nicht_aelter_wird() {
+        let message = |id: &str| -> DiscordMessage {
+            serde_json::from_value(json!({"id": id, "author": {"id": "1"}})).expect("message")
+        };
+        assert_eq!(
+            history_before_cursor(None, &[message("30"), message("20")]).expect("first page"),
+            Some(20)
+        );
+        assert!(history_before_cursor(Some(20), &[message("25"), message("20")]).is_err());
+        assert_eq!(
+            history_before_cursor(Some(20), &[]).expect("empty page"),
+            None
+        );
+
+        let thread = |stamp: &str| -> DiscordThread {
+            serde_json::from_value(json!({
+                "id": "1",
+                "thread_metadata": {"archive_timestamp": stamp}
+            }))
+            .expect("thread")
+        };
+        let first = archive_before_cursor(None, &[thread("2026-11-02T10:00:00+00:00")])
+            .expect("first archive page");
+        assert!(
+            archive_before_cursor(first, &[thread("2026-11-02T10:00:00.000000+00:00")]).is_err()
+        );
+        assert!(archive_before_cursor(first, &[thread("kein Datum")]).is_err());
     }
 
     #[test]

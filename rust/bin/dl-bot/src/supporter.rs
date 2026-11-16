@@ -9,8 +9,8 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use dl_core::runtime_config::{
-    CommunityOptions, HTTP_DEFAULT_REQUEST_TIMEOUT_MS, SUPPORTER_CUTOVER_GRACE_DAYS,
-    SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS, SUPPORTER_DEFAULT_MAX_REVOKES,
+    CommunityOptions, SUPPORTER_CUTOVER_GRACE_DAYS, SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+    SUPPORTER_DEFAULT_MAX_REVOKES, SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS,
     SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS, SUPPORTER_DEFAULT_TIERS_EUR,
 };
 
@@ -35,6 +35,7 @@ pub struct SupporterConfig {
     pub twitch_token: Option<String>,
     pub tiers_eur: Vec<u64>,
     pub request_timeout: Duration,
+    pub discord_timeout: Duration,
 }
 
 impl fmt::Debug for SupporterConfig {
@@ -51,6 +52,7 @@ impl fmt::Debug for SupporterConfig {
             .field("twitch_token_set", &self.twitch_token.is_some())
             .field("tiers_eur", &self.tiers_eur)
             .field("request_timeout", &self.request_timeout)
+            .field("discord_timeout", &self.discord_timeout)
             .finish()
     }
 }
@@ -86,8 +88,9 @@ impl SupporterConfig {
             request_timeout: Duration::from_millis(
                 community
                     .supporter_request_timeout_ms
-                    .unwrap_or(HTTP_DEFAULT_REQUEST_TIMEOUT_MS),
+                    .unwrap_or(SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS),
             ),
+            discord_timeout: dl_discord::adapter::discord_call_timeout(),
         }
     }
 
@@ -193,7 +196,7 @@ impl SupporterSync {
 
     async fn tick(&self) -> Result<(), store::StoreError> {
         store::require_table(&self.pool).await?;
-        let members = roles::fetch_members(&self.http, self.guild_id, self.config.request_timeout)
+        let members = roles::fetch_members(&self.http, self.guild_id, self.config.discord_timeout)
             .await
             .map_err(store::StoreError::Discord)?;
         if members.is_empty() {
@@ -243,7 +246,7 @@ impl SupporterSync {
                 self.guild_id,
                 &plan.grants,
                 true,
-                self.config.request_timeout,
+                self.config.discord_timeout,
             )
             .await;
         }
@@ -253,7 +256,7 @@ impl SupporterSync {
                 self.guild_id,
                 &plan.revokes,
                 false,
-                self.config.request_timeout,
+                self.config.discord_timeout,
             )
             .await;
         }
