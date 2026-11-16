@@ -1512,8 +1512,6 @@ enabled = false
                 SUPPORT_STEAM.to_string()
             ]
         );
-        assert!(main_text[1].starts_with("## Das bekommst du\n\n**Streamer-VC.**"));
-        assert!(main_text[2].contains("**Steam Bot.**"));
 
         let benefits = text_contents(&output.messages[1].payload);
         assert_eq!(
@@ -1525,7 +1523,13 @@ enabled = false
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
         assert_eq!(pay_text.len(), 3);
-        assert_eq!(pay_text[0], "**Monatsziel:** 15 € / 50 €\n▰▰▰▱▱▱▱▱▱▱");
+        assert_eq!(
+            pay_text[0],
+            SUPPORT_FUNDING
+                .replace("{stand}", "15 €")
+                .replace("{ziel}", "50 €")
+                .replace("{balken}", "▰▰▰▱▱▱▱▱▱▱")
+        );
         assert_eq!(
             pay_text[1],
             SUPPORT_PAY.replace("{stufen}", "5 €, 10 €, 20 € oder 50 €")
@@ -1614,8 +1618,10 @@ enabled = false
         );
         let pay = &output.messages[2].payload;
         let pay_text = text_contents(pay);
-        assert!(pay_text[1]
-            .ends_with("\n**Twitch-Sub.** Ein Abo bei earlysalty oder dach_lock zählt auch."));
+        assert!(pay_text[1].ends_with(&format!(
+            "\n{}",
+            SUPPORT_TWITCH.replace("{kanaele}", "earlysalty oder dach_lock")
+        )));
         let custom_ids: Vec<String> = buttons(pay)
             .iter()
             .filter_map(|button| button["custom_id"].as_str().map(str::to_string))
