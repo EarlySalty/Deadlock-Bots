@@ -122,3 +122,24 @@ Older references to the old SHAs in this folder mean the new commit with the sam
 ### Checks of fix pass 6
 With Postgres on ionos (`test-db-run`): invite lounge 145 passed, dl-bot 374 passed. Without a DSN: dl-community 366 passed (the 4 failures are DB-harness tests), dl-bridges 58, dl-discord 74. `cargo fmt --check -p dl-community` clean; clippy reports nothing in the lounge files.
 
+
+## 6. Lost run 6 on 49a80e2f and fix pass 7
+
+The run on 49a80e2f gave no verdict (Opus reviewer quota; its log is kept outside git as `gate-r6-lost.log`, the leads are in the table below); it is not a round and its grant stayed unspent. The reviewer's notes named four leads and two NITs. Each was checked against the code:
+
+| Lead | Holds | Cause | Fix |
+|---|---|---|---|
+| 1. A "ja" held while the invite call runs is dropped once `finish_dispatch` closes the request, and the closing notice goes out | yes, for the closing results (`Invite`, `AlreadyInvited`, `InvalidCode`, `Rejected`, none); the `Wait` results return to `Pending` | spec gap: "ja ends it" was checked only for open phases | `held_answer_open` keeps an already held answer judgeable on the fresh `Attempted` request in its channel (`judge_held`, `store_answer` only); the notice waits while the answer is held and a "ja" purges it. `finish_dispatch` is the only closer that can leave answers held. Twin: a "ja" removes the `InvalidCode` mark, so a later number does not restart the request |
+| 2. `accepts_repost` checks "open" without the window; the open rule written in several places | yes: a stale `Dispatching` room request swallowed a new same-code room request as a repost | instance of the round-5 class "open written per site" | `open_request` is built from `fresh_request` and `request_in`; `answer_open`, `accepts_repost`, `take_edited_code`, `awaits_corrected_code`, `held_answer_open` use them. `note_ignored_answer` (no channel, it logs other channels) and `restart_for_new_code` (no window, a new code is a new request) keep a phase check with a stated reason |
+| 3. `awaits_corrected_code` does not check the channel | yes: a room request with a new code in another channel restarted the corrected request there | the check sat in one caller (`takes_plain_code`), not in the predicate | `awaits_corrected_code` takes the channel |
+| 4. `known_code` before the load drops the request on a DB error | yes; the same holds for `last_hint_at` on a first row (main had both, `known_code` only for direct asks) | an enrichment lookup was fatal | both lookups log and fall back (no linked code, no earlier hint) |
+| NIT test hand-off tests:3723 | yes | `linked` passed for a message with its own code | `None` |
+| NIT README:152 OFFENE-URSACHEN claim | yes, the row did not exist | | rows added in claude-config c602b3c; README names each row |
+
+Unfinished checks of the lost run:
+- `ACTIVE_DISPATCH_MILLIS` = 2 x `INVITE_FORWARD_TIMEOUT_SECS`, derived in code; the bridge call is hard bounded by the reqwest per-request timeout in `SteamBotClient::post_event`.
+- `Dispatching` after a crash: predates the branch, exits listed in README "Limits to know", row in OFFENE-URSACHEN; no recovery mechanism in this pass.
+- `friend_code` writers: unchanged list (README "Friend-code rule"), all six sites checked.
+- The `graphify-first` hook blocks `git grep` in the reviewer sandbox: row in OFFENE-URSACHEN (c602b3c). The fix commit body lists the callers with line numbers instead.
+
+New tests: `gehaltenes_ja_waehrend_des_versands_schliesst_die_bitte_ohne_abschlussmeldung`, `ja_nach_ungueltigem_code_im_versand_laesst_keine_korrektur_mehr_zu`, `raumbitte_mit_neuem_code_in_anderem_kanal_korrigiert_den_ungueltigen_code_nicht`, `unlesbares_steam_konto_verliert_die_bitte_nicht`, `veraltete_bitte_im_versand_nimmt_keine_kopie_auf`. The first four fail with the old predicates (checked by reverting them). Checks: dl-community 371 passed, the same 4 DB-harness tests fail without `CENTRAL_TEST_DSN`; invite lounge 145 tests passed (without the Postgres tests); fmt clean; clippy reports nothing in the lounge files. The Postgres tests were not rerun: no SQL changed.

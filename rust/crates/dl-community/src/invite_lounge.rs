@@ -631,7 +631,7 @@ impl InviteLoungeWatcher {
         }
         let linked = match kind {
             Some(_) if friend_code(&event.content).is_none() => {
-                self.store.known_code(event.author_id).await?
+                self.linked_code(event.author_id).await
             }
             _ => None,
         };
@@ -642,7 +642,7 @@ impl InviteLoungeWatcher {
                 return Ok(None);
             }
             if previous.is_none() {
-                next.last_hint_at = self.store.last_hint_at(event.author_id).await?;
+                next.last_hint_at = self.earlier_hint_at(event.author_id).await;
             }
             let hint_before = (next.hint_sent, next.last_hint_at);
             let wants_hint = update_state(
@@ -676,6 +676,20 @@ impl InviteLoungeWatcher {
             });
             return Ok(Some(Recorded { user_id, hint }));
         }
+    }
+
+    async fn linked_code(&self, user_id: u64) -> Option<String> {
+        self.store.known_code(user_id).await.unwrap_or_else(|err| {
+            tracing::warn!(user_id, %err, "Invite-Lounge: verknüpftes Steam-Konto nicht lesbar, Bitte fragt nach dem Code");
+            None
+        })
+    }
+
+    async fn earlier_hint_at(&self, user_id: u64) -> Option<i64> {
+        self.store.last_hint_at(user_id).await.unwrap_or_else(|err| {
+            tracing::warn!(user_id, %err, "Invite-Lounge: früherer Hinweis nicht lesbar, Bitte wird trotzdem angelegt");
+            None
+        })
     }
 
     async fn record_edit(&self, edit: &dl_discord::MessageEdit) -> Result<Option<u64>, String> {
@@ -761,7 +775,7 @@ impl InviteLoungeWatcher {
                 next.friend_code = Some(code.to_string());
             }
             if repost {
-                note_repost(&mut next, event);
+                note_repost(&mut next, event, now);
             }
 
             if self
@@ -847,7 +861,7 @@ impl InviteLoungeWatcher {
         held: &HeldAnswer,
         now: i64,
     ) -> (Option<dl_brain::InviteCheckInOutcome>, bool) {
-        if !answer_open(state, channel_id, held.message_id, now) {
+        if !held_answer_open(state, channel_id, held.message_id, now) {
             return (None, false);
         }
         let Some(outcome) = self.judge_answer(user_id, channel_id, &held.content).await else {
@@ -873,7 +887,7 @@ impl InviteLoungeWatcher {
                 return Ok(true);
             }
             let mut next = previous.clone();
-            let open = answer_open(&previous, channel_id, held.message_id, now);
+            let open = held_answer_open(&previous, channel_id, held.message_id, now);
             let settled = match (open, outcome) {
                 (false, _) => {
                     next.status.held_answers.remove(0);
@@ -1982,7 +1996,7 @@ fn update_state(
         && code.is_some()
         && !code_changed
         && !state.status.asked()
-        && note_repost(state, event)
+        && note_repost(state, event, now)
     {
         return false;
     }
@@ -2067,28 +2081,36 @@ fn update_state(
     needs_hint
 }
 
-fn open_request(state: &LoungeState, channel_id: u64, now: i64) -> Option<&Request> {
-    state.request.as_ref().filter(|request| {
-        state.status.channel_id == Some(channel_id)
-            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
-            && matches!(
-                request.phase,
-                Phase::WaitingForCode | Phase::Pending | Phase::Dispatching
-            )
-    })
+fn fresh_request(state: &LoungeState, now: i64) -> Option<&Request> {
+    state
+        .request
+        .as_ref()
+        .filter(|request| is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS))
 }
 
-fn awaits_corrected_code(state: &LoungeState, now: i64) -> bool {
+fn request_in(state: &LoungeState, channel_id: u64, now: i64) -> Option<&Request> {
+    fresh_request(state, now).filter(|_| state.status.channel_id == Some(channel_id))
+}
+
+fn is_open(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::WaitingForCode | Phase::Pending | Phase::Dispatching
+    )
+}
+
+fn open_request(state: &LoungeState, channel_id: u64, now: i64) -> Option<&Request> {
+    request_in(state, channel_id, now).filter(|request| is_open(request.phase))
+}
+
+fn awaits_corrected_code(state: &LoungeState, channel_id: u64, now: i64) -> bool {
     state.status.notices.contains(&Notice::InvalidCode)
-        && state.request.as_ref().is_some_and(|request| {
-            request.phase == Phase::Attempted
-                && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
-        })
+        && request_in(state, channel_id, now)
+            .is_some_and(|request| request.phase == Phase::Attempted)
 }
 
 fn takes_plain_code(state: &LoungeState, channel_id: u64, now: i64) -> bool {
-    open_request(state, channel_id, now).is_some()
-        || (state.status.channel_id == Some(channel_id) && awaits_corrected_code(state, now))
+    open_request(state, channel_id, now).is_some() || awaits_corrected_code(state, channel_id, now)
 }
 
 fn restart_for_new_code(
@@ -2098,10 +2120,9 @@ fn restart_for_new_code(
     direct: bool,
     now: i64,
 ) {
-    let correcting = awaits_corrected_code(state, now);
+    let correcting = awaits_corrected_code(state, event.channel_id, now);
     let Some(request) = state.request.as_mut().filter(|request| {
-        (correcting || matches!(request.phase, Phase::Pending | Phase::Dispatching))
-            && request.message_id != event.message_id
+        (correcting || takes_answers(request.phase)) && request.message_id != event.message_id
     }) else {
         return;
     };
@@ -2161,25 +2182,36 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
     state.status.claim(notice)
 }
 
-fn answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
-    let held = state
+fn takes_answers(phase: Phase) -> bool {
+    matches!(phase, Phase::Pending | Phase::Dispatching)
+}
+
+fn is_held(state: &LoungeState, message_id: u64) -> bool {
+    state
         .status
         .held_answers
         .iter()
-        .any(|held| held.message_id == message_id);
-    state.request.as_ref().is_some_and(|request| {
-        matches!(request.phase, Phase::Pending | Phase::Dispatching)
-            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
+        .any(|held| held.message_id == message_id)
+}
+
+fn answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
+    let held = is_held(state, message_id);
+    open_request(state, channel_id, now).is_some_and(|request| {
+        takes_answers(request.phase)
             && (held || (message_id > request.message_id && message_id > state.last_seen))
-            && state.status.channel_id == Some(channel_id)
     })
 }
 
+fn held_answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
+    answer_open(state, channel_id, message_id, now)
+        || is_held(state, message_id)
+            && request_in(state, channel_id, now)
+                .is_some_and(|request| request.phase == Phase::Attempted)
+}
+
 fn note_ignored_answer(state: &LoungeState, event: &LoungeMessage, now: i64, reason: &str) {
-    let Some(request) = state.request.as_ref().filter(|request| {
-        matches!(request.phase, Phase::Pending | Phase::Dispatching)
-            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
-    }) else {
+    let Some(request) = fresh_request(state, now).filter(|request| takes_answers(request.phase))
+    else {
         return;
     };
     if event.message_id <= state.last_seen || event.message_id <= request.message_id {
@@ -2213,13 +2245,10 @@ fn take_edited_code(
     code: &str,
     now: i64,
 ) -> bool {
-    let same_channel = state.status.channel_id == Some(edit.channel_id);
-    let Some(request) = state.request.as_mut().filter(|request| {
-        same_channel
-            && request.message_id == edit.message_id
-            && request.phase == Phase::WaitingForCode
-            && is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
-    }) else {
+    let waiting = open_request(state, edit.channel_id, now).is_some_and(|request| {
+        request.message_id == edit.message_id && request.phase == Phase::WaitingForCode
+    });
+    let Some(request) = state.request.as_mut().filter(|_| waiting) else {
         return false;
     };
     request.phase = Phase::Pending;
@@ -2282,15 +2311,13 @@ fn takes_answer_code(state: &LoungeState, message_id: u64) -> bool {
         && queue_has_room(&state.status.held_answers, message_id)
 }
 
-fn accepts_repost(state: &LoungeState, event: &LoungeMessage) -> bool {
-    state.status.channel_id == Some(event.channel_id)
-        && state.request.as_ref().is_some_and(|request| {
-            !request.direct && matches!(request.phase, Phase::Pending | Phase::Dispatching)
-        })
+fn accepts_repost(state: &LoungeState, event: &LoungeMessage, now: i64) -> bool {
+    open_request(state, event.channel_id, now)
+        .is_some_and(|request| !request.direct && takes_answers(request.phase))
 }
 
-fn note_repost(state: &mut LoungeState, event: &LoungeMessage) -> bool {
-    if !accepts_repost(state, event) {
+fn note_repost(state: &mut LoungeState, event: &LoungeMessage, now: i64) -> bool {
+    if !accepts_repost(state, event, now) {
         return false;
     }
     if let Some(request) = state
@@ -2506,6 +2533,10 @@ fn apply_answer(
                 );
             }
             state.status.held_answers.clear();
+            state
+                .status
+                .notices
+                .retain(|notice| *notice != Notice::InvalidCode);
             state
                 .outbox
                 .retain(|entry| entry.request_message_id != request_id);
