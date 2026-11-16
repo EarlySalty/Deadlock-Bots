@@ -1032,7 +1032,9 @@ pub(crate) fn read_optional_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, String> {
     let path = repo_root.join(relative_path);
-    if !path.is_file() {
+    let present = banner_file_present(&path)
+        .map_err(|reason| format!("{label}-Banner `{}` {reason}", path.display()))?;
+    if !present {
         warnings.push(format!(
             "{label}-Banner `{relative_path}` fehlt; {missing_suffix}"
         ));
@@ -1044,6 +1046,21 @@ pub(crate) fn read_optional_banner(
             path.display()
         )
     })
+}
+
+pub(crate) fn banner_file_present(path: &std::path::Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err("ist keine Datei".to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => Err("ist ein Link ohne Ziel".to_string()),
+                Err(link_err) if link_err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(link_err) => Err(format!("konnte nicht geprüft werden: {link_err}")),
+            }
+        }
+        Err(err) => Err(format!("konnte nicht geprüft werden: {err}")),
+    }
 }
 
 async fn upsert_serversync_kv<'e>(
@@ -9004,6 +9021,37 @@ mod tests {
     type ConfirmCall = bool;
     type WelcomeApplyCall = bool;
     type RouterApplyCall = bool;
+
+    #[test]
+    fn banner_ohne_datei_fehlt_kaputter_link_und_ordner_brechen_ab() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let banner_dir = temp.path().join("banners");
+        std::fs::create_dir_all(banner_dir.join("ordner.png")).expect("ordner");
+        std::os::unix::fs::symlink(
+            banner_dir.join("ziel-fehlt.png"),
+            banner_dir.join("link.png"),
+        )
+        .expect("symlink");
+        let mut warnings = Vec::new();
+
+        let missing = read_optional_banner(
+            temp.path(),
+            "Test",
+            "banners/fehlt.png",
+            "ohne",
+            &mut warnings,
+        );
+        assert_eq!(missing, Ok(None));
+        assert!(warnings.iter().any(|warning| warning.contains("fehlt")));
+
+        for relative_path in ["banners/link.png", "banners/ordner.png"] {
+            let mut warnings = Vec::new();
+            let result =
+                read_optional_banner(temp.path(), "Test", relative_path, "ohne", &mut warnings);
+            assert!(result.is_err(), "{relative_path}: {result:?}");
+            assert!(warnings.is_empty(), "{relative_path}: {warnings:?}");
+        }
+    }
 
     #[derive(Clone)]
     struct FakeDiscord {
