@@ -1491,12 +1491,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
-    // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(shared_broker_token);
+    let serversync_token = dl_core::runtime_config::token_by_names(
+        operating_value,
+        &[dl_core::runtime_config::SERVERSYNC_TOKEN_NAME],
+    )
+    .or_else(shared_broker_token);
     if serversync_token.is_none() {
         tracing::warn!(
             names = %dl_core::runtime_config::BROKER_TOKEN_NAMES.join("/"),
-            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN oder Broker-Token), Server-Sync-HTTP-Routen liefern 403"
+            "Kein interner Token ({} oder Broker-Token), Server-Sync-HTTP-Routen liefern 403",
+            dl_core::runtime_config::SERVERSYNC_TOKEN_NAME
         );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);

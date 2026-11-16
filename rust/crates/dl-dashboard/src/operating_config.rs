@@ -62,9 +62,10 @@ async fn active_bot_fingerprint() -> Option<(String, u64)> {
         "{}/internal/master/v1/health",
         dl_core::runtime_config::lookup("MASTER_BROKER_BASE_URL")?.trim_end_matches('/')
     );
-    let token = dl_core::runtime_config::BROKER_TOKEN_NAMES
-        .into_iter()
-        .find_map(dl_core::runtime_config::secret_value)?;
+    let token = dl_core::runtime_config::token_by_names(
+        dl_core::runtime_config::secret_value,
+        &dl_core::runtime_config::BROKER_TOKEN_NAMES,
+    )?;
     fetch_bot_fingerprint(&url, &token).await
 }
 

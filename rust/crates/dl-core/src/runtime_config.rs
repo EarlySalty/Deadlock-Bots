@@ -66,6 +66,9 @@ pub const MASTER_BROKER_TOKEN_NAME: &str = "MASTER_BROKER_TOKEN";
 pub const MAIN_BOT_TOKEN_NAME: &str = "MAIN_BOT_INTERNAL_TOKEN";
 pub const TURNIER_TOKEN_NAME: &str = "TURNIER_INTERNAL_API_TOKEN";
 pub const COACHING_BOT_TOKEN_NAME: &str = "COACHING_BOT_TOKEN";
+pub const SERVERSYNC_TOKEN_NAME: &str = "SERVERSYNC_INTERNAL_TOKEN";
+pub const STEAM_INTERNAL_API_TOKEN_NAME: &str = "STEAM_INTERNAL_API_TOKEN";
+pub const INTERNAL_API_TOKEN_NAME: &str = "INTERNAL_API_TOKEN";
 
 pub const BROKER_TOKEN_NAMES: [&str; 3] = [
     MASTER_BROKER_TOKEN_NAME,
@@ -121,8 +124,8 @@ pub mod supporter_wire {
     ];
     pub const STEAM_INTERNAL_TOKEN_NAMES: [&str; 3] = [
         TWITCH_TOKEN_NAME,
-        "STEAM_INTERNAL_API_TOKEN",
-        "INTERNAL_API_TOKEN",
+        super::STEAM_INTERNAL_API_TOKEN_NAME,
+        super::INTERNAL_API_TOKEN_NAME,
     ];
     pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
     pub const TIP_PATH: &str = "/supporter/v1/tip";
@@ -879,10 +882,10 @@ pub fn secret_value(key: &str) -> Option<String> {
         | MASTER_BROKER_TOKEN_NAME
         | MAIN_BOT_TOKEN_NAME
         | supporter_wire::TWITCH_TOKEN_NAME
-        | "STEAM_INTERNAL_API_TOKEN"
-        | "INTERNAL_API_TOKEN"
+        | STEAM_INTERNAL_API_TOKEN_NAME
+        | INTERNAL_API_TOKEN_NAME
         | TURNIER_TOKEN_NAME
-        | "SERVERSYNC_INTERNAL_TOKEN"
+        | SERVERSYNC_TOKEN_NAME
         | COACHING_BOT_TOKEN_NAME
         | "DISCORD_OAUTH_CLIENT_SECRET"
         | "PUBLIC_STATS_SESSION_SECRET"

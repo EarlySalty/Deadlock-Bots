@@ -8028,9 +8028,10 @@ fn authorize(
         return Err(ServerSyncError::forbidden("loopback requests only"));
     }
     let Some(expected) = state.token.as_deref().filter(|token| !token.is_empty()) else {
-        return Err(ServerSyncError::forbidden(
-            "SERVERSYNC_INTERNAL_TOKEN ist nicht konfiguriert",
-        ));
+        return Err(ServerSyncError::forbidden(format!(
+            "{} ist nicht konfiguriert",
+            dl_core::runtime_config::SERVERSYNC_TOKEN_NAME
+        )));
     };
     let presented = headers
         .get(TOKEN_HEADER)
