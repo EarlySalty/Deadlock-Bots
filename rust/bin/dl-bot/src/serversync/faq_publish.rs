@@ -201,6 +201,8 @@ pub struct FaqBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,6 +225,8 @@ pub struct FaqPayloadAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,7 +328,7 @@ pub fn build_faq_publish_output(
         validate_faq_message_budget(&message.payload)?;
     }
 
-    let payload_hash = faq_payload_hash(repo_root, &messages)?;
+    let payload_hash = faq_payload_hash(&messages)?;
     let repost_required =
         !faq_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -367,7 +371,7 @@ pub fn faq_payload_is_unchanged(output: &FaqPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn faq_payload_hash(repo_root: &Path, messages: &[FaqMessageOutput]) -> Result<String, String> {
+pub fn faq_payload_hash(messages: &[FaqMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -376,17 +380,10 @@ pub fn faq_payload_hash(repo_root: &Path, messages: &[FaqMessageOutput]) -> Resu
                 .attachments
                 .iter()
                 .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "FAQ-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
                     Ok(FaqPayloadHashAttachment {
                         id: attachment.id,
                         filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -634,6 +631,7 @@ fn faq_messages(
             id: 0,
             filename: banner.filename.clone(),
             relative_path: banner.relative_path.clone(),
+            bytes: banner.bytes.clone(),
         });
     }
 
@@ -682,16 +680,17 @@ fn optional_faq_banner(
 ) -> Option<FaqBannerOutput> {
     let relative_path = format!("{FAQ_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    if !path.is_file() {
+    let Ok(bytes) = fs::read(&path) else {
         warnings.push(format!(
             "FAQ-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
         return None;
-    }
+    };
     Some(FaqBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
+        bytes,
     })
 }
 

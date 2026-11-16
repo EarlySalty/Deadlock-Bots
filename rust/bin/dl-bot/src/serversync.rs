@@ -2012,17 +2012,17 @@ impl ServerSyncService {
         let payload_value = serde_json::to_value(payload)?;
         if !payload.attachments.is_empty() {
             let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for attachment in &payload.attachments {
-                let path = self.rang_guide_repo_root.join(&attachment.relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "Rang-Guide-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((attachment.id, attachment.filename.clone(), bytes));
-            }
+            let files: Vec<(u8, String, Vec<u8>)> = payload
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    (
+                        attachment.id,
+                        attachment.filename.clone(),
+                        attachment.bytes.clone(),
+                    )
+                })
+                .collect();
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -2075,25 +2075,14 @@ impl ServerSyncService {
 
     async fn send_components_v2_message_payload(
         &self,
-        label: &'static str,
         method: &'static str,
         url: String,
         payload_value: Value,
-        attachments: Vec<(u8, String, String)>,
+        attachments: Vec<(u8, String, Vec<u8>)>,
     ) -> ServerSyncResult<DiscordRestResponse> {
         if !attachments.is_empty() {
             let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for (id, filename, relative_path) in attachments {
-                let path = self.rang_guide_repo_root.join(&relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "{label}-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((id, filename, bytes));
-            }
+            let files = attachments;
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -2162,18 +2151,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload(
-                "Regelwerk",
-                "PATCH",
-                url,
-                payload_value,
-                attachments,
-            )
+            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -2200,18 +2183,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload(
-                "Regelwerk",
-                "POST",
-                url,
-                payload_value,
-                attachments,
-            )
+            .send_components_v2_message_payload("POST", url, payload_value, attachments)
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -2385,12 +2362,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload("Support", "PATCH", url, payload_value, attachments)
+            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -2417,12 +2394,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload("Support", "POST", url, payload_value, attachments)
+            .send_components_v2_message_payload("POST", url, payload_value, attachments)
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -2447,12 +2424,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload("FAQ", "PATCH", url, payload_value, attachments)
+            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -2479,12 +2456,12 @@ impl ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload("FAQ", "POST", url, payload_value, attachments)
+            .send_components_v2_message_payload("POST", url, payload_value, attachments)
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -5326,18 +5303,12 @@ impl ServerSyncOps for ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload(
-                "Voice-UX",
-                "PATCH",
-                url,
-                payload_value,
-                attachments,
-            )
+            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -5362,12 +5333,12 @@ impl ServerSyncOps for ServerSyncService {
                 (
                     attachment.id,
                     attachment.filename.clone(),
-                    attachment.relative_path.clone(),
+                    attachment.bytes.clone(),
                 )
             })
             .collect();
         let response = self
-            .send_components_v2_message_payload("Voice-UX", "POST", url, payload_value, attachments)
+            .send_components_v2_message_payload("POST", url, payload_value, attachments)
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -5740,13 +5711,7 @@ impl ServerSyncOps for ServerSyncService {
         let url = self.discord_api_url(&format!("/channels/{thread_id}/messages/{thread_id}"));
         let payload_value = serde_json::to_value(&forum.payload)?;
         let response = self
-            .send_components_v2_message_payload(
-                "Voice-UX-Forum",
-                "PATCH",
-                url,
-                payload_value,
-                Vec::new(),
-            )
+            .send_components_v2_message_payload("PATCH", url, payload_value, Vec::new())
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -9992,6 +9957,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     rang_guide_publish::RANG_GUIDE_BANNER_DIR,
                     rang_guide_publish::RANG_GUIDE_HERO_FILENAME
                 ),
+                bytes: Vec::new(),
             }],
         };
         RangGuidePublishOutput {
@@ -10018,6 +9984,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         rang_guide_publish::RANG_GUIDE_BANNER_DIR,
                         rang_guide_publish::RANG_GUIDE_HERO_FILENAME
                     ),
+                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,
@@ -10077,6 +10044,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     regelwerk_publish::REGELWERK_BANNER_DIR,
                     regelwerk_publish::REGELWERK_HERO_FILENAME
                 ),
+                bytes: Vec::new(),
             }],
         };
         regelwerk_publish::RegelwerkPublishOutput {
@@ -10103,6 +10071,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         regelwerk_publish::REGELWERK_BANNER_DIR,
                         regelwerk_publish::REGELWERK_HERO_FILENAME
                     ),
+                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,
@@ -10202,6 +10171,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     faq_publish::FAQ_BANNER_DIR,
                     faq_publish::FAQ_HERO_FILENAME
                 ),
+                bytes: Vec::new(),
             }],
         };
         FaqPublishOutput {
@@ -10228,6 +10198,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         faq_publish::FAQ_BANNER_DIR,
                         faq_publish::FAQ_HERO_FILENAME
                     ),
+                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,

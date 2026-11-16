@@ -112,6 +112,8 @@ pub struct VoiceUxBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +150,8 @@ pub struct VoiceUxPayloadAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,7 +201,7 @@ pub fn build_voice_ux_publish_output(
     let mut warnings = Vec::new();
     let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings);
     validate_voice_ux_messages(&base_messages)?;
-    let payload_hash = voice_ux_payload_hash(repo_root, &base_messages)?;
+    let payload_hash = voice_ux_payload_hash(&base_messages)?;
     let mut targets = Vec::new();
 
     for channel_id in VOICE_UX_TARGET_CHANNEL_IDS {
@@ -246,18 +250,15 @@ pub fn build_voice_ux_publish_output(
     }
 
     let forum_payload = voice_ux_forum_payload();
-    let forum_payload_hash = voice_ux_payload_hash(
-        repo_root,
-        &[VoiceUxMessageOutput {
-            message_index: 0,
-            message_key: "lfg_forum".to_string(),
-            action: String::new(),
-            stored_message_id: None,
-            message_id: None,
-            payload: forum_payload.clone(),
-            banner: None,
-        }],
-    )?;
+    let forum_payload_hash = voice_ux_payload_hash(&[VoiceUxMessageOutput {
+        message_index: 0,
+        message_key: "lfg_forum".to_string(),
+        action: String::new(),
+        stored_message_id: None,
+        message_id: None,
+        payload: forum_payload.clone(),
+        banner: None,
+    }])?;
     let forum_hash_matches = forum_stored_payload_hash == Some(forum_payload_hash.as_str());
     let forum_action = if dry_run {
         match (forum_thread_id, forum_hash_matches) {
@@ -318,7 +319,7 @@ pub fn relink_voice_ux_forum_thread(
     let mut warnings = Vec::new();
     let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings);
     validate_voice_ux_messages(&fresh_messages)?;
-    let payload_hash = voice_ux_payload_hash(repo_root, &fresh_messages)?;
+    let payload_hash = voice_ux_payload_hash(&fresh_messages)?;
     for target in &mut output.targets {
         target.payload_hash = payload_hash.clone();
         for (message, fresh) in target.messages.iter_mut().zip(&fresh_messages) {
@@ -346,10 +347,7 @@ pub fn adopt_voice_ux_message_ids(
     }
 }
 
-pub fn voice_ux_payload_hash(
-    repo_root: &Path,
-    messages: &[VoiceUxMessageOutput],
-) -> Result<String, String> {
+pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -358,17 +356,10 @@ pub fn voice_ux_payload_hash(
                 .attachments
                 .iter()
                 .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Voice-UX-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
                     Ok(VoiceUxPayloadHashAttachment {
                         id: attachment.id,
                         filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -821,6 +812,7 @@ fn payload_with_banner_sections(
                 id: attachments.len() as u8,
                 filename: banner.filename.clone(),
                 relative_path: banner.relative_path.clone(),
+                bytes: banner.bytes.clone(),
             });
             children.push(media_gallery(media_id, &banner.filename));
         }
@@ -853,6 +845,7 @@ fn payload_with_optional_banner(
             id: 0,
             filename: banner.filename.clone(),
             relative_path: banner.relative_path.clone(),
+            bytes: banner.bytes.clone(),
         });
         container_with_leading_banner(media_id, &banner.filename, container)
     } else {
@@ -967,16 +960,17 @@ fn optional_voice_ux_banner(
 ) -> Option<VoiceUxBannerOutput> {
     let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    if !path.is_file() {
+    let Ok(bytes) = fs::read(&path) else {
         warnings.push(format!(
             "Voice-UX-Banner `{relative_path}` fehlt; Publish laeuft ohne diesen Banner"
         ));
         return None;
-    }
+    };
     Some(VoiceUxBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
+        bytes,
     })
 }
 

@@ -104,6 +104,8 @@ pub struct RegelwerkBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +128,8 @@ pub struct RegelwerkPayloadAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,7 +254,7 @@ pub fn build_regelwerk_publish_output(
         validate_regelwerk_message_budget(&message.payload)?;
     }
 
-    let payload_hash = regelwerk_payload_hash(repo_root, &messages)?;
+    let payload_hash = regelwerk_payload_hash(&messages)?;
     let repost_required =
         !regelwerk_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -295,10 +299,7 @@ pub fn regelwerk_payload_is_unchanged(output: &RegelwerkPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn regelwerk_payload_hash(
-    repo_root: &Path,
-    messages: &[RegelwerkMessageOutput],
-) -> Result<String, String> {
+pub fn regelwerk_payload_hash(messages: &[RegelwerkMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -307,17 +308,10 @@ pub fn regelwerk_payload_hash(
                 .attachments
                 .iter()
                 .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Regelwerk-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
                     Ok(RegelwerkPayloadHashAttachment {
                         id: attachment.id,
                         filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -570,6 +564,7 @@ fn regelwerk_messages(
             id: 0,
             filename: banner.filename.clone(),
             relative_path: banner.relative_path.clone(),
+            bytes: banner.bytes.clone(),
         });
     }
 
@@ -644,16 +639,17 @@ fn optional_regelwerk_banner(
 ) -> Option<RegelwerkBannerOutput> {
     let relative_path = format!("{REGELWERK_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    if !path.is_file() {
+    let Ok(bytes) = fs::read(&path) else {
         warnings.push(format!(
             "Regelwerk-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
         return None;
-    }
+    };
     Some(RegelwerkBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
+        bytes,
     })
 }
 

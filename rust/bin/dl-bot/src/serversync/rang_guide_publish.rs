@@ -139,6 +139,8 @@ pub struct RangGuideBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +163,8 @@ pub struct RangGuidePayloadAttachment {
     pub filename: String,
     #[serde(skip)]
     pub relative_path: String,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,7 +316,7 @@ pub fn build_rang_guide_publish_output(
         validate_rang_guide_message_budget(&message.payload)?;
     }
 
-    let payload_hash = rang_guide_payload_hash(repo_root, &messages)?;
+    let payload_hash = rang_guide_payload_hash(&messages)?;
     let repost_required =
         !rang_guide_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -357,10 +361,7 @@ pub fn rang_guide_payload_is_unchanged(output: &RangGuidePublishOutput) -> bool 
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn rang_guide_payload_hash(
-    repo_root: &Path,
-    messages: &[RangGuideMessageOutput],
-) -> Result<String, String> {
+pub fn rang_guide_payload_hash(messages: &[RangGuideMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -369,17 +370,10 @@ pub fn rang_guide_payload_hash(
                 .attachments
                 .iter()
                 .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Rang-Guide-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
                     Ok(RangGuidePayloadHashAttachment {
                         id: attachment.id,
                         filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                        sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -787,6 +781,7 @@ fn chunk_rang_guide_components(
                     id: index as u8,
                     filename: banner.filename.clone(),
                     relative_path: banner.relative_path.clone(),
+                    bytes: banner.bytes.clone(),
                 })
                 .collect();
             let has_hero = hero_banner
@@ -832,16 +827,17 @@ fn optional_rang_guide_banner(
 ) -> Option<RangGuideBannerOutput> {
     let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
-    if !path.is_file() {
+    let Ok(bytes) = fs::read(&path) else {
         warnings.push(format!(
             "Rang-Guide-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
         ));
         return None;
-    }
+    };
     Some(RangGuideBannerOutput {
         filename: filename.to_string(),
         relative_path,
         present: true,
+        bytes,
     })
 }
 
@@ -1397,6 +1393,7 @@ step3_body = "{long_step3}"
                     id: index as u8,
                     filename: format!("banner-{index}.png"),
                     relative_path: format!("assets/welcome-banners/banner-{index}.png"),
+                    bytes: Vec::new(),
                 })
                 .collect(),
         };
