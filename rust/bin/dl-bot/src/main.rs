@@ -273,12 +273,16 @@ fn discord_brain_answerer(
         dl_brain::brain_api::BrainApiAnswerer::new(
             endpoint,
             &token,
-            std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000)),
+            brain_timeout(options),
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
         .with_image_limits(brain_image_limits(options))?,
     ))
+}
+
+fn brain_timeout(options: &dl_core::runtime_config::AiOptions) -> std::time::Duration {
+    std::time::Duration::from_millis(options.brain_api_timeout_ms.unwrap_or(65_000))
 }
 
 fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain::ImageLimits {
@@ -1865,6 +1869,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter.clone(),
             steam_client.clone(),
             community_brain.clone(),
+            brain_timeout(&operating.runtime.ai),
             onboardglue::MAIN_GUILD_ID,
             &dispatcher,
         );

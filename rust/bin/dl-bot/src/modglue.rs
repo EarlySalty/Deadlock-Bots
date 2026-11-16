@@ -2830,7 +2830,8 @@ impl dl_community::clips::ClipPort for ClipGlue {
                 .await;
             match edited {
                 Ok(message) => return Ok(message.id.get()),
-                Err(err) if err.to_string().contains("10008") => {} // Nachricht weg → neu posten
+                Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                    if response.status_code.as_u16() == 404 => {}
                 Err(err) => return Err(err.to_string()),
             }
         }

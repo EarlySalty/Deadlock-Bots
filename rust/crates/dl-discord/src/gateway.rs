@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
     GuildId, GuildMemberFlags, GuildMemberUpdateEvent, Interaction, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, MessageType, OnlineStatus, Permissions, Reaction,
-    ReactionType, Ready, User, UserId, VoiceState,
+    InviteDeleteEvent, Member, Message, MessageType, MessageUpdateEvent, OnlineStatus, Permissions,
+    Reaction, ReactionType, Ready, User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -21,8 +21,8 @@ use crate::core_user_sync::{
 };
 use crate::dispatcher::{
     member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
-    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEvent, PresenceEvent,
-    VoiceEvent,
+    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEdit, MessageEvent,
+    PresenceEvent, VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
@@ -33,12 +33,31 @@ const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", 
 // MemberJoin). Sie sind keine Nachricht dieses Mitglieds. Inhalt darf leer sein:
 // Sticker, Anhänge und Weiterleitungen bleiben reguläre Nutzernachrichten.
 fn is_user_message(message: &Message) -> bool {
-    !message.author.bot
-        && message.webhook_id.is_none()
-        && matches!(
-            message.kind,
-            MessageType::Regular | MessageType::InlineReply
-        )
+    is_member_post(
+        message.author.bot,
+        message.webhook_id.is_some(),
+        message.kind,
+    )
+}
+
+fn is_member_post(bot: bool, webhook: bool, kind: MessageType) -> bool {
+    !bot && !webhook && matches!(kind, MessageType::Regular | MessageType::InlineReply)
+}
+
+fn message_edit(event: &MessageUpdateEvent) -> Option<MessageEdit> {
+    let author = event.author.as_ref()?;
+    let content = event.content.clone()?;
+    let webhook = event.webhook_id.is_some_and(|webhook| webhook.is_some());
+    if !is_member_post(author.bot, webhook, event.kind?) {
+        return None;
+    }
+    Some(MessageEdit {
+        guild_id: event.guild_id.map(|id| id.get()),
+        channel_id: event.channel_id.get(),
+        message_id: event.id.get(),
+        author_id: author.id.get(),
+        content,
+    })
 }
 
 fn ready_contains_guild(guild_ids: impl IntoIterator<Item = u64>, guild_id: u64) -> bool {
@@ -446,6 +465,18 @@ impl EventHandler for Handler {
             is_bot,
         )
         .await;
+    }
+
+    async fn message_update(
+        &self,
+        _ctx: Context,
+        _old_if_available: Option<Message>,
+        _new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        if let Some(edit) = message_edit(&event) {
+            self.dispatcher.publish_message_edit(edit);
+        }
     }
 
     async fn message(&self, ctx: Context, message: Message) {
@@ -860,6 +891,52 @@ pub async fn build_voice_worker_client(
 
 #[cfg(test)]
 mod tests {
+    fn update_event(bot: bool, content: Option<&str>) -> serenity::all::MessageUpdateEvent {
+        let mut payload = serde_json::json!({
+            "id": "1500000000000000001",
+            "channel_id": "1464736918951432222",
+            "guild_id": "1289721245281292288",
+            "author": {
+                "id": "1400000000000000007",
+                "username": "mitglied",
+                "discriminator": "0",
+                "global_name": null,
+                "avatar": null,
+                "bot": bot
+            },
+            "edited_timestamp": "2026-11-14T22:20:00.000000+00:00",
+            "type": 0
+        });
+        if let Some(content) = content {
+            payload["content"] = serde_json::Value::String(content.to_string());
+        }
+        serde_json::from_value(payload).expect("MESSAGE_UPDATE-Nutzlast lesbar")
+    }
+
+    #[test]
+    fn bearbeitete_nachricht_wird_mit_inhalt_weitergegeben() {
+        let edit = super::message_edit(&update_event(
+            false,
+            Some("Kann mich wer einladen? 123456789"),
+        ))
+        .expect("Bearbeitung eines Mitglieds");
+        assert_eq!(edit.guild_id, Some(1_289_721_245_281_292_288));
+        assert_eq!(edit.channel_id, 1_464_736_918_951_432_222);
+        assert_eq!(edit.message_id, 1_500_000_000_000_000_001);
+        assert_eq!(edit.author_id, 1_400_000_000_000_000_007);
+        assert_eq!(edit.content, "Kann mich wer einladen? 123456789");
+        assert!(super::message_edit(&update_event(true, Some("Bot-Text"))).is_none());
+        assert!(super::message_edit(&update_event(false, None)).is_none());
+        let mut system = update_event(false, Some("Text"));
+        system.kind = Some(serenity::all::MessageType::PinsAdd);
+        assert!(super::message_edit(&system).is_none());
+        system.kind = None;
+        assert!(super::message_edit(&system).is_none());
+        let mut webhook = update_event(false, Some("Text"));
+        webhook.webhook_id = Some(Some(serenity::all::WebhookId::new(123)));
+        assert!(super::message_edit(&webhook).is_none());
+    }
+
     #[test]
     fn member_join_mit_menschlichem_autor_ist_keine_chatnachricht() {
         let mut message = serenity::all::Message::default();
