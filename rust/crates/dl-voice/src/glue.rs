@@ -419,22 +419,15 @@ async fn send_dm_body(
 fn router_panel_files(
     attachments: &[crate::router::RouterPanelAttachment],
 ) -> Result<Vec<RouterPanelFile>, String> {
-    let repo_root = crate::router::router_repo_root();
     attachments
         .iter()
         .map(|attachment| {
-            let path = repo_root.join(&attachment.relative_path);
-            let bytes = std::fs::read(&path).map_err(|err| {
-                format!(
-                    "Router-Banner `{}` konnte nicht gelesen werden: {err}",
-                    path.display()
-                )
-            })?;
-            Ok(RouterPanelFile {
-                id: attachment.id,
-                filename: attachment.filename.clone(),
-                bytes,
-            })
+            loaded_panel_file(
+                "Router",
+                attachment.id,
+                &attachment.filename,
+                &attachment.bytes,
+            )
         })
         .collect()
 }
@@ -442,24 +435,35 @@ fn router_panel_files(
 fn lfg_panel_files(
     attachments: &[crate::lfg_panel::LfgPanelAttachment],
 ) -> Result<Vec<RouterPanelFile>, String> {
-    let repo_root = crate::lfg_panel::lfg_repo_root();
     attachments
         .iter()
         .map(|attachment| {
-            let path = repo_root.join(&attachment.relative_path);
-            let bytes = std::fs::read(&path).map_err(|err| {
-                format!(
-                    "LFG-Banner `{}` konnte nicht gelesen werden: {err}",
-                    path.display()
-                )
-            })?;
-            Ok(RouterPanelFile {
-                id: attachment.id,
-                filename: attachment.filename.clone(),
-                bytes,
-            })
+            loaded_panel_file(
+                "LFG",
+                attachment.id,
+                &attachment.filename,
+                &attachment.bytes,
+            )
         })
         .collect()
+}
+
+fn loaded_panel_file(
+    label: &str,
+    id: u8,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<RouterPanelFile, String> {
+    if bytes.is_empty() {
+        return Err(format!(
+            "{label}-Banner `{filename}` wurde vor dem Senden nicht geladen"
+        ));
+    }
+    Ok(RouterPanelFile {
+        id,
+        filename: filename.to_string(),
+        bytes: bytes.to_vec(),
+    })
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3888,6 +3892,32 @@ mod tests {
         assert_eq!(router_file_part_name(0), "files[0]");
         assert_eq!(router_file_part_name(1), "files[1]");
         assert_eq!(router_file_part_name(2), "files[2]");
+    }
+
+    #[test]
+    fn panel_dateien_senden_geladene_bytes_und_lehnen_ungeladene_banner_ab() {
+        let mut attachments = crate::router::router_panel_attachments();
+        let err = router_panel_files(&attachments).expect_err("ungeladener Banner");
+        assert!(err.contains("nicht geladen"), "{err}");
+
+        for attachment in &mut attachments {
+            attachment.relative_path = "gibt-es-nicht.png".to_string();
+            attachment.bytes = vec![attachment.id, 7];
+        }
+        let files = router_panel_files(&attachments).expect("geladene Banner");
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.bytes.clone())
+                .collect::<Vec<_>>(),
+            attachments
+                .iter()
+                .map(|attachment| attachment.bytes.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let lfg = crate::lfg_panel::lfg_panel_attachments();
+        assert!(lfg_panel_files(&lfg).is_err());
     }
 
     #[test]

@@ -678,10 +678,14 @@ async fn load_static_html(app: &DashboardApp, name: &str) -> Option<String> {
         return Some(include_str!("../../../../service/static/dashboard.html").to_string());
     }
 
-    let repo_root = app.repo_root()?;
-    tokio::fs::read_to_string(repo_root.join("service/static").join(name))
-        .await
-        .ok()
+    let path = app.repo_root()?.join("service/static").join(name);
+    match dl_core::optional_file::read_to_string(&path) {
+        Ok(html) => html,
+        Err(reason) => {
+            tracing::error!(path = %path.display(), %reason, "SPA-Datei ist kaputt");
+            None
+        }
+    }
 }
 
 /// Setzt die drei Auth-Platzhalter in eine SPA-Datei ein (Nutzer-Label

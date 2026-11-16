@@ -1027,25 +1027,32 @@ pub fn solo_post_attachments() -> Vec<LfgPanelAttachment> {
     [SOLO_LFG_BANNER_FILENAME, SOLO_LFG_LOGO_FILENAME]
         .into_iter()
         .enumerate()
-        .filter(|(_, filename)| solo_image_present(&repo_root.join(LFG_BANNER_DIR).join(filename)))
-        .map(|(id, filename)| LfgPanelAttachment {
-            id: u8::try_from(id).unwrap_or(u8::MAX),
-            filename: filename.to_string(),
-            relative_path: format!("{LFG_BANNER_DIR}/{filename}"),
+        .filter_map(|(id, filename)| {
+            let bytes = solo_image_bytes(&repo_root.join(LFG_BANNER_DIR).join(filename))?;
+            Some(LfgPanelAttachment {
+                id: u8::try_from(id).unwrap_or(u8::MAX),
+                filename: filename.to_string(),
+                relative_path: format!("{LFG_BANNER_DIR}/{filename}"),
+                bytes,
+            })
         })
         .collect()
 }
 
-fn solo_image_present(path: &std::path::Path) -> bool {
-    match dl_core::optional_file::present(path) {
-        Ok(true) => true,
-        Ok(false) => {
+fn solo_image_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    match dl_core::optional_file::read(path) {
+        Ok(Some(bytes)) if !bytes.is_empty() => Some(bytes),
+        Ok(Some(_)) => {
+            tracing::error!(path = %path.display(), "Solo-LFG-Bild ist leer; Post geht ohne dieses Bild raus");
+            None
+        }
+        Ok(None) => {
             tracing::warn!(path = %path.display(), "Solo-LFG-Bild fehlt; Post geht ohne dieses Bild raus");
-            false
+            None
         }
         Err(reason) => {
             tracing::error!(path = %path.display(), %reason, "Solo-LFG-Bild ist kaputt; Post geht ohne dieses Bild raus");
-            false
+            None
         }
     }
 }
@@ -1822,6 +1829,7 @@ mod tests {
             id: 0,
             filename: SOLO_LFG_BANNER_FILENAME.to_string(),
             relative_path: String::new(),
+            bytes: Vec::new(),
         }];
         let body = lfg_post(
             USER,
@@ -1850,6 +1858,7 @@ mod tests {
             id: 0,
             filename: SOLO_LFG_LOGO_FILENAME.to_string(),
             relative_path: String::new(),
+            bytes: Vec::new(),
         }];
         let body = lfg_post(
             USER,
