@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use dl_central_db::kv;
 use dl_core::runtime_config::{
-    STEAM_INVITE_TASK_WAIT_MS, STEAM_INVITE_TIMEOUT_MS_RANGE, STEAM_INVITE_WORST_CASE_MS,
+    supporter_wire, STEAM_INVITE_TASK_WAIT_MS, STEAM_INVITE_TIMEOUT_MS_RANGE,
+    STEAM_INVITE_WORST_CASE_MS,
 };
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
@@ -94,13 +95,13 @@ const ADMIN_COMMANDS: [&str; 6] = [
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
 pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    trimmed(lookup, "TWITCH_INTERNAL_API_TOKEN")
+    trimmed(lookup, supporter_wire::TWITCH_TOKEN_NAME)
 }
 
 pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    twitch_internal_token(&lookup)
-        .or_else(|| trimmed(&lookup, "MASTER_BROKER_TOKEN"))
-        .or_else(|| trimmed(&lookup, "MAIN_BOT_INTERNAL_TOKEN"))
+    supporter_wire::SUPPORTER_TOKEN_NAMES
+        .iter()
+        .find_map(|name| trimmed(&lookup, name))
 }
 
 fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {
@@ -1572,5 +1573,28 @@ mod tests {
             component_forward_timeout("steam_link_panel:open"),
             DEFAULT_TIMEOUT
         );
+    }
+
+    #[test]
+    fn supporter_token_follows_the_shared_name_order() {
+        let names = supporter_wire::SUPPORTER_TOKEN_NAMES;
+        for first in 0..names.len() {
+            let answering = &names[first..];
+            let token = token_from_lookup(|key| {
+                answering
+                    .iter()
+                    .position(|name| *name == key)
+                    .map(|offset| format!(" value-{} ", first + offset))
+            });
+            assert_eq!(token, Some(format!("value-{first}")), "{}", names[first]);
+        }
+        let blank_first =
+            token_from_lookup(|key| match names.iter().position(|name| *name == key) {
+                Some(0) => Some("   ".to_string()),
+                Some(index) => Some(format!("value-{index}")),
+                None => None,
+            });
+        assert_eq!(blank_first.as_deref(), Some("value-1"));
+        assert_eq!(token_from_lookup(|_| None), None);
     }
 }

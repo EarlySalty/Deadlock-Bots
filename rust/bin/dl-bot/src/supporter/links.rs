@@ -978,7 +978,7 @@ mod tests {
                 supporter_role_grant_apply: Some(true),
                 ..Default::default()
             },
-            |key| (key == "TWITCH_INTERNAL_API_TOKEN").then(|| "internal".to_string()),
+            |key| (key == wire::TWITCH_TOKEN_NAME).then(|| "internal".to_string()),
         );
         assert_eq!(
             set.panel_options(),
@@ -999,7 +999,7 @@ mod tests {
         );
         assert!(!base_without_token.panel_options().twitch);
         let token_without_base = config_from(Default::default(), |key| {
-            (key == "TWITCH_INTERNAL_API_TOKEN").then(|| "internal".to_string())
+            (key == wire::TWITCH_TOKEN_NAME).then(|| "internal".to_string())
         });
         assert!(!token_without_base.panel_options().twitch);
         assert_eq!(
@@ -1019,27 +1019,27 @@ mod tests {
     #[test]
     fn tokens_kommen_aus_genau_einer_quelle() {
         let config = config_from(Default::default(), |key| {
-            (key == "MASTER_BROKER_TOKEN").then(|| "broker-wert-7d1".to_string())
+            (key == wire::SUPPORTER_TOKEN_NAMES[1]).then(|| "broker-wert-7d1".to_string())
         });
         assert_eq!(config.twitch_token, None);
         assert_eq!(
             config.steam_token,
             dl_bridges::steam::token_from_lookup(|key| {
-                (key == "MASTER_BROKER_TOKEN").then(|| "broker-wert-7d1".to_string())
+                (key == wire::SUPPORTER_TOKEN_NAMES[1]).then(|| "broker-wert-7d1".to_string())
             })
         );
         let debug = format!("{config:?}");
         assert!(!debug.contains("broker-wert-7d1"), "{debug}");
         let config = config_from(Default::default(), |key| match key {
-            "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some(" twitch-wert-4c9 ".to_string()),
+            key if key == wire::SUPPORTER_TOKEN_NAMES[1] => Some("broker".to_string()),
+            key if key == wire::TWITCH_TOKEN_NAME => Some(" twitch-wert-4c9 ".to_string()),
             _ => None,
         });
         assert_eq!(config.twitch_token.as_deref(), Some("twitch-wert-4c9"));
         assert_eq!(config.steam_token.as_deref(), Some("twitch-wert-4c9"));
         let blank = config_from(Default::default(), |key| match key {
-            "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some("   ".to_string()),
+            key if key == wire::SUPPORTER_TOKEN_NAMES[1] => Some("broker".to_string()),
+            key if key == wire::TWITCH_TOKEN_NAME => Some("   ".to_string()),
             _ => None,
         });
         assert_eq!(blank.twitch_token, None);
