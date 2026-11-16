@@ -4,8 +4,44 @@ use crate::bot_config::{BotConfig, BotConfigError};
 use serde::{Deserialize, Serialize};
 use std::{
     net::IpAddr,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
+
+pub const STRIPE_MAX_UNIT_AMOUNT_CENTS: i64 = 99_999_999;
+pub const SUPPORTER_MIN_CENTS: i64 = 500;
+pub const SUPPORTER_TWITCH_CHANNELS: &[&str] = &["earlysalty", "dach_lock"];
+pub const SUPPORTER_TIER_MIN_EUR: u64 = SUPPORTER_MIN_CENTS as u64 / 100;
+pub const SUPPORTER_TIER_MAX_EUR: u64 = STRIPE_MAX_UNIT_AMOUNT_CENTS as u64 / 100;
+pub const SUPPORTER_MAX_TIERS: usize = 5;
+pub const SUPPORTER_CUTOVER_GRACE_DAYS: i32 = 31;
+pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
+pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
+pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> =
+    SUPPORTER_MIN_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
+pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
+pub const SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 300;
+pub const SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS: i64 = 25_000;
+pub const SUPPORTER_DEFAULT_TIERS_EUR: &[u64] = &[5, 10, 20, 50];
+pub const STEAM_BOT_STRIPE_TIMEOUT_MS: u64 = 10_000;
+pub const HTTP_DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
+const _: () = assert!(HTTP_DEFAULT_REQUEST_TIMEOUT_MS > STEAM_BOT_STRIPE_TIMEOUT_MS);
+pub const SUPPORTER_REQUEST_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
+    HTTP_DEFAULT_REQUEST_TIMEOUT_MS..=60_000;
+pub const DISCORD_INTERACTION_TOKEN_MS: u64 = 15 * 60 * 1_000;
+pub const STEAM_INVITE_TASK_WAIT_MS: u64 = 90_000;
+pub const STEAM_INVITE_WORST_CASE_MS: u64 = 2 * STEAM_INVITE_TASK_WAIT_MS;
+pub const STEAM_INVITE_TIMEOUT_MS_RANGE: RangeInclusive<u64> =
+    STEAM_INVITE_WORST_CASE_MS + 1..=DISCORD_INTERACTION_TOKEN_MS;
+
+pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
+    !tiers.is_empty()
+        && tiers.len() <= SUPPORTER_MAX_TIERS
+        && tiers
+            .iter()
+            .all(|eur| (SUPPORTER_TIER_MIN_EUR..=SUPPORTER_TIER_MAX_EUR).contains(eur))
+        && tiers.windows(2).all(|pair| pair[0] < pair[1])
+}
 
 trait LookupValue {
     fn lookup_value(&self) -> String;
@@ -40,10 +76,10 @@ impl<T: LookupValue> LookupValue for Vec<T> {
 }
 
 macro_rules! section {
-    ($name:ident { $($field:ident : $ty:ty => $($key:literal)|+),* $(,)? }) => {
+    ($name:ident { $($field:ident : $ty:ty => $($key:literal)|+),* $(,)? } $(internal { $($inner:ident : $inner_ty:ty),* $(,)? })?) => {
         #[derive(Clone, Default, Deserialize, Serialize)]
         #[serde(default, deny_unknown_fields)]
-        pub struct $name { $(pub $field: Option<$ty>,)* }
+        pub struct $name { $(pub $field: Option<$ty>,)* $($(pub $inner: Option<$inner_ty>,)*)? }
         impl $name { fn lookup(&self, key: &str) -> Option<String> { match key { $($($key)|+ => self.$field.as_ref().map(LookupValue::lookup_value),)* _ => None } } }
     };
 }
@@ -160,6 +196,15 @@ section!(CommunityOptions {
     recording_state_dir: PathBuf => "SCRIM_RECORD_STATE_DIR",
     recording_rclone_path: PathBuf => "SCRIM_RECORD_RCLONE_PATH",
     recording_archive_base: String => "SCRIM_RECORD_ARCHIVE_BASE",
+} internal {
+    supporter_role_grant_apply: bool,
+    supporter_role_sync_apply: bool,
+    supporter_role_sync_max_revokes: u64,
+    supporter_sync_interval_seconds: u64,
+    supporter_funding_goal_cents: i64,
+    supporter_twitch_api_base: String,
+    supporter_request_timeout_ms: u64,
+    supporter_tiers_eur: Vec<u64>,
 });
 
 section!(ModerationOptions {
@@ -281,6 +326,27 @@ impl RuntimeConfig {
             .ai
             .brain_api_timeout_ms
             .is_some_and(|ms| ms == 0 || ms > 120_000)
+            || self
+                .community
+                .supporter_sync_interval_seconds
+                .is_some_and(|seconds| !SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.contains(&seconds))
+            || self
+                .community
+                .supporter_role_sync_max_revokes
+                .is_some_and(|count| !SUPPORTER_MAX_REVOKES_RANGE.contains(&count))
+            || self
+                .community
+                .supporter_funding_goal_cents
+                .is_some_and(|cents| !SUPPORTER_FUNDING_GOAL_CENTS_RANGE.contains(&cents))
+            || self
+                .community
+                .supporter_request_timeout_ms
+                .is_some_and(|ms| !SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.contains(&ms))
+            || self
+                .community
+                .supporter_tiers_eur
+                .as_deref()
+                .is_some_and(|tiers| !supporter_tiers_valid(tiers))
             || (self.ai.brain_command_enabled == Some(true)
                 && self
                     .ai
@@ -524,12 +590,18 @@ impl RuntimeConfig {
             (&self.dashboard.discord_redirect_uri, false),
             (&self.dashboard.discord_api_base, false),
             (&self.web.dashboard_base, true),
+            (&self.community.supporter_twitch_api_base, true),
             (&self.web.callback_url, false),
             (&self.ai.openai_base_url, false),
             (&self.ai.fireworks_base_url, false),
         ] {
             if let Some(address) = address {
                 validate_url(address, local)?;
+            }
+        }
+        if let Some(base) = &self.community.supporter_twitch_api_base {
+            if url::Url::parse(base).map_err(|_| invalid())?.path() != "/" {
+                return Err(invalid());
             }
         }
         for origins in [&self.dashboard.allowed_origins, &self.web.cors_origins]
@@ -821,5 +893,108 @@ mod discord_brain_secret_tests {
             Some("fixture-public-facts")
         );
         assert!(super::secret_value("RUST_LOG").is_none());
+    }
+}
+
+#[cfg(test)]
+mod supporter_bound_tests {
+    use super::*;
+    use crate::bot_config::BotConfig;
+
+    fn parse(line: &str) -> bool {
+        BotConfig::parse(&format!("schema_version=1\n[runtime.community]\n{line}\n")).is_ok()
+    }
+
+    #[test]
+    fn unterstuetzer_werte_haben_ober_und_untergrenzen() {
+        let accepted = [
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start()
+            ),
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end()
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.start()
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.end()
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start()
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end()
+            ),
+            format!(
+                "supporter_request_timeout_ms={}",
+                SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.start()
+            ),
+            format!(
+                "supporter_request_timeout_ms={}",
+                SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.end()
+            ),
+            "supporter_twitch_api_base='http://127.0.0.1:8765'".to_owned(),
+            format!("supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}]"),
+            format!("supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}, {SUPPORTER_TIER_MAX_EUR}]"),
+            "supporter_tiers_eur=[5, 10, 20, 50, 100]".to_owned(),
+        ];
+        for line in &accepted {
+            assert!(parse(line), "{line}");
+        }
+        let rejected = [
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() - 1
+            ),
+            format!(
+                "supporter_sync_interval_seconds={}",
+                SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end() + 1
+            ),
+            format!(
+                "supporter_role_sync_max_revokes={}",
+                SUPPORTER_MAX_REVOKES_RANGE.end() + 1
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start() - 1
+            ),
+            format!(
+                "supporter_funding_goal_cents={}",
+                SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end() + 1
+            ),
+            format!(
+                "supporter_request_timeout_ms={}",
+                SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.start() - 1
+            ),
+            format!(
+                "supporter_request_timeout_ms={}",
+                SUPPORTER_REQUEST_TIMEOUT_MS_RANGE.end() + 1
+            ),
+            "supporter_plus_monthly_cents=300".to_owned(),
+            "supporter_steam_api_base='http://127.0.0.1:8783'".to_owned(),
+            "supporter_twitch_api_base='http://127.0.0.1:8769/x'".to_owned(),
+            "supporter_twitch_api_base='https://example.com'".to_owned(),
+            "supporter_twitch_api_base=''".to_owned(),
+            "supporter_tiers_eur=[]".to_owned(),
+            format!("supporter_tiers_eur=[{}]", SUPPORTER_TIER_MIN_EUR - 1),
+            format!(
+                "supporter_tiers_eur=[{SUPPORTER_TIER_MIN_EUR}, {}]",
+                SUPPORTER_TIER_MAX_EUR + 1
+            ),
+            "supporter_tiers_eur=[10, 5]".to_owned(),
+            "supporter_tiers_eur=[5, 5]".to_owned(),
+            "supporter_tiers_eur=[5, 10, 20, 50, 100, 200]".to_owned(),
+            "supporter_tiers_eur=[5, 4294967296]".to_owned(),
+        ];
+        for line in &rejected {
+            assert!(!parse(line), "{line}");
+        }
     }
 }

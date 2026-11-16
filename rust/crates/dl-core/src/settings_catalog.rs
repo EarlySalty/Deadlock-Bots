@@ -1,8 +1,16 @@
 //! Versionierter Admin-Vertrag. Nur Einträge im geprüften Katalog sind schreibbar.
 //! Ganzzahlen laufen als Dezimalstrings über JSON, niemals als JavaScript-Number.
+use crate::runtime_config as rc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+
+fn range_bounds(range: &std::ops::RangeInclusive<u64>) -> (i64, i64) {
+    (
+        i64::try_from(*range.start()).unwrap_or(i64::MAX),
+        i64::try_from(*range.end()).unwrap_or(i64::MAX),
+    )
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +165,18 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),
                 "runtime.bridges.matcher_scan_interval_hours" => bounds = Some((1, 8760)),
                 "runtime.ai.brain_max_question_len" => bounds = Some((1, 65_536)),
+                "runtime.community.supporter_role_sync_max_revokes" => {
+                    bounds = Some(range_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE))
+                }
+                "runtime.community.supporter_sync_interval_seconds" => {
+                    bounds = Some(range_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE))
+                }
+                "runtime.community.supporter_funding_goal_cents" => {
+                    bounds = Some((
+                        *rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start(),
+                        *rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end(),
+                    ))
+                }
                 _ => {}
             }
             result.push(Field {
