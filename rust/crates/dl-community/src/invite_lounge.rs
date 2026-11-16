@@ -436,6 +436,41 @@ pub struct InviteLoungeWatcher {
     brain: Arc<dyn dl_brain::AiAnswerer>,
     guild_id: u64,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
+    running: RunningDispatches,
+}
+
+#[derive(Default, Clone)]
+struct RunningDispatches(Arc<std::sync::Mutex<HashSet<u64>>>);
+
+struct RunningDispatch {
+    running: RunningDispatches,
+    user_id: u64,
+}
+
+impl RunningDispatches {
+    fn users(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn contains(&self, user_id: u64) -> bool {
+        self.users().contains(&user_id)
+    }
+
+    fn start(&self, user_id: u64) -> RunningDispatch {
+        self.users().insert(user_id);
+        RunningDispatch {
+            running: self.clone(),
+            user_id,
+        }
+    }
+}
+
+impl Drop for RunningDispatch {
+    fn drop(&mut self) {
+        self.running.users().remove(&self.user_id);
+    }
 }
 
 impl InviteLoungeWatcher {
@@ -453,6 +488,7 @@ impl InviteLoungeWatcher {
             brain,
             guild_id,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            running: RunningDispatches::default(),
         }
     }
 
@@ -525,6 +561,7 @@ impl InviteLoungeWatcher {
                 existing_hint.unwrap_or(false),
                 now,
                 (self.clock_millis)(),
+                self.running.contains(event.author_id),
             );
             if wants_hint
                 && existing_hint.is_none()
@@ -1141,6 +1178,7 @@ impl InviteLoungeWatcher {
         {
             return Ok(());
         }
+        let _running = self.running.start(user_id);
         let dispatch_at = (self.clock_millis)();
         if !is_fresh(
             created_at,
@@ -1418,6 +1456,7 @@ fn update_state(
     existing_hint: bool,
     now: i64,
     now_millis: i64,
+    dispatch_running: bool,
 ) -> bool {
     state.last_seen = event.message_id;
     let request_before = state.request.as_ref().map(|request| request.message_id);
@@ -1438,9 +1477,10 @@ fn update_state(
                 .is_some_and(|finished| event.created_at_millis <= finished);
         let replace = state.request.as_ref().is_none_or(|request| {
             let active_dispatch = request.phase == Phase::Dispatching
-                && state.dispatch_started_at_millis.is_some_and(|started| {
-                    now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
-                });
+                && (dispatch_running
+                    || state.dispatch_started_at_millis.is_some_and(|started| {
+                        now_millis.saturating_sub(started) < ACTIVE_DISPATCH_MILLIS
+                    }));
             !active_dispatch
                 && !arrived_during_dispatch
                 && (direct || request.phase == Phase::WaitingForCode)
@@ -1914,9 +1954,13 @@ mod tests {
     #[test]
     fn laufender_versand_bleibt_bis_zum_bridge_timeout_bestehen() {
         let started = 1_700_000_000_000;
-        for (elapsed, replaced) in [
-            (ACTIVE_DISPATCH_MILLIS - 1, false),
-            (ACTIVE_DISPATCH_MILLIS, true),
+        let window = i64::try_from(dl_bridges::steam::INVITE_FORWARD_TIMEOUT_MS)
+            .expect("Bridge-Zeitlimit passt in i64");
+        for (elapsed, running, replaced) in [
+            (window - 1, false, false),
+            (window, false, true),
+            (window, true, false),
+            (window * 10, true, false),
         ] {
             let mut state = LoungeState {
                 friend_code: Some("123456789".into()),
@@ -1949,12 +1993,13 @@ mod tests {
                 false,
                 at / 1000,
                 at,
+                running,
             );
             let expected = if replaced { 3 } else { 1 };
             assert_eq!(
                 state.request.map(|request| request.message_id),
                 Some(expected),
-                "{elapsed} ms nach dem Versandstart"
+                "{elapsed} ms nach dem Versandstart, laufend {running}"
             );
         }
     }

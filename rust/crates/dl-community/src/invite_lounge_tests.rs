@@ -249,6 +249,7 @@ fn setup() -> (
         invite: invite.clone(),
         guild_id: GUILD,
         clock_millis: Arc::new(|| NOW * 1000),
+        running: RunningDispatches::default(),
     };
     (watcher, store, port, invite)
 }
@@ -1281,6 +1282,7 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
         invite: invite.clone(),
         guild_id: GUILD,
         clock_millis: Arc::new(|| NOW * 1000),
+        running: RunningDispatches::default(),
     };
     restarted
         .poll_due(NOW + 8000)
@@ -1527,6 +1529,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         invite: invite.clone(),
         guild_id: GUILD,
         clock_millis: Arc::new(|| NOW * 1000),
+        running: RunningDispatches::default(),
     };
     let pending = LoungeState {
         friend_code: Some("123456789".into()),
