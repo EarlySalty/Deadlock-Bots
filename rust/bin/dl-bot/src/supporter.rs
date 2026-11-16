@@ -83,9 +83,7 @@ impl SupporterConfig {
             steam_api_base: steam_api_base.to_string(),
             steam_token: dl_bridges::steam::token_from_lookup(&lookup),
             twitch_api_base: community.supporter_twitch_api_base.clone(),
-            twitch_token: lookup("TWITCH_INTERNAL_API_TOKEN")
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty()),
+            twitch_token: dl_bridges::steam::twitch_internal_token(&lookup),
             tiers_eur: community
                 .supporter_tiers_eur
                 .clone()

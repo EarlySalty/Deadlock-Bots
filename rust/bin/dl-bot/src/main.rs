@@ -610,7 +610,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let supporter_config = supporter::SupporterConfig::new(
         &operating.runtime.community,
         &operating.services.steam_api_url,
-        env,
+        operating_value,
     );
     supporter_config.log_effective();
     let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config)

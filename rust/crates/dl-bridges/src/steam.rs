@@ -100,8 +100,12 @@ const ADMIN_COMMANDS: [&str; 6] = [
 
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
+pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    trimmed(lookup, "TWITCH_INTERNAL_API_TOKEN")
+}
+
 pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    trimmed(&lookup, "TWITCH_INTERNAL_API_TOKEN")
+    twitch_internal_token(&lookup)
         .or_else(|| trimmed(&lookup, "MASTER_BROKER_TOKEN"))
         .or_else(|| trimmed(&lookup, "MAIN_BOT_INTERNAL_TOKEN"))
 }

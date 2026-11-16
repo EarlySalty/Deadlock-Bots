@@ -1037,6 +1037,13 @@ mod tests {
         });
         assert_eq!(config.twitch_token.as_deref(), Some("twitch-wert-4c9"));
         assert_eq!(config.steam_token.as_deref(), Some("twitch-wert-4c9"));
+        let blank = config_from(Default::default(), |key| match key {
+            "MASTER_BROKER_TOKEN" => Some("broker".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("   ".to_string()),
+            _ => None,
+        });
+        assert_eq!(blank.twitch_token, None);
+        assert_eq!(blank.steam_token.as_deref(), Some("broker"));
         let debug = format!("{config:?}");
         assert!(!debug.contains("twitch-wert-4c9"), "{debug}");
     }
