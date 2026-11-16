@@ -311,12 +311,12 @@ pub fn regelwerk_payload_hash(messages: &[RegelwerkMessageOutput]) -> Result<Str
                     sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
                 .collect::<Vec<_>>();
-            Ok(RegelwerkPayloadHashMessage {
+            RegelwerkPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("Regelwerk-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
