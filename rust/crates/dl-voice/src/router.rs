@@ -847,12 +847,15 @@ fn validate_router_panel_attachments(attachments: &[RouterPanelAttachment]) -> R
     let repo_root = router_repo_root();
     for attachment in attachments {
         let path = repo_root.join(&attachment.relative_path);
-        if !path.is_file() {
-            return Err(format!(
-                "Router-Banner `{}` fehlt; Router-Panel wird nicht gepostet/editiert",
-                path.display()
-            ));
-        }
+        let reason = match dl_core::optional_file::present(&path) {
+            Ok(true) => continue,
+            Ok(false) => "fehlt".to_string(),
+            Err(reason) => reason,
+        };
+        return Err(format!(
+            "Router-Banner `{}` {reason}; Router-Panel wird nicht gepostet/editiert",
+            path.display()
+        ));
     }
     Ok(())
 }

@@ -1027,13 +1027,27 @@ pub fn solo_post_attachments() -> Vec<LfgPanelAttachment> {
     [SOLO_LFG_BANNER_FILENAME, SOLO_LFG_LOGO_FILENAME]
         .into_iter()
         .enumerate()
-        .filter(|(_, filename)| repo_root.join(LFG_BANNER_DIR).join(filename).is_file())
+        .filter(|(_, filename)| solo_image_present(&repo_root.join(LFG_BANNER_DIR).join(filename)))
         .map(|(id, filename)| LfgPanelAttachment {
             id: u8::try_from(id).unwrap_or(u8::MAX),
             filename: filename.to_string(),
             relative_path: format!("{LFG_BANNER_DIR}/{filename}"),
         })
         .collect()
+}
+
+fn solo_image_present(path: &std::path::Path) -> bool {
+    match dl_core::optional_file::present(path) {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::warn!(path = %path.display(), "Solo-LFG-Bild fehlt; Post geht ohne dieses Bild raus");
+            false
+        }
+        Err(reason) => {
+            tracing::error!(path = %path.display(), %reason, "Solo-LFG-Bild ist kaputt; Post geht ohne dieses Bild raus");
+            false
+        }
+    }
 }
 
 fn free_slots(lane: &LaneSnapshot) -> Option<usize> {

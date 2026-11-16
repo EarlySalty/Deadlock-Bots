@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -67,7 +67,7 @@ pub const VOICE_UX_MARKER_COMPONENT_IDS: &[u64] = &[
     VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxPublishOutput {
     pub guild_id: u64,
     pub dry_run: bool,
@@ -78,9 +78,19 @@ pub struct VoiceUxPublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
     pub cleared_legacy_kv_keys: Vec<String>,
     pub forum_post: VoiceUxForumPostOutput,
+    #[serde(skip)]
+    pub banners: VoiceUxBanners,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceUxBanners {
+    guide: Option<VoiceUxBannerOutput>,
+    lfg: Option<VoiceUxBannerOutput>,
+    spawn: Option<VoiceUxBannerOutput>,
+    manage: Option<VoiceUxBannerOutput>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxTargetOutput {
     pub channel_id: u64,
     pub stored_payload_format: Option<String>,
@@ -95,7 +105,7 @@ pub struct VoiceUxTargetOutput {
     pub pinned_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -106,7 +116,7 @@ pub struct VoiceUxMessageOutput {
     pub payload: VoiceUxMessagePayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxBannerOutput {
     pub filename: String,
     pub relative_path: String,
@@ -115,7 +125,7 @@ pub struct VoiceUxBannerOutput {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxForumPostOutput {
     pub forum_channel_id: u64,
     pub title: String,
@@ -129,7 +139,7 @@ pub struct VoiceUxForumPostOutput {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxMessagePayload {
     pub flags: u64,
     pub allowed_mentions: VoiceUxAllowedMentions,
@@ -138,12 +148,12 @@ pub struct VoiceUxMessagePayload {
     pub attachments: Vec<VoiceUxPayloadAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxPayloadAttachment {
     pub id: u8,
     pub filename: String,
@@ -151,7 +161,7 @@ pub struct VoiceUxPayloadAttachment {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxLegacyCleanupCandidate {
     pub channel_id: u64,
     pub message_id: u64,
@@ -196,7 +206,8 @@ pub fn build_voice_ux_publish_output(
     dry_run: bool,
 ) -> Result<VoiceUxPublishOutput, String> {
     let mut warnings = Vec::new();
-    let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings)?;
+    let banners = read_voice_ux_banners(repo_root, &mut warnings)?;
+    let base_messages = voice_ux_messages(&banners, forum_thread_id);
     validate_voice_ux_messages(&base_messages)?;
     let payload_hash = voice_ux_payload_hash(&base_messages)?;
     let mut targets = Vec::new();
@@ -288,6 +299,7 @@ pub fn build_voice_ux_publish_output(
             pinned: false,
             warnings: Vec::new(),
         },
+        banners,
     })
 }
 
@@ -309,12 +321,10 @@ pub fn voice_ux_forum_payload_is_unchanged(forum: &VoiceUxForumPostOutput) -> bo
 }
 
 pub fn relink_voice_ux_forum_thread(
-    repo_root: &Path,
     output: &mut VoiceUxPublishOutput,
     thread_id: u64,
 ) -> Result<(), String> {
-    let mut warnings = Vec::new();
-    let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings)?;
+    let fresh_messages = voice_ux_messages(&output.banners, Some(thread_id));
     validate_voice_ux_messages(&fresh_messages)?;
     let payload_hash = voice_ux_payload_hash(&fresh_messages)?;
     for target in &mut output.targets {
@@ -512,34 +522,38 @@ fn text_display_chars_from_value(value: &Value) -> usize {
     own + children
 }
 
-fn voice_ux_messages(
+fn read_voice_ux_banners(
     repo_root: &Path,
-    forum_thread_id: Option<u64>,
     warnings: &mut Vec<String>,
-) -> Result<Vec<VoiceUxMessageOutput>, String> {
-    let guide_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings)?;
-    let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings)?;
-    let spawn_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings)?;
-    let manage_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings)?;
-    Ok(vec![
+) -> Result<VoiceUxBanners, String> {
+    Ok(VoiceUxBanners {
+        guide: optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings)?,
+        lfg: optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings)?,
+        spawn: optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings)?,
+        manage: optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings)?,
+    })
+}
+
+fn voice_ux_messages(
+    banners: &VoiceUxBanners,
+    forum_thread_id: Option<u64>,
+) -> Vec<VoiceUxMessageOutput> {
+    vec![
         message(
             "guide_lfg",
-            guide_banner.clone(),
+            banners.guide.clone(),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
                 VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR,
                 vec![
                     (
                         VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
-                        guide_banner.as_ref(),
+                        banners.guide.as_ref(),
                         guide_container(),
                     ),
                     (
                         VOICE_UX_COMPONENT_ID_LFG_MEDIA,
-                        lfg_banner.as_ref(),
+                        banners.lfg.as_ref(),
                         lfg_link_container(forum_thread_id),
                     ),
                 ],
@@ -547,34 +561,35 @@ fn voice_ux_messages(
         ),
         message(
             "spawn_manage",
-            spawn_banner.clone(),
+            banners.spawn.clone(),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
                 VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR,
                 vec![
                     (
                         VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
-                        spawn_banner.as_ref(),
+                        banners.spawn.as_ref(),
                         spawn_container(),
                     ),
                     (
                         VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
-                        manage_banner.as_ref(),
+                        banners.manage.as_ref(),
                         manage_container(),
                     ),
                 ],
             ),
         ),
-    ])
+    ]
 }
 
 fn voice_ux_forum_payload() -> VoiceUxMessagePayload {
-    lfg_payload(
-        0,
-        VOICE_UX_COMPONENT_ID_FORUM_CONTAINER,
-        VOICE_UX_COMPONENT_ID_FORUM_TEXT,
-        VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW,
-        None,
+    payload(
+        vec![lfg_container(
+            VOICE_UX_COMPONENT_ID_FORUM_CONTAINER,
+            VOICE_UX_COMPONENT_ID_FORUM_TEXT,
+            VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW,
+        )],
+        Vec::new(),
     )
 }
 
@@ -620,20 +635,6 @@ fn guide_container() -> Value {
                 ],
             ),
         ],
-    )
-}
-
-fn lfg_payload(
-    media_id: u64,
-    container_id: u64,
-    text_id: u64,
-    row_id: u64,
-    banner: Option<&VoiceUxBannerOutput>,
-) -> VoiceUxMessagePayload {
-    payload_with_optional_banner(
-        media_id,
-        banner,
-        lfg_container(container_id, text_id, row_id),
     )
 }
 
@@ -826,37 +827,6 @@ fn container_children(container: Value) -> Vec<Value> {
         },
         _ => Vec::new(),
     }
-}
-
-fn payload_with_optional_banner(
-    media_id: u64,
-    banner: Option<&VoiceUxBannerOutput>,
-    container: Value,
-) -> VoiceUxMessagePayload {
-    let mut attachments = Vec::new();
-    let container = if let Some(banner) = banner {
-        attachments.push(VoiceUxPayloadAttachment {
-            id: 0,
-            filename: banner.filename.clone(),
-            bytes: banner.bytes.clone(),
-        });
-        container_with_leading_banner(media_id, &banner.filename, container)
-    } else {
-        container
-    };
-    payload(vec![container], attachments)
-}
-
-// Banner gehört als erstes Kind in den Container, damit Banner + Text + Buttons
-// als ein zusammenhängender Block mit durchgehendem Akzent-Balken rendern.
-fn container_with_leading_banner(media_id: u64, filename: &str, mut container: Value) -> Value {
-    if let Some(children) = container
-        .get_mut("components")
-        .and_then(Value::as_array_mut)
-    {
-        children.insert(0, media_gallery(media_id, filename));
-    }
-    container
 }
 
 fn payload(

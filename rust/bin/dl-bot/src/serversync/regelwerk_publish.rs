@@ -474,7 +474,7 @@ fn load_regelwerk_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedRegelwerkConfig, String> {
     let path = repo_root.join(REGELWERK_TEXTS_FILE);
-    let Some(raw) = crate::serversync::read_optional_text(&path)
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
         .map_err(|reason| format!("Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` {reason}"))?
     else {
         warnings.push(format!(

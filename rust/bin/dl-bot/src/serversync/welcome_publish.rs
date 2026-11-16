@@ -521,7 +521,7 @@ pub struct WelcomeTeamMember {
     pub bot: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomePublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -539,7 +539,7 @@ pub struct WelcomePublishOutput {
     pub edited_message_ids: BTreeMap<String, Vec<u64>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeTeamRoleOutput {
     pub key: String,
     pub aliases: Vec<String>,
@@ -549,7 +549,7 @@ pub struct WelcomeTeamRoleOutput {
     pub member_mentions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeTeamBotOutput {
     pub user_id: u64,
     pub mention: String,
@@ -557,7 +557,7 @@ pub struct WelcomeTeamBotOutput {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeSectionOutput {
     pub section_id: String,
     pub message_index: usize,
@@ -570,14 +570,16 @@ pub struct WelcomeSectionOutput {
     pub payload: WelcomeMessagePayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeMessagePayload {
     pub flags: u64,
     pub allowed_mentions: WelcomeAllowedMentions,
@@ -586,17 +588,17 @@ pub struct WelcomeMessagePayload {
     pub attachments: Vec<WelcomePayloadAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomePayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -673,7 +675,7 @@ fn load_welcome_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedWelcomeConfig, String> {
     let path = repo_root.join(WELCOME_TEXTS_FILE);
-    let Some(raw) = crate::serversync::read_optional_text(&path)
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
         .map_err(|reason| format!("Welcome-Textdatei `{WELCOME_TEXTS_FILE}` {reason}"))?
     else {
         warnings.push(format!(
@@ -1272,8 +1274,7 @@ fn quickstart_message(
 #[derive(Debug, Clone)]
 struct NavigationCategoryMessage {
     category_name: String,
-    divider_filename: Option<String>,
-    divider_relative_path: Option<String>,
+    divider: Option<WelcomePayloadAttachment>,
     channel_list: String,
 }
 
@@ -1300,7 +1301,7 @@ impl NavigationChunk {
     fn can_add(&self, category: &NavigationCategoryMessage) -> bool {
         self.text_chars + category.text_chars() <= NAVIGATION_TEXT_CHAR_BUDGET
             && self.component_count + category.component_count() <= NAVIGATION_COMPONENT_BUDGET
-            && self.attachments.len() + usize::from(category.divider_filename.is_some())
+            && self.attachments.len() + usize::from(category.divider.is_some())
                 <= NAVIGATION_ATTACHMENT_BUDGET
     }
 
@@ -1330,15 +1331,12 @@ impl NavigationChunk {
 
     fn push_category(&mut self, category: &NavigationCategoryMessage) {
         let mut container_components = Vec::new();
-        if let (Some(filename), Some(relative_path)) = (
-            category.divider_filename.as_deref(),
-            category.divider_relative_path.as_deref(),
-        ) {
+        if let Some(divider) = &category.divider {
             push_media_gallery_for_attachment(
                 &mut container_components,
                 &mut self.attachments,
-                filename,
-                relative_path,
+                &divider.filename,
+                &divider.bytes,
             );
         } else {
             container_components.push(text_display(format!("### {}", category.category_name)));
@@ -1361,7 +1359,7 @@ impl NavigationChunk {
 
 impl NavigationCategoryMessage {
     fn title_chars(&self) -> usize {
-        if self.divider_filename.is_some() {
+        if self.divider.is_some() {
             0
         } else {
             format!("### {}", self.category_name).chars().count()
@@ -1474,15 +1472,10 @@ fn navigation_category_messages(
             .join("\n\n");
         let channel_list = truncate_to_char_budget(&channel_list, NAVIGATION_TEXT_CHAR_BUDGET);
 
-        let (divider_filename, divider_relative_path) =
-            divider_attachment_for_category(repo_root, &category.name, warnings)?
-                .map_or((None, None), |attachment| {
-                    (Some(attachment.filename), Some(attachment.relative_path))
-                });
+        let divider = divider_attachment_for_category(repo_root, &category.name, warnings)?;
         messages.push(NavigationCategoryMessage {
             category_name: category.name.clone(),
-            divider_filename,
-            divider_relative_path,
+            divider,
             channel_list,
         });
     }
@@ -1506,9 +1499,9 @@ fn welcome_banner(
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBannerOutput, String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let present = crate::serversync::optional_file_present(&repo_root.join(&relative_path))
+    let bytes = dl_core::optional_file::read(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Banner `{relative_path}` {reason}"))?;
-    if !present {
+    if bytes.is_none() {
         warnings.push(format!(
             "Welcome-Banner `{relative_path}` fehlt; Sektion wird ohne Bild gebaut"
         ));
@@ -1516,7 +1509,8 @@ fn welcome_banner(
     Ok(WelcomeBannerOutput {
         filename: filename.to_string(),
         relative_path,
-        present,
+        present: bytes.is_some(),
+        bytes: bytes.unwrap_or_default(),
     })
 }
 
@@ -1529,18 +1523,18 @@ fn divider_attachment_for_category(
         return Ok(None);
     };
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let present = crate::serversync::optional_file_present(&repo_root.join(&relative_path))
-        .map_err(|reason| format!("Welcome-Divider `{relative_path}` {reason}"))?;
-    if !present {
+    let Some(bytes) = dl_core::optional_file::read(&repo_root.join(&relative_path))
+        .map_err(|reason| format!("Welcome-Divider `{relative_path}` {reason}"))?
+    else {
         warnings.push(format!(
             "Welcome-Divider `{relative_path}` fehlt; Kategorie `{category_name}` wird ohne Bild gebaut"
         ));
         return Ok(None);
-    }
+    };
     Ok(Some(WelcomePayloadAttachment {
         id: 0,
         filename: filename.to_string(),
-        relative_path,
+        bytes,
     }))
 }
 
@@ -1610,25 +1604,20 @@ fn push_media_gallery_for_banner(
     let Some(banner) = banner.filter(|banner| banner.present) else {
         return;
     };
-    push_media_gallery_for_attachment(
-        components,
-        attachments,
-        &banner.filename,
-        &banner.relative_path,
-    );
+    push_media_gallery_for_attachment(components, attachments, &banner.filename, &banner.bytes);
 }
 
 fn push_media_gallery_for_attachment(
     components: &mut Vec<Value>,
     attachments: &mut Vec<WelcomePayloadAttachment>,
     filename: &str,
-    relative_path: &str,
+    bytes: &[u8],
 ) {
     let id = u8::try_from(attachments.len()).unwrap_or(u8::MAX);
     attachments.push(WelcomePayloadAttachment {
         id,
         filename: filename.to_string(),
-        relative_path: relative_path.to_string(),
+        bytes: bytes.to_vec(),
     });
     components.push(media_gallery(filename));
 }

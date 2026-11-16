@@ -1032,44 +1032,14 @@ pub(crate) fn read_optional_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, String> {
     let path = repo_root.join(relative_path);
-    let present = optional_file_present(&path)
+    let bytes = dl_core::optional_file::read(&path)
         .map_err(|reason| format!("{label}-Banner `{}` {reason}", path.display()))?;
-    if !present {
+    if bytes.is_none() {
         warnings.push(format!(
             "{label}-Banner `{relative_path}` fehlt; {missing_suffix}"
         ));
-        return Ok(None);
     }
-    std::fs::read(&path).map(Some).map_err(|err| {
-        format!(
-            "{label}-Banner `{}` konnte nicht gelesen werden: {err}",
-            path.display()
-        )
-    })
-}
-
-pub(crate) fn read_optional_text(path: &std::path::Path) -> Result<Option<String>, String> {
-    if !optional_file_present(path)? {
-        return Ok(None);
-    }
-    std::fs::read_to_string(path)
-        .map(Some)
-        .map_err(|err| format!("konnte nicht gelesen werden: {err}"))
-}
-
-pub(crate) fn optional_file_present(path: &std::path::Path) -> Result<bool, String> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
-        Ok(_) => Err("ist keine Datei".to_string()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::symlink_metadata(path) {
-                Ok(_) => Err("ist ein Link ohne Ziel".to_string()),
-                Err(link_err) if link_err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(link_err) => Err(format!("konnte nicht geprüft werden: {link_err}")),
-            }
-        }
-        Err(err) => Err(format!("konnte nicht geprüft werden: {err}")),
-    }
+    Ok(bytes)
 }
 
 async fn upsert_serversync_kv<'e>(
@@ -3233,17 +3203,17 @@ impl ServerSyncService {
         let payload_value = serde_json::to_value(payload)?;
         if !payload.attachments.is_empty() {
             let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for attachment in &payload.attachments {
-                let path = welcome_publish::welcome_repo_root().join(&attachment.relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "Welcome-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((attachment.id, attachment.filename.clone(), bytes));
-            }
+            let files = payload
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    (
+                        attachment.id,
+                        attachment.filename.clone(),
+                        attachment.bytes.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -5939,12 +5909,8 @@ impl ServerSyncOps for ServerSyncService {
             .await?;
         if let Some(thread_id) = output.forum_post.thread_id {
             if output.forum_post.stored_thread_id != Some(thread_id) {
-                voice_ux_publish::relink_voice_ux_forum_thread(
-                    &self.rang_guide_repo_root,
-                    &mut output,
-                    thread_id,
-                )
-                .map_err(ServerSyncError::bad_request)?;
+                voice_ux_publish::relink_voice_ux_forum_thread(&mut output, thread_id)
+                    .map_err(ServerSyncError::bad_request)?;
             }
         }
 
@@ -9036,28 +9002,46 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let banner_dir = temp.path().join("banners");
         std::fs::create_dir_all(banner_dir.join("ordner.png")).expect("ordner");
-        std::os::unix::fs::symlink(
-            banner_dir.join("ziel-fehlt.png"),
-            banner_dir.join("link.png"),
-        )
-        .expect("symlink");
+        std::os::unix::fs::symlink(banner_dir.join("ziel-weg.png"), banner_dir.join("link.png"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(temp.path().join("weg"), temp.path().join("verlinkt"))
+            .expect("ancestor symlink");
         let mut warnings = Vec::new();
 
         let missing = read_optional_banner(
             temp.path(),
             "Test",
-            "banners/fehlt.png",
+            "banners/abwesend.png",
             "ohne",
             &mut warnings,
         );
         assert_eq!(missing, Ok(None));
-        assert!(warnings.iter().any(|warning| warning.contains("fehlt")));
+        assert_eq!(
+            warnings,
+            vec!["Test-Banner `banners/abwesend.png` fehlt; ohne".to_string()]
+        );
 
-        for relative_path in ["banners/link.png", "banners/ordner.png"] {
+        for (relative_path, reason) in [
+            ("banners/link.png", "ist ein Link ohne Ziel".to_string()),
+            ("banners/ordner.png", "ist keine Datei".to_string()),
+            (
+                "verlinkt/banner.png",
+                format!(
+                    "liegt unter dem Link ohne Ziel `{}`",
+                    temp.path().join("verlinkt").display()
+                ),
+            ),
+        ] {
             let mut warnings = Vec::new();
             let result =
                 read_optional_banner(temp.path(), "Test", relative_path, "ohne", &mut warnings);
-            assert!(result.is_err(), "{relative_path}: {result:?}");
+            assert_eq!(
+                result,
+                Err(format!(
+                    "Test-Banner `{}` {reason}",
+                    temp.path().join(relative_path).display()
+                ))
+            );
             assert!(warnings.is_empty(), "{relative_path}: {warnings:?}");
         }
     }
@@ -9967,6 +9951,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     filename: "hero.png".to_string(),
                     relative_path: "assets/welcome-banners/hero.png".to_string(),
                     present: false,
+                    bytes: Vec::new(),
                 }),
                 payload: welcome_publish::WelcomeMessagePayload {
                     flags: welcome_publish::WELCOME_COMPONENTS_V2_FLAG,

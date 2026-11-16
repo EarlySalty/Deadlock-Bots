@@ -698,7 +698,7 @@ fn load_support_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedSupportConfig, String> {
     let path = repo_root.join(SUPPORT_TEXTS_FILE);
-    let Some(raw) = crate::serversync::read_optional_text(&path)
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
         .map_err(|reason| format!("Support-Textdatei `{SUPPORT_TEXTS_FILE}` {reason}"))?
     else {
         warnings.push(format!(

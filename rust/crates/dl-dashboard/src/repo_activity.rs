@@ -30,14 +30,18 @@ pub async fn repo_activity(State(app): State<DashboardApp>, headers: HeaderMap) 
     }
     // `data/repo_activity.json` liegt im konfigurierten Datenverzeichnis.
     let path = app.data_dir().join("repo_activity.json");
-    match tokio::fs::read_to_string(&path).await {
-        Ok(raw) => (
+    match tokio::task::spawn_blocking(move || dl_core::optional_file::read_to_string(&path)).await {
+        Ok(Ok(Some(raw))) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             raw,
         )
             .into_response(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ok_json(unavailable()),
+        Ok(Ok(None)) => ok_json(unavailable()),
+        Ok(Err(reason)) => {
+            tracing::error!(%reason, "repo_activity.json unlesbar");
+            err_text(500, "repo_activity.json unlesbar")
+        }
         Err(err) => {
             tracing::error!(%err, "repo_activity.json unlesbar");
             err_text(500, "repo_activity.json unlesbar")
