@@ -905,6 +905,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn jede_methode_ruft_ihren_pfad_mit_token_und_feldern_auf() {
+        type Seen = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
+        let seen: Seen = Arc::default();
+        let record = seen.clone();
+        let app = axum::Router::new().fallback(
+            move |uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  axum::Json(body): axum::Json<Value>| {
+                let record = record.clone();
+                async move {
+                    let path = uri.path().to_string();
+                    let token = headers
+                        .get(INTERNAL_TOKEN_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    record
+                        .lock()
+                        .expect("seen")
+                        .extend([(path.clone(), token, body)]);
+                    let url = match path.as_str() {
+                        CHECKOUT_PATH => "https://checkout.stripe.com/c/pay/abo",
+                        TIP_PATH => "https://checkout.stripe.com/c/pay/tip",
+                        PORTAL_PATH => "https://billing.stripe.com/p/session/portal",
+                        TWITCH_CONNECT_PATH => "https://deutsche-deadlock-community.de/twitch/abo",
+                        _ => return (axum::http::StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                    };
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({ wire::URL_FIELD: url })),
+                    )
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let community = dl_core::runtime_config::CommunityOptions {
+            supporter_twitch_api_base: Some(base.clone()),
+            ..Default::default()
+        };
+        let config = SupporterConfig::new(&community, &base, |name| {
+            (name == wire::TWITCH_TOKEN_NAME).then(|| "test-token".to_string())
+        });
+        let links = test_links(&config);
+        let url = |text: &str| Ok(LinkOutcome::Url(text.to_string()));
+        assert_eq!(
+            links.checkout(CLICKER, 20).await,
+            url("https://checkout.stripe.com/c/pay/abo")
+        );
+        assert_eq!(
+            links.tip(CLICKER).await,
+            url("https://checkout.stripe.com/c/pay/tip")
+        );
+        assert_eq!(
+            links.portal(CLICKER).await,
+            url("https://billing.stripe.com/p/session/portal")
+        );
+        assert_eq!(
+            links.twitch_connect(CLICKER).await,
+            url("https://deutsche-deadlock-community.de/twitch/abo")
+        );
+        let token = Some("test-token".to_string());
+        assert_eq!(
+            seen.lock().expect("seen").clone(),
+            vec![
+                (
+                    CHECKOUT_PATH.to_string(),
+                    token.clone(),
+                    json!({ "discord_id": CLICKER, "tier": 20 })
+                ),
+                (
+                    TIP_PATH.to_string(),
+                    token.clone(),
+                    json!({ "discord_id": CLICKER })
+                ),
+                (
+                    PORTAL_PATH.to_string(),
+                    token.clone(),
+                    json!({ "discord_id": CLICKER })
+                ),
+                (
+                    TWITCH_CONNECT_PATH.to_string(),
+                    token,
+                    json!({ "discord_id": CLICKER })
+                ),
+            ]
+        );
+        server.abort();
+    }
+
     fn config_from(
         community: dl_core::runtime_config::CommunityOptions,
         lookup: impl Fn(&str) -> Option<String>,
@@ -1190,6 +1285,19 @@ mod tests {
             "http://deutsche-deadlock-community.de/x",
         ] {
             assert!(!is_public_url(foreign), "{foreign}");
+        }
+        let public_at_limit = format!(
+            "{PUBLIC_ORIGIN}{}",
+            "a".repeat(LINK_URL_MAX_LEN - PUBLIC_ORIGIN.chars().count())
+        );
+        assert!(is_public_url(&public_at_limit));
+        for unusable in [
+            format!("{public_at_limit}a"),
+            format!("{PUBLIC_ORIGIN}twitch/x y"),
+            format!("{PUBLIC_ORIGIN}twitch/x\\y"),
+            format!("{PUBLIC_ORIGIN}twitch/x\ny"),
+        ] {
+            assert!(!is_public_url(&unusable), "{unusable}");
         }
         let long = format!(
             "https://checkout.stripe.com/{}",
