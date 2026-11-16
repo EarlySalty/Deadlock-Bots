@@ -276,7 +276,7 @@ pub fn rang_guide_repo_root() -> PathBuf {
 }
 
 pub fn rang_guide_message_id_key(message_index: usize) -> String {
-    format!("{RANG_GUIDE_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(RANG_GUIDE_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_rang_guide_publish_output(

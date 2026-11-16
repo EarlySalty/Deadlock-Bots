@@ -214,7 +214,7 @@ struct RegelwerkBuiltMessage {
 
 #[cfg(test)]
 pub fn regelwerk_message_id_key(message_index: usize) -> String {
-    format!("{REGELWERK_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(REGELWERK_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_regelwerk_publish_output(

@@ -391,7 +391,7 @@ struct SupportBuiltMessage {
 
 #[cfg(test)]
 pub fn support_message_id_key(message_index: usize) -> String {
-    format!("{SUPPORT_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(SUPPORT_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn plan_support_history(

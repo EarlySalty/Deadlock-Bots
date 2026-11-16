@@ -288,7 +288,7 @@ struct FaqBuiltMessage {
 
 #[cfg(test)]
 pub fn faq_message_id_key(message_index: usize) -> String {
-    format!("{FAQ_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(FAQ_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_faq_publish_output(

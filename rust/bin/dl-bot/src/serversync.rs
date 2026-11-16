@@ -1020,6 +1020,10 @@ impl crate::supporter::FundingSource for FixedFundingSource {
     }
 }
 
+pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> String {
+    format!("{prefix}{message_index}")
+}
+
 async fn upsert_serversync_kv<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     key: &str,
@@ -1364,13 +1368,12 @@ impl ServerSyncService {
         Ok(by_index.into_values().collect())
     }
 
-    async fn store_static_v2_message_id(
+    async fn delete_static_v2_message_id(
         &self,
         prefix: &str,
         message_index: usize,
-        message_id: u64,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(&format!("{prefix}{message_index}"), &message_id.to_string())
+        self.delete_serversync_kv(&static_v2_message_id_key(prefix, message_index))
             .await
     }
 
@@ -1381,8 +1384,8 @@ impl ServerSyncService {
         hash_key: &str,
         payload_hash: &str,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(format_key, payload_format).await?;
-        self.store_serversync_kv(hash_key, payload_hash).await
+        self.store_serversync_kv_pairs(&[(format_key, payload_format), (hash_key, payload_hash)])
+            .await
     }
 
     async fn replace_static_v2_message_ids_and_metadata(
@@ -1427,7 +1430,7 @@ impl ServerSyncService {
                  VALUES($1, $2, $3)",
             )
             .bind(SERVERSYNC_KV_NS)
-            .bind(format!("{message_id_prefix}{message_index}"))
+            .bind(static_v2_message_id_key(message_id_prefix, message_index))
             .bind(message_id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -1806,28 +1809,13 @@ impl ServerSyncService {
         Ok(by_index.into_values().collect())
     }
 
-    async fn store_rang_guide_message_id(
-        &self,
-        message_index: usize,
-        message_id: u64,
-    ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            &rang_guide_publish::rang_guide_message_id_key(message_index),
-            &message_id.to_string(),
-        )
-        .await
-    }
-
     async fn store_rang_guide_metadata(
         &self,
         output: &rang_guide_publish::RangGuidePublishOutput,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
+        self.store_static_v2_metadata(
             rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
             rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
             rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
             &output.payload_hash,
         )
@@ -1839,46 +1827,15 @@ impl ServerSyncService {
         output: &rang_guide_publish::RangGuidePublishOutput,
         message_ids: &[u64],
     ) -> ServerSyncResult<()> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "DELETE FROM bot.kv_store
-              WHERE ns = $1
-                AND (k LIKE $2 OR k = $3 OR k = $4)",
+        self.replace_static_v2_message_ids_and_metadata(
+            rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            &output.payload_hash,
+            message_ids,
         )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(format!(
-            "{}%",
-            rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX
-        ))
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
-        .execute(&mut *tx)
-        .await?;
-
-        for (message_index, message_id) in message_ids.iter().copied().enumerate() {
-            sqlx::query(
-                "INSERT INTO bot.kv_store(ns, k, v)
-                 VALUES($1, $2, $3)",
-            )
-            .bind(SERVERSYNC_KV_NS)
-            .bind(rang_guide_publish::rang_guide_message_id_key(message_index))
-            .bind(message_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3), ($1, $4, $5)",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
-        .bind(&output.payload_hash)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        .await
     }
 
     async fn delete_rang_guide_messages(
@@ -2390,11 +2347,10 @@ impl ServerSyncService {
                 .await?
                 .is_none()
             {
-                self.delete_serversync_kv(&format!(
-                    "{}{}",
+                self.delete_static_v2_message_id(
                     support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    message.message_index
-                ))
+                    message.message_index,
+                )
                 .await?;
                 return Ok(FundingRefresh::Skipped("Panel-Nachricht nicht gefunden"));
             }
@@ -4278,48 +4234,44 @@ impl ServerSyncOps for ServerSyncService {
                 .await?;
             } else {
                 let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_regelwerk_v2_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
+                let mut reposted = Vec::new();
+                let written: ServerSyncResult<()> = async {
+                    for message_index in 0..output.messages.len() {
+                        let stored_message_id = output.messages[message_index].stored_message_id;
+                        if let Some(stored_message_id) = stored_message_id {
+                            if let Some(message_id) = self
+                                .edit_regelwerk_v2_message(
+                                    stored_message_id,
+                                    &output.messages[message_index],
+                                )
+                                .await?
+                            {
+                                message_ids.push(message_id);
+                                output.messages[message_index].action = if adopted_from_history {
+                                    "adopted_edit".to_string()
+                                } else {
+                                    "edited".to_string()
+                                };
+                                output.messages[message_index].message_id = Some(message_id);
+                                output.messages[message_index].stored_message_id = Some(message_id);
+                                output.edited_message_ids.push(message_id);
+                                continue;
+                            }
+                            output.warnings.push(format!(
+                            "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                        ));
                         }
-                        output.warnings.push(format!(
-                        "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
 
-                    let message_id = self
-                        .post_regelwerk_v2_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
-                    )
-                    .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
+                        let message_id = self
+                            .post_regelwerk_v2_message(&output.messages[message_index])
+                            .await?;
+                        message_ids.push(message_id);
+                        reposted.push(message_id);
+                        output.messages[message_index].action = "posted".to_string();
+                        output.messages[message_index].message_id = Some(message_id);
+                        output.messages[message_index].stored_message_id = Some(message_id);
+                        output.posted_message_ids.push(message_id);
+                    }
                     self.replace_static_v2_message_ids_and_metadata(
                         regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
                         regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
@@ -4328,15 +4280,17 @@ impl ServerSyncOps for ServerSyncService {
                         &output.payload_hash,
                         &message_ids,
                     )
-                    .await?;
-                } else {
-                    self.store_static_v2_metadata(
-                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
-                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
-                        regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
+                    .await
+                }
+                .await;
+                if let Err(err) = written {
+                    self.cleanup_new_static_v2_posts_best_effort(
+                        "Regelwerk",
+                        regelwerk_publish::REGELWERK_CHANNEL_ID,
+                        &reposted,
                     )
-                    .await?;
+                    .await;
+                    return Err(err);
                 }
             }
         }
@@ -4578,56 +4532,60 @@ impl ServerSyncOps for ServerSyncService {
                 self.store_serversync_kv_pairs(&published_state).await?;
             } else {
                 let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_support_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
+                let mut reposted = Vec::new();
+                let written: ServerSyncResult<()> = async {
+                    for message_index in 0..output.messages.len() {
+                        let stored_message_id = output.messages[message_index].stored_message_id;
+                        if let Some(stored_message_id) = stored_message_id {
+                            if let Some(message_id) = self
+                                .edit_support_message(
+                                    stored_message_id,
+                                    &output.messages[message_index],
+                                )
+                                .await?
+                            {
+                                message_ids.push(message_id);
+                                output.messages[message_index].action = if adopted_from_history {
+                                    "adopted_edit".to_string()
+                                } else {
+                                    "edited".to_string()
+                                };
+                                output.messages[message_index].message_id = Some(message_id);
+                                output.messages[message_index].stored_message_id = Some(message_id);
+                                output.edited_message_ids.push(message_id);
+                                continue;
+                            }
+                            output.warnings.push(format!(
+                            "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                        ));
                         }
-                        output.warnings.push(format!(
-                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
 
-                    let message_id = self
-                        .post_support_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
-                    )
-                    .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
+                        let message_id = self
+                            .post_support_message(&output.messages[message_index])
+                            .await?;
+                        message_ids.push(message_id);
+                        reposted.push(message_id);
+                        output.messages[message_index].action = "posted".to_string();
+                        output.messages[message_index].message_id = Some(message_id);
+                        output.messages[message_index].stored_message_id = Some(message_id);
+                        output.posted_message_ids.push(message_id);
+                    }
                     self.replace_static_v2_message_ids_and_state(
                         support_publish::SUPPORT_MESSAGE_ID_PREFIX,
                         &message_ids,
                         &published_state,
                     )
-                    .await?;
-                } else {
-                    self.store_serversync_kv_pairs(&published_state).await?;
+                    .await
+                }
+                .await;
+                if let Err(err) = written {
+                    self.cleanup_new_static_v2_posts_best_effort(
+                        "Support",
+                        support_publish::SUPPORT_CHANNEL_ID,
+                        &reposted,
+                    )
+                    .await;
+                    return Err(err);
                 }
             }
         }
@@ -4810,45 +4768,41 @@ impl ServerSyncOps for ServerSyncService {
                 .await?;
             } else {
                 let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_faq_message(stored_message_id, &output.messages[message_index])
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
+                let mut reposted = Vec::new();
+                let written: ServerSyncResult<()> = async {
+                    for message_index in 0..output.messages.len() {
+                        let stored_message_id = output.messages[message_index].stored_message_id;
+                        if let Some(stored_message_id) = stored_message_id {
+                            if let Some(message_id) = self
+                                .edit_faq_message(stored_message_id, &output.messages[message_index])
+                                .await?
+                            {
+                                message_ids.push(message_id);
+                                output.messages[message_index].action = if adopted_from_history {
+                                    "adopted_edit".to_string()
+                                } else {
+                                    "edited".to_string()
+                                };
+                                output.messages[message_index].message_id = Some(message_id);
+                                output.messages[message_index].stored_message_id = Some(message_id);
+                                output.edited_message_ids.push(message_id);
+                                continue;
+                            }
+                            output.warnings.push(format!(
+                            "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                        ));
                         }
-                        output.warnings.push(format!(
-                        "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
 
-                    let message_id = self
-                        .post_faq_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
-                    )
-                    .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
+                        let message_id = self
+                            .post_faq_message(&output.messages[message_index])
+                            .await?;
+                        message_ids.push(message_id);
+                        reposted.push(message_id);
+                        output.messages[message_index].action = "posted".to_string();
+                        output.messages[message_index].message_id = Some(message_id);
+                        output.messages[message_index].stored_message_id = Some(message_id);
+                        output.posted_message_ids.push(message_id);
+                    }
                     self.replace_static_v2_message_ids_and_metadata(
                         faq_publish::FAQ_MESSAGE_ID_PREFIX,
                         faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
@@ -4857,15 +4811,17 @@ impl ServerSyncOps for ServerSyncService {
                         &output.payload_hash,
                         &message_ids,
                     )
-                    .await?;
-                } else {
-                    self.store_static_v2_metadata(
-                        faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
-                        faq_publish::FAQ_PAYLOAD_FORMAT,
-                        faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
+                    .await
+                }
+                .await;
+                if let Err(err) = written {
+                    self.cleanup_new_static_v2_posts_best_effort(
+                        "FAQ",
+                        faq_publish::FAQ_CHANNEL_ID,
+                        &reposted,
                     )
-                    .await?;
+                    .await;
+                    return Err(err);
                 }
             }
         }
@@ -5231,48 +5187,52 @@ impl ServerSyncOps for ServerSyncService {
                 self.store_rang_guide_metadata(&output).await?;
             } else {
                 let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_rang_guide_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
+                let mut reposted = Vec::new();
+                let written: ServerSyncResult<()> = async {
+                    for message_index in 0..output.messages.len() {
+                        let stored_message_id = output.messages[message_index].stored_message_id;
+                        if let Some(stored_message_id) = stored_message_id {
+                            if let Some(message_id) = self
+                                .edit_rang_guide_message(
+                                    stored_message_id,
+                                    &output.messages[message_index],
+                                )
+                                .await?
+                            {
+                                message_ids.push(message_id);
+                                output.messages[message_index].action = if adopted_from_history {
+                                    "adopted_edit".to_string()
+                                } else {
+                                    "edited".to_string()
+                                };
+                                output.messages[message_index].message_id = Some(message_id);
+                                output.messages[message_index].stored_message_id = Some(message_id);
+                                output.edited_message_ids.push(message_id);
+                                continue;
+                            }
+                            output.warnings.push(format!(
+                            "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                        ));
                         }
-                        output.warnings.push(format!(
-                        "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
 
-                    let message_id = self
-                        .post_rang_guide_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_rang_guide_message_id(message_index, message_id)
-                        .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
+                        let message_id = self
+                            .post_rang_guide_message(&output.messages[message_index])
+                            .await?;
+                        message_ids.push(message_id);
+                        reposted.push(message_id);
+                        output.messages[message_index].action = "posted".to_string();
+                        output.messages[message_index].message_id = Some(message_id);
+                        output.messages[message_index].stored_message_id = Some(message_id);
+                        output.posted_message_ids.push(message_id);
+                    }
                     self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
-                        .await?;
-                } else {
-                    self.store_rang_guide_metadata(&output).await?;
+                        .await
+                }
+                .await;
+                if let Err(err) = written {
+                    self.cleanup_new_rang_guide_posts_best_effort(&reposted)
+                        .await;
+                    return Err(err);
                 }
             }
         }
@@ -5801,20 +5761,20 @@ impl ServerSyncOps for ServerSyncService {
         thread_id: u64,
         payload_hash: &str,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
-            &thread_id.to_string(),
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
-            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
-            payload_hash,
-        )
+        self.store_serversync_kv_pairs(&[
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+                &thread_id.to_string(),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
+                voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+                payload_hash,
+            ),
+        ])
         .await
     }
 
@@ -6073,59 +6033,63 @@ impl ServerSyncOps for ServerSyncService {
                 } else {
                     let channel_id = output.targets[target_index].channel_id;
                     let mut message_ids = Vec::new();
-                    for message_index in 0..output.targets[target_index].messages.len() {
-                        let stored_message_id =
-                            output.targets[target_index].messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_voice_ux_message(
+                    let mut reposted = Vec::new();
+                    let written: ServerSyncResult<()> = async {
+                        for message_index in 0..output.targets[target_index].messages.len() {
+                            let stored_message_id =
+                                output.targets[target_index].messages[message_index].stored_message_id;
+                            if let Some(stored_message_id) = stored_message_id {
+                                if let Some(message_id) = self
+                                    .edit_voice_ux_message(
+                                        channel_id,
+                                        stored_message_id,
+                                        &output.targets[target_index].messages[message_index],
+                                    )
+                                    .await?
+                                {
+                                    message_ids.push(message_id);
+                                    let message =
+                                        &mut output.targets[target_index].messages[message_index];
+                                    message.action = "edited".to_string();
+                                    message.message_id = Some(message_id);
+                                    message.stored_message_id = Some(message_id);
+                                    output.targets[target_index]
+                                        .edited_message_ids
+                                        .push(message_id);
+                                    continue;
+                                }
+                                output.warnings.push(format!(
+                                "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
+                            ));
+                            }
+                            let message_id = self
+                                .post_voice_ux_message(
                                     channel_id,
-                                    stored_message_id,
                                     &output.targets[target_index].messages[message_index],
                                 )
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                let message =
-                                    &mut output.targets[target_index].messages[message_index];
-                                message.action = "edited".to_string();
-                                message.message_id = Some(message_id);
-                                message.stored_message_id = Some(message_id);
-                                output.targets[target_index]
-                                    .edited_message_ids
-                                    .push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                            "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
-                        ));
+                                .await?;
+                            message_ids.push(message_id);
+                            reposted.push(message_id);
+                            let message = &mut output.targets[target_index].messages[message_index];
+                            message.action = "posted".to_string();
+                            message.message_id = Some(message_id);
+                            message.stored_message_id = Some(message_id);
+                            output.targets[target_index]
+                                .posted_message_ids
+                                .push(message_id);
                         }
-                        let message_id = self
-                            .post_voice_ux_message(
-                                channel_id,
-                                &output.targets[target_index].messages[message_index],
-                            )
-                            .await?;
-                        message_ids.push(message_id);
-                        self.store_static_v2_message_id(
-                            &voice_ux_publish::voice_ux_message_id_prefix(channel_id),
-                            message_index,
-                            message_id,
+                        self.replace_voice_ux_target_metadata(
+                            &output.targets[target_index],
+                            &message_ids,
                         )
-                        .await?;
-                        let message = &mut output.targets[target_index].messages[message_index];
-                        message.action = "posted".to_string();
-                        message.message_id = Some(message_id);
-                        message.stored_message_id = Some(message_id);
-                        output.targets[target_index]
-                            .posted_message_ids
-                            .push(message_id);
+                        .await
                     }
-                    self.replace_voice_ux_target_metadata(
-                        &output.targets[target_index],
-                        &message_ids,
-                    )
-                    .await?;
+                    .await;
+                    if let Err(err) = written {
+                        self.cleanup_new_voice_ux_posts_best_effort(channel_id, &reposted)
+                            .await;
+                        return Err(err);
+                    }
                 }
             }
 
