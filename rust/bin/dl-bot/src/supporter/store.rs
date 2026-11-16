@@ -9,6 +9,7 @@ const MANUAL_IMPORT_KEY: &str = "manual_import_at";
 #[derive(Debug)]
 pub enum StoreError {
     Missing,
+    GateDisabled,
     Db(sqlx::Error),
     Discord(String),
 }
@@ -18,7 +19,11 @@ impl fmt::Display for StoreError {
         match self {
             Self::Missing => write!(
                 f,
-                "core.supporter_sources oder ihr Datenschutz-Trigger supporter_sources_privacy_gate fehlt"
+                "core.supporter_sources oder ihr Datenschutz-Trigger supporter_sources_privacy_gate fehlt, Abgleich pausiert bis zur Migration"
+            ),
+            Self::GateDisabled => write!(
+                f,
+                "Datenschutz-Trigger supporter_sources_privacy_gate ist nicht für normale Sitzungen aktiv, Abgleich pausiert bis ALTER TABLE core.supporter_sources ENABLE TRIGGER supporter_sources_privacy_gate"
             ),
             Self::Db(error) => write!(f, "Datenbank: {error}"),
             Self::Discord(error) => write!(f, "Discord: {error}"),
@@ -30,7 +35,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Db(error) => Some(error),
-            Self::Missing | Self::Discord(_) => None,
+            Self::Missing | Self::GateDisabled | Self::Discord(_) => None,
         }
     }
 }
@@ -42,20 +47,21 @@ impl From<sqlx::Error> for StoreError {
 }
 
 pub async fn require_table(pool: &PgPool) -> Result<(), StoreError> {
-    let present: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM pg_catalog.pg_trigger
-              WHERE tgrelid = to_regclass('core.supporter_sources')
-                AND tgname = 'supporter_sources_privacy_gate'
-                AND tgenabled <> 'D'
-         )",
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT tgenabled::text FROM pg_catalog.pg_trigger
+          WHERE tgrelid = to_regclass('core.supporter_sources')
+            AND tgname = 'supporter_sources_privacy_gate'",
     )
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    if present {
-        Ok(())
-    } else {
-        Err(StoreError::Missing)
+    gate_state(state.as_deref())
+}
+
+fn gate_state(tgenabled: Option<&str>) -> Result<(), StoreError> {
+    match tgenabled {
+        None => Err(StoreError::Missing),
+        Some("O" | "A") => Ok(()),
+        Some(_) => Err(StoreError::GateDisabled),
     }
 }
 
@@ -197,8 +203,23 @@ mod tests {
         .await?;
         assert!(matches!(
             require_table(pool).await,
-            Err(StoreError::Missing)
+            Err(StoreError::GateDisabled)
         ));
+        sqlx::query(
+            "ALTER TABLE core.supporter_sources ENABLE REPLICA TRIGGER supporter_sources_privacy_gate",
+        )
+        .execute(pool)
+        .await?;
+        assert!(matches!(
+            require_table(pool).await,
+            Err(StoreError::GateDisabled)
+        ));
+        sqlx::query(
+            "ALTER TABLE core.supporter_sources ENABLE ALWAYS TRIGGER supporter_sources_privacy_gate",
+        )
+        .execute(pool)
+        .await?;
+        require_table(pool).await?;
         sqlx::query("DROP TRIGGER supporter_sources_privacy_gate ON core.supporter_sources")
             .execute(pool)
             .await?;
