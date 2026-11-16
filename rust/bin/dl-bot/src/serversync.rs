@@ -812,28 +812,6 @@ pub trait ServerSyncOps: Send + Sync {
     ) -> ServerSyncResult<OwnMessageScan> {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
-    async fn edit_voice_ux_message(
-        &self,
-        _channel_id: u64,
-        _message_id: u64,
-        _message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn post_voice_ux_message(
-        &self,
-        _channel_id: u64,
-        _message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn replace_voice_ux_target_metadata(
-        &self,
-        _target: &voice_ux_publish::VoiceUxTargetOutput,
-        _message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
     async fn store_voice_ux_target_metadata(
         &self,
         _target: &voice_ux_publish::VoiceUxTargetOutput,
@@ -846,9 +824,6 @@ pub trait ServerSyncOps: Send + Sync {
         _stored_message_ids: &[u64],
         _bot_user_id: u64,
     ) -> ServerSyncResult<StaticV2DeleteOutcome> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn cleanup_new_voice_ux_posts_best_effort(&self, _channel_id: u64, _message_ids: &[u64]) {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
     async fn pin_voice_ux_message_best_effort(
@@ -1410,23 +1385,6 @@ impl ServerSyncService {
             .await
     }
 
-    async fn replace_static_v2_message_ids_and_metadata(
-        &self,
-        message_id_prefix: &str,
-        format_key: &str,
-        payload_format: &str,
-        hash_key: &str,
-        payload_hash: &str,
-        message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        self.replace_static_v2_message_ids_and_state(
-            message_id_prefix,
-            message_ids,
-            &[(format_key, payload_format), (hash_key, payload_hash)],
-        )
-        .await
-    }
-
     async fn replace_static_v2_message_ids_and_state(
         &self,
         message_id_prefix: &str,
@@ -1810,22 +1768,6 @@ impl ServerSyncService {
             .await
     }
 
-    async fn load_rang_guide_message_ids(&self) -> ServerSyncResult<Vec<u64>> {
-        let indexed = self
-            .load_serversync_kv_prefix(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX)
-            .await?;
-        let mut by_index = BTreeMap::<usize, u64>::new();
-        for (key, raw) in indexed {
-            let raw_index =
-                key.trim_start_matches(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX);
-            let Ok(message_index) = raw_index.parse::<usize>() else {
-                continue;
-            };
-            by_index.insert(message_index, parse_discord_id(&key, &raw)?);
-        }
-        Ok(by_index.into_values().collect())
-    }
-
     async fn store_rang_guide_metadata(
         &self,
         output: &rang_guide_publish::RangGuidePublishOutput,
@@ -1835,22 +1777,6 @@ impl ServerSyncService {
             rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
             rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
             &output.payload_hash,
-        )
-        .await
-    }
-
-    async fn replace_rang_guide_message_ids_and_metadata(
-        &self,
-        output: &rang_guide_publish::RangGuidePublishOutput,
-        message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        self.replace_static_v2_message_ids_and_metadata(
-            rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
-            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
-            &output.payload_hash,
-            message_ids,
         )
         .await
     }
@@ -1941,27 +1867,6 @@ impl ServerSyncService {
         })
     }
 
-    async fn cleanup_new_rang_guide_posts_best_effort(&self, message_ids: &[u64]) {
-        for &message_id in message_ids {
-            match self
-                .discord_delete(self.discord_api_url(&format!(
-                    "/channels/{}/messages/{message_id}",
-                    rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-                )))
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        %err,
-                        message_id,
-                        "Rang-Guide: neu gepostete Message konnte nach Teilfehler nicht bereinigt werden"
-                    );
-                }
-            }
-        }
-    }
-
     fn adopt_rang_guide_message_ids(
         output: &mut rang_guide_publish::RangGuidePublishOutput,
         discovered_message_ids: &[u64],
@@ -1982,112 +1887,6 @@ impl ServerSyncService {
                 }
             }
         }
-    }
-
-    async fn edit_rang_guide_message(
-        &self,
-        message_id: u64,
-        message: &rang_guide_publish::RangGuideMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-        ));
-        let response = self
-            .send_rang_guide_message_payload("PATCH", url, &message.payload)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_rang_guide_message(
-        &self,
-        message: &rang_guide_publish::RangGuideMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-        ));
-        let response = self
-            .send_rang_guide_message_payload("POST", url, &message.payload)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn send_rang_guide_message_payload(
-        &self,
-        method: &'static str,
-        url: String,
-        payload: &rang_guide_publish::RangGuideMessagePayload,
-    ) -> ServerSyncResult<DiscordRestResponse> {
-        let payload_value = serde_json::to_value(payload)?;
-        if !payload.attachments.is_empty() {
-            let payload_text = serde_json::to_string(&payload_value)?;
-            let files: Vec<(u8, String, Vec<u8>)> = payload
-                .attachments
-                .iter()
-                .map(|attachment| {
-                    (
-                        attachment.id,
-                        attachment.filename.clone(),
-                        attachment.bytes.clone(),
-                    )
-                })
-                .collect();
-            return discord_regelwerk_send_with_retry(
-                || {
-                    let request = match method {
-                        "POST" => self.http_client.post(url.clone()),
-                        "PATCH" => self.http_client.patch(url.clone()),
-                        other => unreachable!("unsupported Discord method {other}"),
-                    }
-                    .header("Authorization", format!("Bot {}", self.discord_token))
-                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
-                    let payload_text = payload_text.clone();
-                    let files = files.clone();
-                    async move {
-                        let mut form =
-                            reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
-                                .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
-                        }
-                        let response = request.multipart(form).send().await?;
-                        DiscordRestResponse::from_response(response).await
-                    }
-                },
-                method,
-            )
-            .await;
-        }
-
-        discord_regelwerk_send_with_retry(
-            || {
-                let request = match method {
-                    "POST" => self.http_client.post(url.clone()),
-                    "PATCH" => self.http_client.patch(url.clone()),
-                    other => unreachable!("unsupported Discord method {other}"),
-                }
-                .header("Authorization", format!("Bot {}", self.discord_token))
-                .header("Content-Type", "application/json")
-                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-                .json(&payload_value);
-                async move {
-                    let response = request.send().await?;
-                    DiscordRestResponse::from_response(response).await
-                }
-            },
-            method,
-        )
-        .await
     }
 
     async fn send_components_v2_message_payload(
@@ -2150,30 +1949,20 @@ impl ServerSyncService {
         .await
     }
 
-    async fn edit_regelwerk_v2_message(
+    async fn edit_static_v2_message<M: StaticV2Message>(
         &self,
+        channel_id: u64,
         message_id: u64,
-        message: &regelwerk_publish::RegelwerkMessageOutput,
+        message: &M,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            regelwerk_publish::REGELWERK_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
         let response = self
-            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
+            .send_components_v2_message_payload(
+                "PATCH",
+                url,
+                message.payload_value()?,
+                message.upload_files(),
+            )
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -2183,33 +1972,75 @@ impl ServerSyncService {
         parse_discord_id("Message-ID", &written.id).map(Some)
     }
 
-    async fn post_regelwerk_v2_message(
+    async fn post_static_v2_message<M: StaticV2Message>(
         &self,
-        message: &regelwerk_publish::RegelwerkMessageOutput,
+        channel_id: u64,
+        message: &M,
     ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            regelwerk_publish::REGELWERK_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
         let response = self
-            .send_components_v2_message_payload("POST", url, payload_value, attachments)
+            .send_components_v2_message_payload(
+                "POST",
+                url,
+                message.payload_value()?,
+                message.upload_files(),
+            )
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
         parse_discord_id("Message-ID", &written.id)
+    }
+
+    async fn write_static_v2_messages<M: StaticV2Message>(
+        &self,
+        target: StaticV2Target<'_>,
+        messages: &mut [M],
+    ) -> ServerSyncResult<StaticV2Written> {
+        let mut written = StaticV2Written::default();
+        let mut message_ids = Vec::new();
+        let result: ServerSyncResult<()> = async {
+            for message in messages.iter_mut() {
+                if let (Some(edit_action), Some(stored_message_id)) =
+                    (target.edit_action, message.stored_message_id())
+                {
+                    if let Some(message_id) = self
+                        .edit_static_v2_message(target.channel_id, stored_message_id, message)
+                        .await?
+                    {
+                        message_ids.push(message_id);
+                        message.settle(edit_action, message_id);
+                        written.edited.push(message_id);
+                        continue;
+                    }
+                    written
+                        .warnings
+                        .push(target.stale_warning(stored_message_id));
+                }
+                let message_id = self
+                    .post_static_v2_message(target.channel_id, message)
+                    .await?;
+                message_ids.push(message_id);
+                message.settle("posted", message_id);
+                written.posted.push(message_id);
+            }
+            self.replace_static_v2_message_ids_and_state(
+                target.id_prefix,
+                &message_ids,
+                target.state,
+            )
+            .await
+        }
+        .await;
+        if let Err(err) = result {
+            self.cleanup_new_static_v2_posts_best_effort(
+                target.label,
+                target.channel_id,
+                &written.posted,
+            )
+            .await;
+            return Err(err);
+        }
+        Ok(written)
     }
 
     async fn support_funding_for_apply(
@@ -2337,7 +2168,7 @@ impl ServerSyncService {
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
         for (message_id, message) in edits {
             if self
-                .edit_support_message(message_id, message)
+                .edit_static_v2_message(support_publish::SUPPORT_CHANNEL_ID, message_id, message)
                 .await?
                 .is_none()
             {
@@ -2359,130 +2190,6 @@ impl ServerSyncService {
         ])
         .await?;
         Ok(FundingRefresh::Updated)
-    }
-
-    async fn edit_support_message(
-        &self,
-        message_id: u64,
-        message: &support_publish::SupportMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            support_publish::SUPPORT_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_support_message(
-        &self,
-        message: &support_publish::SupportMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            support_publish::SUPPORT_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("POST", url, payload_value, attachments)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn edit_faq_message(
-        &self,
-        message_id: u64,
-        message: &faq_publish::FaqMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            faq_publish::FAQ_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_faq_message(
-        &self,
-        message: &faq_publish::FaqMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            faq_publish::FAQ_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("POST", url, payload_value, attachments)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
     }
 
     async fn fetch_rang_guide_legacy_cleanup_candidates(
@@ -3192,66 +2899,11 @@ impl ServerSyncService {
         url: String,
         payload: &welcome_publish::WelcomeMessagePayload,
     ) -> ServerSyncResult<DiscordRestResponse> {
-        let payload_value = serde_json::to_value(payload)?;
-        if !payload.attachments.is_empty() {
-            let payload_text = serde_json::to_string(&payload_value)?;
-            let files = payload
-                .attachments
-                .iter()
-                .map(|attachment| {
-                    (
-                        attachment.id,
-                        attachment.filename.clone(),
-                        attachment.bytes.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            return discord_regelwerk_send_with_retry(
-                || {
-                    let request = match method {
-                        "POST" => self.http_client.post(url.clone()),
-                        "PATCH" => self.http_client.patch(url.clone()),
-                        other => unreachable!("unsupported Discord method {other}"),
-                    }
-                    .header("Authorization", format!("Bot {}", self.discord_token))
-                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
-                    let payload_text = payload_text.clone();
-                    let files = files.clone();
-                    async move {
-                        let mut form =
-                            reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
-                                .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
-                        }
-                        let response = request.multipart(form).send().await?;
-                        DiscordRestResponse::from_response(response).await
-                    }
-                },
-                method,
-            )
-            .await;
-        }
-
-        discord_regelwerk_send_with_retry(
-            || {
-                let request = match method {
-                    "POST" => self.http_client.post(url.clone()),
-                    "PATCH" => self.http_client.patch(url.clone()),
-                    other => unreachable!("unsupported Discord method {other}"),
-                }
-                .header("Authorization", format!("Bot {}", self.discord_token))
-                .header("Content-Type", "application/json")
-                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-                .json(&payload_value);
-                async move {
-                    let response = request.send().await?;
-                    DiscordRestResponse::from_response(response).await
-                }
-            },
+        self.send_components_v2_message_payload(
             method,
+            url,
+            serde_json::to_value(payload)?,
+            upload_files(&payload.attachments),
         )
         .await
     }
@@ -4127,48 +3779,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_regelwerk_v2_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "Regelwerk",
-                            regelwerk_publish::REGELWERK_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
-                    regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+            let state = [
+                (
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                ),
+                (
                     regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &posted_message_ids,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Regelwerk",
+                        channel_id: regelwerk_publish::REGELWERK_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "Regelwerk",
-                    regelwerk_publish::REGELWERK_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4220,65 +3856,32 @@ impl ServerSyncOps for ServerSyncService {
                 )
                 .await?;
             } else {
-                let mut message_ids = Vec::new();
-                let mut reposted = Vec::new();
-                let written: ServerSyncResult<()> = async {
-                    for message_index in 0..output.messages.len() {
-                        let stored_message_id = output.messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_regelwerk_v2_message(
-                                    stored_message_id,
-                                    &output.messages[message_index],
-                                )
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                output.messages[message_index].action = if adopted_from_history {
-                                    "adopted_edit".to_string()
-                                } else {
-                                    "edited".to_string()
-                                };
-                                output.messages[message_index].message_id = Some(message_id);
-                                output.messages[message_index].stored_message_id = Some(message_id);
-                                output.edited_message_ids.push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                                "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                            ));
-                        }
-
-                        let message_id = self
-                            .post_regelwerk_v2_message(&output.messages[message_index])
-                            .await?;
-                        message_ids.push(message_id);
-                        reposted.push(message_id);
-                        output.messages[message_index].action = "posted".to_string();
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.posted_message_ids.push(message_id);
-                    }
-                    self.replace_static_v2_message_ids_and_metadata(
-                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                let state = [
+                    (
                         regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
                         regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                    ),
+                    (
                         regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                        &message_ids,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Regelwerk",
+                            channel_id: regelwerk_publish::REGELWERK_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
-                    .await
-                }
-                .await;
-                if let Err(err) = written {
-                    self.cleanup_new_static_v2_posts_best_effort(
-                        "Regelwerk",
-                        regelwerk_publish::REGELWERK_CHANNEL_ID,
-                        &reposted,
-                    )
-                    .await;
-                    return Err(err);
-                }
+                    .await?;
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -4434,45 +4037,23 @@ impl ServerSyncOps for ServerSyncService {
         ];
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_support_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "Support",
-                            support_publish::SUPPORT_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_state(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    &posted_message_ids,
-                    &published_state,
+            let state = published_state;
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Support",
+                        channel_id: support_publish::SUPPORT_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "Support",
-                    support_publish::SUPPORT_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4518,62 +4099,23 @@ impl ServerSyncOps for ServerSyncService {
                 }
                 self.store_serversync_kv_pairs(&published_state).await?;
             } else {
-                let mut message_ids = Vec::new();
-                let mut reposted = Vec::new();
-                let written: ServerSyncResult<()> = async {
-                    for message_index in 0..output.messages.len() {
-                        let stored_message_id = output.messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_support_message(
-                                    stored_message_id,
-                                    &output.messages[message_index],
-                                )
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                output.messages[message_index].action = if adopted_from_history {
-                                    "adopted_edit".to_string()
-                                } else {
-                                    "edited".to_string()
-                                };
-                                output.messages[message_index].message_id = Some(message_id);
-                                output.messages[message_index].stored_message_id = Some(message_id);
-                                output.edited_message_ids.push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                                "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                            ));
-                        }
-
-                        let message_id = self
-                            .post_support_message(&output.messages[message_index])
-                            .await?;
-                        message_ids.push(message_id);
-                        reposted.push(message_id);
-                        output.messages[message_index].action = "posted".to_string();
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.posted_message_ids.push(message_id);
-                    }
-                    self.replace_static_v2_message_ids_and_state(
-                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                        &message_ids,
-                        &published_state,
+                let state = published_state;
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Support",
+                            channel_id: support_publish::SUPPORT_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
-                    .await
-                }
-                .await;
-                if let Err(err) = written {
-                    self.cleanup_new_static_v2_posts_best_effort(
-                        "Support",
-                        support_publish::SUPPORT_CHANNEL_ID,
-                        &reposted,
-                    )
-                    .await;
-                    return Err(err);
-                }
+                    .await?;
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -4663,46 +4205,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self.post_faq_message(&output.messages[message_index]).await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "FAQ",
-                            faq_publish::FAQ_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
-                    faq_publish::FAQ_MESSAGE_ID_PREFIX,
+            let state = [
+                (
                     faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
                     faq_publish::FAQ_PAYLOAD_FORMAT,
+                ),
+                (
                     faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &posted_message_ids,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "FAQ",
+                        channel_id: faq_publish::FAQ_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "FAQ",
-                    faq_publish::FAQ_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4754,62 +4282,32 @@ impl ServerSyncOps for ServerSyncService {
                 )
                 .await?;
             } else {
-                let mut message_ids = Vec::new();
-                let mut reposted = Vec::new();
-                let written: ServerSyncResult<()> = async {
-                    for message_index in 0..output.messages.len() {
-                        let stored_message_id = output.messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_faq_message(stored_message_id, &output.messages[message_index])
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                output.messages[message_index].action = if adopted_from_history {
-                                    "adopted_edit".to_string()
-                                } else {
-                                    "edited".to_string()
-                                };
-                                output.messages[message_index].message_id = Some(message_id);
-                                output.messages[message_index].stored_message_id = Some(message_id);
-                                output.edited_message_ids.push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                                "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                            ));
-                        }
-
-                        let message_id = self
-                            .post_faq_message(&output.messages[message_index])
-                            .await?;
-                        message_ids.push(message_id);
-                        reposted.push(message_id);
-                        output.messages[message_index].action = "posted".to_string();
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.posted_message_ids.push(message_id);
-                    }
-                    self.replace_static_v2_message_ids_and_metadata(
-                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                let state = [
+                    (
                         faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
                         faq_publish::FAQ_PAYLOAD_FORMAT,
+                    ),
+                    (
                         faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                        &message_ids,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "FAQ",
+                            channel_id: faq_publish::FAQ_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
-                    .await
-                }
-                .await;
-                if let Err(err) = written {
-                    self.cleanup_new_static_v2_posts_best_effort(
-                        "FAQ",
-                        faq_publish::FAQ_CHANNEL_ID,
-                        &reposted,
-                    )
-                    .await;
-                    return Err(err);
-                }
+                    .await?;
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -5016,7 +4514,9 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let stored_message_ids = self.load_rang_guide_message_ids().await?;
+        let stored_message_ids = self
+            .load_static_v2_message_ids(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX)
+            .await?;
         let stored_payload_format = self.load_rang_guide_payload_format().await?;
         let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
         let mut output = rang_guide_publish::build_rang_guide_publish_output(
@@ -5101,33 +4601,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_rang_guide_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
-                            .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_rang_guide_message_ids_and_metadata(&output, &posted_message_ids)
-                .await
-            {
-                self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
-                    .await;
-                return Err(err);
-            }
+            let state = [
+                (
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+                ),
+                (
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Rang-Guide",
+                        channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
+                )
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -5173,54 +4672,32 @@ impl ServerSyncOps for ServerSyncService {
                 }
                 self.store_rang_guide_metadata(&output).await?;
             } else {
-                let mut message_ids = Vec::new();
-                let mut reposted = Vec::new();
-                let written: ServerSyncResult<()> = async {
-                    for message_index in 0..output.messages.len() {
-                        let stored_message_id = output.messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_rang_guide_message(
-                                    stored_message_id,
-                                    &output.messages[message_index],
-                                )
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                output.messages[message_index].action = if adopted_from_history {
-                                    "adopted_edit".to_string()
-                                } else {
-                                    "edited".to_string()
-                                };
-                                output.messages[message_index].message_id = Some(message_id);
-                                output.messages[message_index].stored_message_id = Some(message_id);
-                                output.edited_message_ids.push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                                "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                            ));
-                        }
-
-                        let message_id = self
-                            .post_rang_guide_message(&output.messages[message_index])
-                            .await?;
-                        message_ids.push(message_id);
-                        reposted.push(message_id);
-                        output.messages[message_index].action = "posted".to_string();
-                        output.messages[message_index].message_id = Some(message_id);
-                        output.messages[message_index].stored_message_id = Some(message_id);
-                        output.posted_message_ids.push(message_id);
-                    }
-                    self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
-                        .await
-                }
-                .await;
-                if let Err(err) = written {
-                    self.cleanup_new_rang_guide_posts_best_effort(&reposted)
-                        .await;
-                    return Err(err);
-                }
+                let state = [
+                    (
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+                    ),
+                    (
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Rang-Guide",
+                            channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
+                    )
+                    .await?;
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -5294,80 +4771,6 @@ impl ServerSyncOps for ServerSyncService {
             };
             voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id)
         })
-        .await
-    }
-
-    async fn edit_voice_ux_message(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("PATCH", url, payload_value, attachments)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_voice_ux_message(
-        &self,
-        channel_id: u64,
-        message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.bytes.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("POST", url, payload_value, attachments)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn replace_voice_ux_target_metadata(
-        &self,
-        target: &voice_ux_publish::VoiceUxTargetOutput,
-        message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        self.replace_static_v2_message_ids_and_metadata(
-            &voice_ux_publish::voice_ux_message_id_prefix(target.channel_id),
-            &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
-            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
-            &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
-            &target.payload_hash,
-            message_ids,
-        )
         .await
     }
 
@@ -5467,11 +4870,6 @@ impl ServerSyncOps for ServerSyncService {
             already_gone,
             warnings,
         })
-    }
-
-    async fn cleanup_new_voice_ux_posts_best_effort(&self, channel_id: u64, message_ids: &[u64]) {
-        self.cleanup_new_static_v2_posts_best_effort("Voice-UX", channel_id, message_ids)
-            .await;
     }
 
     async fn pin_voice_ux_message_best_effort(
@@ -5910,45 +5308,33 @@ impl ServerSyncOps for ServerSyncService {
             if output.targets[target_index].repost_required {
                 let channel_id = output.targets[target_index].channel_id;
                 let old_ids = output.targets[target_index].stored_message_ids.clone();
-                let mut posted_message_ids = Vec::new();
-                for message_index in 0..output.targets[target_index].messages.len() {
-                    let post_result = self
-                        .post_voice_ux_message(
+                let id_prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
+                let format_key = voice_ux_publish::voice_ux_payload_format_key(channel_id);
+                let hash_key = voice_ux_publish::voice_ux_payload_hash_key(channel_id);
+                let target = &mut output.targets[target_index];
+                let state = [
+                    (
+                        format_key.as_str(),
+                        voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+                    ),
+                    (hash_key.as_str(), target.payload_hash.as_str()),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Voice-UX",
                             channel_id,
-                            &output.targets[target_index].messages[message_index],
-                        )
-                        .await;
-                    let message_id = match post_result {
-                        Ok(message_id) => message_id,
-                        Err(err) => {
-                            self.cleanup_new_voice_ux_posts_best_effort(
-                                channel_id,
-                                &posted_message_ids,
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                    };
-                    posted_message_ids.push(message_id);
-                    let message = &mut output.targets[target_index].messages[message_index];
-                    message.action = "posted".to_string();
-                    message.message_id = Some(message_id);
-                    message.stored_message_id = Some(message_id);
-                    output.targets[target_index]
-                        .posted_message_ids
-                        .push(message_id);
-                }
-                if let Err(err) = self
-                    .replace_voice_ux_target_metadata(
-                        &output.targets[target_index],
-                        &posted_message_ids,
+                            edit_action: None,
+                            stale_in_channel: true,
+                            id_prefix: &id_prefix,
+                            state: &state,
+                        },
+                        &mut target.messages,
                     )
-                    .await
-                {
-                    self.cleanup_new_voice_ux_posts_best_effort(channel_id, &posted_message_ids)
-                        .await;
-                    return Err(err);
-                }
+                    .await?;
+                target.edited_message_ids.extend(written.edited);
+                target.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
                 let mut delete_ids = old_ids;
                 for message_id in extra_delete_ids {
                     if !delete_ids.contains(message_id) {
@@ -6003,64 +5389,33 @@ impl ServerSyncOps for ServerSyncService {
                         .await?;
                 } else {
                     let channel_id = output.targets[target_index].channel_id;
-                    let mut message_ids = Vec::new();
-                    let mut reposted = Vec::new();
-                    let written: ServerSyncResult<()> = async {
-                        for message_index in 0..output.targets[target_index].messages.len() {
-                            let stored_message_id =
-                                output.targets[target_index].messages[message_index].stored_message_id;
-                            if let Some(stored_message_id) = stored_message_id {
-                                if let Some(message_id) = self
-                                    .edit_voice_ux_message(
-                                        channel_id,
-                                        stored_message_id,
-                                        &output.targets[target_index].messages[message_index],
-                                    )
-                                    .await?
-                                {
-                                    message_ids.push(message_id);
-                                    let message =
-                                        &mut output.targets[target_index].messages[message_index];
-                                    message.action = "edited".to_string();
-                                    message.message_id = Some(message_id);
-                                    message.stored_message_id = Some(message_id);
-                                    output.targets[target_index]
-                                        .edited_message_ids
-                                        .push(message_id);
-                                    continue;
-                                }
-                                output.warnings.push(format!(
-                                    "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
-                                ));
-                            }
-                            let message_id = self
-                                .post_voice_ux_message(
-                                    channel_id,
-                                    &output.targets[target_index].messages[message_index],
-                                )
-                                .await?;
-                            message_ids.push(message_id);
-                            reposted.push(message_id);
-                            let message = &mut output.targets[target_index].messages[message_index];
-                            message.action = "posted".to_string();
-                            message.message_id = Some(message_id);
-                            message.stored_message_id = Some(message_id);
-                            output.targets[target_index]
-                                .posted_message_ids
-                                .push(message_id);
-                        }
-                        self.replace_voice_ux_target_metadata(
-                            &output.targets[target_index],
-                            &message_ids,
+                    let id_prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
+                    let format_key = voice_ux_publish::voice_ux_payload_format_key(channel_id);
+                    let hash_key = voice_ux_publish::voice_ux_payload_hash_key(channel_id);
+                    let target = &mut output.targets[target_index];
+                    let state = [
+                        (
+                            format_key.as_str(),
+                            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+                        ),
+                        (hash_key.as_str(), target.payload_hash.as_str()),
+                    ];
+                    let written = self
+                        .write_static_v2_messages(
+                            StaticV2Target {
+                                label: "Voice-UX",
+                                channel_id,
+                                edit_action: Some(static_v2_edit_action(false)),
+                                stale_in_channel: true,
+                                id_prefix: &id_prefix,
+                                state: &state,
+                            },
+                            &mut target.messages,
                         )
-                        .await
-                    }
-                    .await;
-                    if let Err(err) = written {
-                        self.cleanup_new_voice_ux_posts_best_effort(channel_id, &reposted)
-                            .await;
-                        return Err(err);
-                    }
+                        .await?;
+                    target.edited_message_ids.extend(written.edited);
+                    target.posted_message_ids.extend(written.posted);
+                    output.warnings.extend(written.warnings);
                 }
             }
 
@@ -6114,6 +5469,110 @@ impl ServerSyncOps for ServerSyncService {
             ],
             payload: json!({}),
         })
+    }
+}
+
+trait UploadAttachment {
+    fn upload_file(&self) -> (u8, String, Vec<u8>);
+}
+
+macro_rules! upload_attachment {
+    ($($attachment:ty),+ $(,)?) => {
+        $(impl UploadAttachment for $attachment {
+            fn upload_file(&self) -> (u8, String, Vec<u8>) {
+                (self.id, self.filename.clone(), self.bytes.clone())
+            }
+        })+
+    };
+}
+
+upload_attachment!(
+    faq_publish::FaqPayloadAttachment,
+    rang_guide_publish::RangGuidePayloadAttachment,
+    regelwerk_publish::RegelwerkPayloadAttachment,
+    support_publish::SupportPayloadAttachment,
+    voice_ux_publish::VoiceUxPayloadAttachment,
+    welcome_publish::WelcomePayloadAttachment,
+);
+
+fn upload_files<A: UploadAttachment>(attachments: &[A]) -> Vec<(u8, String, Vec<u8>)> {
+    attachments
+        .iter()
+        .map(UploadAttachment::upload_file)
+        .collect()
+}
+
+trait StaticV2Message {
+    fn payload_value(&self) -> serde_json::Result<Value>;
+    fn upload_files(&self) -> Vec<(u8, String, Vec<u8>)>;
+    fn stored_message_id(&self) -> Option<u64>;
+    fn settle(&mut self, action: &str, message_id: u64);
+}
+
+macro_rules! static_v2_message {
+    ($($message:ty),+ $(,)?) => {
+        $(impl StaticV2Message for $message {
+            fn payload_value(&self) -> serde_json::Result<Value> {
+                serde_json::to_value(&self.payload)
+            }
+            fn upload_files(&self) -> Vec<(u8, String, Vec<u8>)> {
+                upload_files(&self.payload.attachments)
+            }
+            fn stored_message_id(&self) -> Option<u64> {
+                self.stored_message_id
+            }
+            fn settle(&mut self, action: &str, message_id: u64) {
+                self.action = action.to_string();
+                self.message_id = Some(message_id);
+                self.stored_message_id = Some(message_id);
+            }
+        })+
+    };
+}
+
+static_v2_message!(
+    faq_publish::FaqMessageOutput,
+    rang_guide_publish::RangGuideMessageOutput,
+    regelwerk_publish::RegelwerkMessageOutput,
+    support_publish::SupportMessageOutput,
+    voice_ux_publish::VoiceUxMessageOutput,
+);
+
+struct StaticV2Target<'a> {
+    label: &'static str,
+    channel_id: u64,
+    edit_action: Option<&'static str>,
+    stale_in_channel: bool,
+    id_prefix: &'a str,
+    state: &'a [(&'a str, &'a str)],
+}
+
+impl StaticV2Target<'_> {
+    fn stale_warning(&self, message_id: u64) -> String {
+        let place = if self.stale_in_channel {
+            format!(" in Kanal {}", self.channel_id)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}: gespeicherte Message-ID {message_id}{place} ist stale (404); es wird neu gepostet.",
+            self.label
+        )
+    }
+}
+
+#[derive(Default)]
+struct StaticV2Written {
+    edited: Vec<u64>,
+    posted: Vec<u64>,
+    warnings: Vec<String>,
+}
+
+fn static_v2_edit_action(adopted_from_history: bool) -> &'static str {
+    if adopted_from_history {
+        "adopted_edit"
+    } else {
+        "edited"
     }
 }
 
@@ -9112,6 +8571,7 @@ mod tests {
         patch_bodies: Mutex<Vec<(u64, Value)>>,
         get_overrides: Mutex<BTreeMap<u64, StatusCode>>,
         missing_on_delete: Mutex<HashSet<u64>>,
+        patch_overrides: Mutex<BTreeMap<u64, StatusCode>>,
         pin_calls: Mutex<Vec<(u64, u64)>>,
         patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
@@ -9491,6 +8951,7 @@ mod tests {
             patch_bodies: Mutex::new(Vec::new()),
             get_overrides: Mutex::new(BTreeMap::new()),
             missing_on_delete: Mutex::new(HashSet::new()),
+            patch_overrides: Mutex::new(BTreeMap::new()),
             pin_calls: Mutex::new(Vec::new()),
             patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
@@ -9710,21 +9171,28 @@ mod tests {
             .lock()
             .expect("patch calls")
             .push(message_id);
-        state.patch_bodies.lock().expect("patch bodies").push((
-            message_id,
-            serde_json::from_slice::<Value>(&body)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
-        ));
-        if state
-            .messages
+        let parsed_body = fake_request_payload(&body);
+        state
+            .patch_bodies
             .lock()
-            .expect("messages")
-            .contains_key(&message_id)
+            .expect("patch bodies")
+            .push((message_id, parsed_body.clone()));
+        if let Some(status) = state
+            .patch_overrides
+            .lock()
+            .expect("patch overrides")
+            .get(&message_id)
         {
-            Json(json!({"id": message_id.to_string()})).into_response()
-        } else {
-            (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
+            return (*status, Json(json!({"message": "forced failure"}))).into_response();
         }
+        let mut messages = state.messages.lock().expect("messages");
+        let Some(message) = messages.get_mut(&message_id) else {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response();
+        };
+        if let Some(components) = parsed_body.get("components") {
+            message["components"] = components.clone();
+        }
+        Json(json!({"id": message_id.to_string()})).into_response()
     }
 
     async fn fake_discord_delete_message(
@@ -12368,6 +11836,108 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
+    async fn service_v2_edit_teilfehler_loescht_neu_gepostete_und_laesst_altes_kv_stehen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let long_step2 = "x".repeat(2700);
+        write_test_rang_repo(repo.path(), Some(&long_step2));
+        let planned = rang_guide_publish::build_rang_guide_publish_output(
+            repo.path(),
+            &[9101, 9102, 9103],
+            Some(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT),
+            Some("old-hash"),
+            true,
+        )
+        .expect("planned");
+        let stored: Vec<u64> = [9101_u64, 9102, 9103]
+            .into_iter()
+            .take(planned.messages.len())
+            .collect();
+        assert!(stored.len() >= 2, "test setup needs at least two posts");
+        for (index, message_id) in stored.iter().enumerate() {
+            set_serversync_kv(
+                db.pool(),
+                &rang_guide_publish::rang_guide_message_id_key(index),
+                &message_id.to_string(),
+            )
+            .await;
+        }
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            "old-hash",
+        )
+        .await;
+        let old_messages = stored
+            .iter()
+            .zip(planned.messages.iter())
+            .map(|(message_id, message)| {
+                fake_discord_message(
+                    *message_id,
+                    42,
+                    rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let fake = spawn_fake_discord(42, old_messages, vec![FakePostResponse::Ok(9201)]).await;
+        fake.state
+            .patch_overrides
+            .lock()
+            .expect("patch overrides")
+            .extend([
+                (stored[0], StatusCode::NOT_FOUND),
+                (stored[1], StatusCode::FORBIDDEN),
+            ]);
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let err = service
+            .rang_guide_apply(true)
+            .await
+            .expect_err("failed edit must fail");
+
+        assert!(err.to_string().contains("PATCH"), "{err}");
+        assert_eq!(fake.state.post_calls.lock().expect("post calls").len(), 1);
+        assert_eq!(
+            fake.state
+                .delete_calls
+                .lock()
+                .expect("delete calls")
+                .as_slice(),
+            &[9201]
+        );
+        for (index, message_id) in stored.iter().enumerate() {
+            assert_eq!(
+                get_serversync_kv(
+                    db.pool(),
+                    &rang_guide_publish::rang_guide_message_id_key(index)
+                )
+                .await,
+                Some(message_id.to_string())
+            );
+        }
+        assert_eq!(
+            get_serversync_kv(db.pool(), rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+                .await
+                .as_deref(),
+            Some("old-hash")
+        );
+    }
+
+    #[tokio::test]
     async fn service_v2_stored_delete_loescht_fremd_autor_message_nicht() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -12647,6 +12217,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .collect()
     }
 
+    fn support_perks_shown(fake: &FakeDiscord, message_id: u64) -> Option<bool> {
+        let perks_heading = support_publish::SUPPORT_PERKS
+            .lines()
+            .find(|line| line.starts_with("**"))
+            .expect("perks line");
+        fake.state
+            .messages
+            .lock()
+            .expect("messages")
+            .get(&message_id)
+            .map(|message| message["components"].to_string().contains(perks_heading))
+    }
+
     fn patch_count(fake: &FakeDiscord) -> usize {
         fake.state.patch_bodies.lock().expect("patch bodies").len()
     }
@@ -12817,9 +12400,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             without_role.clone(),
         );
         let before = patch_count(&fake);
+        assert_eq!(support_perks_shown(&fake, 9801), Some(true));
         let options_only = service.support_funding_refresh().await.expect("refresh");
         assert_eq!(options_only, FundingRefresh::Updated);
         assert!(!patches_since(&fake, before).is_empty());
+        assert_eq!(support_perks_shown(&fake, 9801), Some(false));
         assert_eq!(
             get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
             without_role.to_kv().ok()
@@ -12858,6 +12443,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let restored = service.support_funding_refresh().await.expect("refresh");
         assert_eq!(restored, FundingRefresh::Updated);
         assert!(!patches_since(&fake, before).is_empty());
+        assert_eq!(support_perks_shown(&fake, 9801), Some(true));
 
         std::fs::write(
             repo.path().join(support_publish::SUPPORT_TEXTS_FILE),
