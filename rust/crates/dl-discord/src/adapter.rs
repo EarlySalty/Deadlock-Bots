@@ -291,7 +291,7 @@ impl DiscordAdapter {
             json!({
                 "message_id": reply.message_id.to_string(),
                 "channel_id": channel_id.to_string(),
-                "fail_if_not_exists": false,
+                "fail_if_not_exists": true,
             }),
         );
         body.insert(
@@ -510,6 +510,19 @@ impl DiscordAdapter {
         ReactionType::Unicode(emoji.to_string())
     }
 
+    fn is_unknown_reply_target(err: &serenity::Error) -> bool {
+        matches!(
+            err,
+            serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+                if resp.status_code.as_u16() == 400
+                    && resp
+                        .error
+                        .errors
+                        .iter()
+                        .any(|error| error.path.starts_with("message_reference"))
+        )
+    }
+
     fn is_unknown_channel(err: &serenity::Error) -> bool {
         // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
         // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).
@@ -574,6 +587,8 @@ impl DiscordPort for DiscordAdapter {
         self.send_raw(channel_id, &body).await.map_err(|err| {
             if Self::is_unknown_channel(&err) {
                 PortError::ChannelNotFound
+            } else if Self::is_unknown_reply_target(&err) {
+                PortError::MessageNotFound
             } else {
                 PortError::Discord(err.to_string())
             }
@@ -1434,6 +1449,19 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_antwort_ohne_zielnachricht_wird_nicht_ohne_bezug_gepostet() {
+        let reply = ChannelReply {
+            message_id: 55,
+            allowed_user_ids: vec![7],
+        };
+        let body = DiscordAdapter::reply_body(42, &reply, "<@7> Einladung ist raus.");
+        assert_eq!(
+            body["message_reference"],
+            json!({"message_id": "55", "channel_id": "42", "fail_if_not_exists": true})
+        );
+    }
 
     #[test]
     fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {

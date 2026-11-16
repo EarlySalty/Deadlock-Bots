@@ -15,9 +15,13 @@ pub use brain_client::{
     AnswerAction, AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
+pub use brain_contracts::bot_conversation::{
+    MAX_CHAT_LINES, MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS,
+};
 pub use brain_contracts::invite::{
-    InviteCheckInOutcome, InviteLoungeUpdate, InviteNotice, InviteProblem, InviteStatus,
-    NoticeTarget,
+    InviteChatLine, InviteIntent, InviteLoungeUpdate, InviteMemberState, InviteNotice,
+    InviteProblem, InviteRequestPhase, InviteSpeaker, InviteStatus, InviteTurn, InviteTurnAction,
+    InviteTurnDecision, NoticeTarget, MAX_TURN_RECENT_LINES, MAX_TURN_REPLY_CHARS,
 };
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 
@@ -66,14 +70,11 @@ pub enum DiscordConversation {
     VoiceHint {
         message: String,
     },
-    InviteLounge {
-        message: String,
-    },
     InviteNotice {
         notice: InviteNotice,
     },
-    InviteCheckIn {
-        message: String,
+    InviteTurn {
+        turn: InviteTurn,
     },
 }
 
@@ -97,8 +98,8 @@ pub enum ConversationReply {
         content: String,
         message_id: Option<u64>,
     },
-    Judged {
-        outcome: InviteCheckInOutcome,
+    Decided {
+        decision: InviteTurnDecision,
     },
     Rejected,
 }

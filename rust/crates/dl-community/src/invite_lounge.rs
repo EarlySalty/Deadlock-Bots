@@ -1,57 +1,44 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use dl_brain::{
+    ConversationReply, InviteChatLine, InviteMemberState, InviteRequestPhase, InviteSpeaker,
+    InviteTurn, InviteTurnAction, InviteTurnDecision, MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS,
+};
 use dl_central_db::kv;
-use regex::Regex;
+use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
-use serenity::all::{ChannelId, GuildId};
 use sqlx::PgPool;
 
 #[path = "invite_lounge_status.rs"]
 mod status;
 use status::{
-    after_invite, after_progress, check_in_step, check_in_window, classify_invite_reply,
+    after_invite, after_progress, check_in_age, check_in_step, classify_invite_reply,
     steam_outcome, CheckIn, Notice, OutboxEntry, RequestStatus, SteamProgress, SteamWait, Step,
 };
 
-pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
 pub const CHECK_IN_CHANNEL_ID: u64 = 1_464_736_918_951_432_222;
-pub const COMMUNITY_CATEGORY_ID: u64 = 1_289_721_245_281_292_289;
 
-const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
 const COOLDOWN_KV_NS: &str = "invite_lounge:cooldown";
 const STATE_KV_NS: &str = "invite_lounge:requests";
 const BACKFILL_KV_NS: &str = "invite_lounge:history";
 const ACTIONS_SINCE_KEY: &str = "actions_since_v1";
-const ROOM_WAIT_SECONDS: i64 = 60 * 60;
-pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
-const REQUEST_WINDOW_SECONDS: i64 = NEWCOMER_MAX_JOIN_SECONDS;
+const REQUEST_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+const CATCH_UP_SECONDS: i64 = 3 * 24 * 60 * 60;
 const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
-const DISCORD_ANSWER_CHARS: usize = 2000;
+
+pub(crate) const PRIVACY_KV_NAMESPACES: [&str; 2] = [STATE_KV_NS, COOLDOWN_KV_NS];
+
+pub(crate) fn privacy_kv_key(user_id: i64) -> String {
+    format!("user:{user_id}")
+}
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{6,12}\b").ok());
-static STEAM_LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:https?://)?(?:www\.)?(?:s\.team/p/|steamcommunity\.com)").ok()
-});
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:https?://|www\.|steamcommunity\.com/|s\.team/)\S+")
-        .expect("gültiger URL-Ausdruck")
-});
-static INVITE_TERM_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"invite|playtest|beta|\bein\w{0,3}lad|\blad(?:e|et|t)?\s+(?:\w+\s+){0,3}\bein\b")
-        .ok()
-});
-static QUESTION_SIGNAL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"(?iu)\b(?:wer|mag|kann|könnte|koennte|jemand|würde|wuerde|hätte|haette)\b").ok()
-});
-static IMPERSONAL_REQUEST_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:^|[.!?])\s*(?:(?:jo|hey|hi|hallo|moin|servus|guten\s+(?:morgen|tag|abend))(?:\s+(?:zusammen|leute|allerseits))?(?:,\s*|\s+))?(?:kann|könnte|koennte|darf)\s+man\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie|denn|wohl)\s+)*(?:(?:ein(?:en|e)?|nen?)\s+)?(?:invite|einladung|playtest|beta)\s+(?:(?:hier|auch|noch|bitte|vielleicht|irgendwie)\s+)*(?:bekommen|kriegen|erhalten|haben)\b",
-    )
-    .expect("valid impersonal invite request expression")
-});
+static URL_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:https?://|www\.|steamcommunity\.com/|s\.team/)\S+").ok());
+static MENTION_RE: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"<(@!?|@&|#)(\d+)>").ok());
 
 #[derive(Debug, Clone)]
 pub struct LoungeMessage {
@@ -82,38 +69,21 @@ impl From<dl_discord::MessageEvent> for LoungeMessage {
     }
 }
 
-// async_trait markiert Futures zusätzlich zu dem bereits markierten Result.
 #[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait InviteLoungeReplyPort: Send + Sync {
     fn bot_id(&self) -> Option<u64>;
-    fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
     async fn history(
         &self,
         channel_id: u64,
         before_id: Option<u64>,
     ) -> Result<Vec<LoungeMessage>, String>;
-    async fn reply_text(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        content: &str,
-    ) -> Result<u64, String>;
 }
 
 #[async_trait::async_trait]
 impl InviteLoungeReplyPort for dl_discord::DiscordAdapter {
     fn bot_id(&self) -> Option<u64> {
         self.bot_user_id_cell().get().copied().filter(|id| *id > 0)
-    }
-
-    fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
-        self.cache()
-            .guild(GuildId::new(guild_id))?
-            .channels
-            .get(&ChannelId::new(channel_id))?
-            .parent_id
-            .map(|parent| parent.get())
     }
 
     async fn history(
@@ -140,28 +110,6 @@ impl InviteLoungeReplyPort for dl_discord::DiscordAdapter {
                     .map(|id| id.get()),
             })
             .collect())
-    }
-
-    async fn reply_text(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        content: &str,
-    ) -> Result<u64, String> {
-        let mut body = Map::new();
-        body.insert("content".into(), Value::String(content.to_string()));
-        body.insert(
-            "message_reference".into(),
-            json!({
-                "channel_id": channel_id.to_string(), "message_id": message_id.to_string(),
-                "fail_if_not_exists": false,
-            }),
-        );
-        body.insert(
-            "allowed_mentions".into(),
-            json!({ "parse": [], "replied_user": false }),
-        );
-        self.send_raw_public(channel_id, &body).await
     }
 }
 
@@ -243,9 +191,7 @@ trait LoungeStore: Send + Sync {
     async fn pending_users(&self) -> Result<Vec<u64>, String>;
     async fn outbox_users(&self) -> Result<Vec<u64>, String>;
     async fn known_code(&self, user_id: u64) -> Result<Option<String>, String>;
-    async fn last_hint_at(&self, user_id: u64) -> Result<Option<i64>, String>;
-    async fn backfill_done(&self) -> Result<bool, String>;
-    async fn mark_backfill_done(&self) -> Result<(), String>;
+    async fn opted_out(&self, user_id: u64) -> bool;
     async fn actions_since(&self) -> Result<Option<i64>, String>;
     async fn mark_actions_since(&self, now: i64) -> Result<(), String>;
     async fn steam_progress(&self, code: &str, since: i64) -> Result<SteamProgress, String>;
@@ -310,34 +256,16 @@ impl LoungeStore for PgLoungeStore {
             .bind(user_id as i64).fetch_optional(&self.pool).await.map_err(|err| err.to_string())?;
         Ok(steam_id
             .and_then(|id| id.parse::<u64>().ok())
-            .and_then(|id| id.checked_sub(76_561_197_960_265_728))
+            .and_then(|id| id.checked_sub(STEAM_ID64_BASE))
             .filter(|id| *id > 0 && *id <= u32::MAX as u64)
             .map(|id| id.to_string()))
     }
 
-    async fn last_hint_at(&self, user_id: u64) -> Result<Option<i64>, String> {
-        Ok(kv::get(&self.pool, COOLDOWN_KV_NS, &cooldown_key(user_id))
-            .await
-            .map_err(|err| err.to_string())?
-            .and_then(|value| value.parse().ok()))
-    }
-
-    async fn backfill_done(&self) -> Result<bool, String> {
-        Ok(kv::get(&self.pool, BACKFILL_KV_NS, "seven_days_v1")
-            .await
-            .map_err(|err| err.to_string())?
-            .is_some())
-    }
-
-    async fn mark_backfill_done(&self) -> Result<(), String> {
-        kv::set(
-            &self.pool,
-            BACKFILL_KV_NS,
-            "seven_days_v1",
-            &chrono::Utc::now().timestamp().to_string(),
-        )
-        .await
-        .map_err(|err| err.to_string())
+    async fn opted_out(&self, user_id: u64) -> bool {
+        match i64::try_from(user_id) {
+            Ok(user_id) => crate::privacy::is_opted_out(&self.pool, user_id).await,
+            Err(_) => true,
+        }
     }
 
     async fn actions_since(&self) -> Result<Option<i64>, String> {
@@ -428,6 +356,8 @@ fn steam_id64(code: &str) -> Option<i64> {
         .and_then(|id| i64::try_from(id + STEAM_ID64_BASE).ok())
 }
 
+type UserLocks = std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>;
+
 pub struct InviteLoungeWatcher {
     store: Arc<dyn LoungeStore>,
     port: Arc<dyn InviteLoungeReplyPort>,
@@ -435,6 +365,29 @@ pub struct InviteLoungeWatcher {
     brain: Arc<dyn dl_brain::AiAnswerer>,
     guild_id: u64,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
+    locks: UserLocks,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MemberFacts {
+    message_code: Option<String>,
+    known_code: Option<String>,
+    invited: bool,
+}
+
+impl MemberFacts {
+    fn code(&self) -> Option<String> {
+        self.message_code
+            .clone()
+            .or_else(|| self.known_code.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TurnOutcome {
+    Failed,
+    Silent,
+    Decided(InviteTurnDecision),
 }
 
 impl InviteLoungeWatcher {
@@ -452,87 +405,119 @@ impl InviteLoungeWatcher {
             brain,
             guild_id,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            locks: UserLocks::default(),
         }
     }
 
-    #[cfg(test)]
-    async fn handle_message(
-        &self,
-        event: LoungeMessage,
-        now: i64,
-        existing_hint: Option<bool>,
-    ) -> Result<(), String> {
-        if let Some(user_id) = self.record_message(event, now, existing_hint).await? {
-            self.dispatch_due(user_id, now).await?;
-            self.deliver_outbox(user_id).await?;
-        }
-        Ok(())
+    fn watches(&self, event: &LoungeMessage) -> bool {
+        !event.is_bot
+            && event.guild_id == Some(self.guild_id)
+            && event.channel_id == CHECK_IN_CHANNEL_ID
     }
 
-    async fn record_message(
-        &self,
-        event: LoungeMessage,
-        now: i64,
-        existing_hint: Option<bool>,
-    ) -> Result<Option<u64>, String> {
-        if event.is_bot
-            || event.guild_id != Some(self.guild_id)
-            || self.port.channel_category(self.guild_id, event.channel_id)
-                != Some(COMMUNITY_CATEGORY_ID)
+    async fn serve(&self, event: LoungeMessage) {
+        let context = match self
+            .port
+            .history(event.channel_id, Some(event.message_id))
+            .await
         {
-            return Ok(None);
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Verlauf für den Kontext nicht lesbar");
+                Vec::new()
+            }
+        };
+        let now = (self.clock_millis)() / 1000;
+        match self.handle_turn(&event, &context, now).await {
+            Ok(Some(user_id)) => self.follow_up(user_id, now).await,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge-Nachricht konnte nicht verarbeitet werden");
+            }
         }
-        if !is_fresh(event.created_at, now, REQUEST_WINDOW_SECONDS) {
-            tracing::info!(
-                message_id = event.message_id,
-                "Invite-Lounge überspringt verspätete Nachricht"
-            );
-            return Ok(None);
+    }
+
+    async fn follow_up(&self, user_id: u64, now: i64) {
+        if let Err(error) = self.dispatch_due(user_id, now).await {
+            tracing::warn!(%error, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
         }
-        if !self.allows_actions(event.created_at).await? {
-            return Ok(None);
+        if let Err(error) = self.deliver_outbox(user_id).await {
+            tracing::warn!(%error, user_id, "Invite-Lounge-Meldung konnte nicht zugestellt werden");
         }
+    }
+
+    async fn handle_turn(
+        &self,
+        event: &LoungeMessage,
+        context: &[LoungeMessage],
+        now: i64,
+    ) -> Result<Option<u64>, String> {
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
-        let kind = request_kind(&event.content, bot_id);
-        if is_offer(&event.content) {
+        if !self.accepts(event, bot_id, now).await? {
             return Ok(None);
         }
-        if kind.is_none() && friend_code(&event.content).is_none() {
-            return self.record_check_in_answer(&event, bot_id).await;
+        let user_id = event.author_id;
+        let lock = self.user_lock(user_id);
+        let _guard = lock.lock().await;
+        let previous = self.store.load(user_id).await?;
+        if previous
+            .as_ref()
+            .is_some_and(|state| event.message_id <= state.last_seen)
+        {
+            return Ok(None);
         }
+        if self.store.opted_out(user_id).await {
+            tracing::info!(
+                message_id = event.message_id,
+                "Invite-Lounge überspringt Nachricht nach Datenschutz-Opt-out"
+            );
+            return Ok(None);
+        }
+        let facts = self.member_facts(event, previous.as_ref()).await;
+        let member = member_state(previous.as_ref(), &facts);
+        let Some(turn) = build_turn(event, context, bot_id, member) else {
+            return Ok(None);
+        };
+        let decision = match self.decide(event, turn).await {
+            TurnOutcome::Failed => return Ok(None),
+            TurnOutcome::Silent => None,
+            TurnOutcome::Decided(decision) => Some(decision),
+        };
+        tracing::info!(
+            user_id,
+            message_id = event.message_id,
+            intent = decision
+                .as_ref()
+                .map_or("none", |decision| decision.intent.as_str()),
+            action = decision
+                .as_ref()
+                .map_or("silent", |decision| decision.action.as_str()),
+            "Invite-Lounge-Entscheidung"
+        );
+        self.store_turn(event, decision.as_ref(), &facts, now)
+            .await
+            .map(|stored| stored.then_some(user_id))
+    }
+
+    async fn store_turn(
+        &self,
+        event: &LoungeMessage,
+        decision: Option<&InviteTurnDecision>,
+        facts: &MemberFacts,
+        now: i64,
+    ) -> Result<bool, String> {
         loop {
             let previous = self.store.load(event.author_id).await?;
-            let mut next = previous.clone().unwrap_or_default();
-            if event.message_id <= next.last_seen {
-                return Ok(None);
-            }
-            let code = friend_code(&event.content);
-            if previous.is_none() {
-                next.last_hint_at = self.store.last_hint_at(event.author_id).await?;
-            }
-            if code.is_none() && next.friend_code.is_none() && kind == Some(RequestKind::Direct) {
-                next.friend_code = self.store.known_code(event.author_id).await?;
-            }
-            let hint_before = (next.hint_sent, next.last_hint_at);
-            let mut wants_hint = update_state(
-                &mut next,
-                &event,
-                kind,
-                code,
-                existing_hint.unwrap_or(false),
-                now,
-                (self.clock_millis)(),
-            );
-            if wants_hint
-                && existing_hint.is_none()
-                && self
-                    .has_hint(event.channel_id, event.message_id, bot_id)
-                    .await?
+            if previous
+                .as_ref()
+                .is_some_and(|state| event.message_id <= state.last_seen)
             {
-                wants_hint = false;
+                return Ok(false);
             }
+            let mut next = previous.clone().unwrap_or_default();
+            let applied = apply_turn(&mut next, event, decision, facts, now);
             if !self
                 .store
                 .compare_exchange(event.author_id, previous.as_ref(), &next)
@@ -540,20 +525,103 @@ impl InviteLoungeWatcher {
             {
                 continue;
             }
-            if wants_hint
-                && is_fresh(
-                    event.created_at,
-                    now.max((self.clock_millis)() / 1000),
-                    REQUEST_WINDOW_SECONDS,
-                )
-            {
-                let delivered = self.send_brain_hint(&event).await?;
-                if !delivered {
-                    self.release_hint(event.author_id, &next, hint_before)
-                        .await?;
-                }
+            if let (Some(decision), false) = (decision, applied) {
+                tracing::info!(
+                    user_id = event.author_id,
+                    message_id = event.message_id,
+                    action = decision.action.as_str(),
+                    "Invite-Lounge: Entscheidung passt nicht mehr zum Zustand, bleibt still"
+                );
             }
-            return Ok(Some(event.author_id));
+            return Ok(true);
+        }
+    }
+
+    async fn accepts(&self, event: &LoungeMessage, bot_id: u64, now: i64) -> Result<bool, String> {
+        if !self.watches(event) || event.author_id == bot_id || event.content.trim().is_empty() {
+            return Ok(false);
+        }
+        if !is_fresh(event.created_at, now, REQUEST_WINDOW_SECONDS) {
+            tracing::info!(
+                message_id = event.message_id,
+                "Invite-Lounge überspringt verspätete Nachricht"
+            );
+            return Ok(false);
+        }
+        self.allows_actions(event.created_at).await
+    }
+
+    fn user_lock(&self, user_id: u64) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|id, lock| *id == user_id || Arc::strong_count(lock) > 1);
+        locks.entry(user_id).or_default().clone()
+    }
+
+    async fn member_facts(
+        &self,
+        event: &LoungeMessage,
+        state: Option<&LoungeState>,
+    ) -> MemberFacts {
+        let stored = state.and_then(|state| state.friend_code.clone());
+        let known_code = match stored {
+            Some(code) => Some(code),
+            None => self
+                .store
+                .known_code(event.author_id)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, user_id = event.author_id, "Invite-Lounge: verknüpfter Steam-Account nicht lesbar");
+                    None
+                }),
+        };
+        let mut facts = MemberFacts {
+            message_code: friend_code(&event.content),
+            known_code,
+            invited: false,
+        };
+        facts.invited = self.invited(facts.code().as_deref()).await;
+        facts
+    }
+
+    async fn invited(&self, code: Option<&str>) -> bool {
+        let Some(code) = code else {
+            return false;
+        };
+        match self.store.steam_progress(code, 0).await {
+            Ok(progress) => progress.invited,
+            Err(error) => {
+                tracing::warn!(%error, "Invite-Lounge: Einladungsstand nicht lesbar");
+                false
+            }
+        }
+    }
+
+    async fn decide(&self, event: &LoungeMessage, turn: InviteTurn) -> TurnOutcome {
+        let task = dl_brain::DiscordConversation::InviteTurn { turn: turn.clone() };
+        match self.converse(event.author_id, event.channel_id, task).await {
+            Some(ConversationReply::Decided { decision }) if decision.fits(&turn) => {
+                TurnOutcome::Decided(decision)
+            }
+            Some(ConversationReply::Decided { decision }) => {
+                tracing::warn!(
+                    message_id = event.message_id,
+                    action = decision.action.as_str(),
+                    "Invite-Lounge: Entscheidung passt nicht zum Stand"
+                );
+                TurnOutcome::Silent
+            }
+            Some(ConversationReply::Silent) => TurnOutcome::Silent,
+            Some(_) => {
+                tracing::warn!(
+                    message_id = event.message_id,
+                    "Invite-Lounge: unerwartete Brain-Antwort auf die Nachricht"
+                );
+                TurnOutcome::Failed
+            }
+            None => TurnOutcome::Failed,
         }
     }
 
@@ -565,85 +633,10 @@ impl InviteLoungeWatcher {
             .is_some_and(|since| created_at >= since))
     }
 
-    async fn record_check_in_answer(
-        &self,
-        event: &LoungeMessage,
-        bot_id: u64,
-    ) -> Result<Option<u64>, String> {
-        let Some(state) = self.store.load(event.author_id).await? else {
-            return Ok(None);
-        };
-        if !check_in_open(&state, event, bot_id) {
-            return Ok(None);
-        }
-        let Some(answer) = answer_text(&event.content) else {
-            return Ok(None);
-        };
-        let Some(outcome) = self.judge_check_in(event).await else {
-            return Ok(None);
-        };
-        let invited = self.already_invited(&state).await;
-        loop {
-            let Some(previous) = self.store.load(event.author_id).await? else {
-                return Ok(None);
-            };
-            if !check_in_open(&previous, event, bot_id) {
-                return Ok(None);
-            }
-            let mut next = previous.clone();
-            if apply_check_in(&mut next, event, outcome) {
-                queue_answer(
-                    &mut next,
-                    event.message_id,
-                    outcome,
-                    answer.clone(),
-                    invited,
-                );
-            }
-            if !self
-                .store
-                .compare_exchange(event.author_id, Some(&previous), &next)
-                .await?
-            {
-                continue;
-            }
-            return Ok(Some(event.author_id));
-        }
-    }
-
-    async fn judge_check_in(
-        &self,
-        event: &LoungeMessage,
-    ) -> Option<dl_brain::InviteCheckInOutcome> {
-        let task = dl_brain::DiscordConversation::InviteCheckIn {
-            message: event.content.clone(),
-        };
-        match self
-            .converse(event.author_id, event.channel_id, task)
-            .await?
-        {
-            dl_brain::ConversationReply::Judged { outcome } => Some(outcome),
-            _ => None,
-        }
-    }
-
     async fn queue_step_notice(&self, state: &mut LoungeState, notice: Option<Notice>) {
         if notice.is_some() {
-            let invited = self.already_invited(state).await;
+            let invited = self.invited(state.friend_code.as_deref()).await;
             queue_notice(state, notice, invited);
-        }
-    }
-
-    async fn already_invited(&self, state: &LoungeState) -> bool {
-        let Some(code) = state.friend_code.as_deref() else {
-            return false;
-        };
-        match self.store.steam_progress(code, 0).await {
-            Ok(progress) => progress.invited,
-            Err(error) => {
-                tracing::warn!(%error, "Invite-Lounge: Einladungsstand für die Meldung nicht lesbar");
-                false
-            }
         }
     }
 
@@ -652,7 +645,7 @@ impl InviteLoungeWatcher {
         user_id: u64,
         channel_id: u64,
         task: dl_brain::DiscordConversation,
-    ) -> Option<dl_brain::ConversationReply> {
+    ) -> Option<ConversationReply> {
         let conversation = dl_brain::DiscordConversationRequest {
             user_id,
             channel_id,
@@ -666,6 +659,57 @@ impl InviteLoungeWatcher {
                 tracing::warn!(%error, user_id, "Invite-Lounge: Brain-Antwort fehlgeschlagen");
                 None
             }
+        }
+    }
+
+    async fn catch_up(&self, now: i64) -> Result<(), String> {
+        let Some(bot_id) = self.port.bot_id() else {
+            return Err("Die Discord-ID des Bots fehlt".into());
+        };
+        let mut history = self
+            .recent_history(CHECK_IN_CHANNEL_ID, now - CATCH_UP_SECONDS)
+            .await?;
+        for message in &mut history {
+            message.guild_id = Some(self.guild_id);
+        }
+        history.sort_by_key(|message| message.message_id);
+        for message in unanswered(&history, bot_id) {
+            if let Some(user_id) = self.handle_turn(&message, &history, now).await? {
+                self.follow_up(user_id, now).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn recent_history(
+        &self,
+        channel_id: u64,
+        since: i64,
+    ) -> Result<Vec<LoungeMessage>, String> {
+        let mut before = None;
+        let mut history = Vec::new();
+        loop {
+            let page = self.port.history(channel_id, before).await?;
+            if page.is_empty() {
+                return Ok(history);
+            }
+            let oldest = page
+                .iter()
+                .map(|message| message.message_id)
+                .min()
+                .ok_or("Leere Verlaufsseite")?;
+            if before.is_some_and(|id| oldest >= id) {
+                return Err("Der Verlauf liefert keine ältere Seite".into());
+            }
+            let reached_start = page.iter().any(|message| message.created_at < since);
+            history.extend(
+                page.into_iter()
+                    .filter(|message| message.created_at >= since),
+            );
+            if reached_start {
+                return Ok(history);
+            }
+            before = Some(oldest);
         }
     }
 
@@ -716,6 +760,10 @@ impl InviteLoungeWatcher {
                 }
             }
         }
+        let Some(update) = entry.update.current() else {
+            tracing::warn!(user_id, key = %entry.key, "Invite-Lounge: veralteter Ausgangseintrag verworfen");
+            return NoticeResult::Dropped;
+        };
         let target = entry
             .channel_id
             .map_or(dl_brain::NoticeTarget::DirectMessage, |channel_id| {
@@ -727,18 +775,18 @@ impl InviteLoungeWatcher {
         let task = dl_brain::DiscordConversation::InviteNotice {
             notice: dl_brain::InviteNotice {
                 idempotency_key: entry.key.clone(),
-                update: entry.update,
+                update,
                 target,
                 already_invited: entry.already_invited,
                 answer: entry.answer.clone(),
             },
         };
-        let channel_id = entry.channel_id.unwrap_or(INVITE_LOUNGE_CHANNEL_ID);
+        let channel_id = entry.channel_id.unwrap_or(CHECK_IN_CHANNEL_ID);
         match self.converse(user_id, channel_id, task).await {
-            Some(dl_brain::ConversationReply::Delivered { message_id, .. }) => {
+            Some(ConversationReply::Delivered { message_id, .. }) => {
                 NoticeResult::Delivered(message_id)
             }
-            Some(dl_brain::ConversationReply::Rejected) => NoticeResult::Dropped,
+            Some(ConversationReply::Rejected) => NoticeResult::Dropped,
             _ => NoticeResult::Retry,
         }
     }
@@ -811,87 +859,6 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn send_brain_hint(&self, event: &LoungeMessage) -> Result<bool, String> {
-        let request = dl_brain::DiscordConversationRequest {
-            user_id: event.author_id,
-            channel_id: event.channel_id,
-            guild_id: Some(self.guild_id),
-            task: dl_brain::DiscordConversation::InviteLounge {
-                message: event.content.clone(),
-            },
-            images: dl_brain::AttachedImages::default(),
-        };
-        match self.brain.converse(&request).await {
-            Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
-                match crate::answer_support::discord_content(&text, "invite_lounge") {
-                    Some(content) => self
-                        .port
-                        .reply_text(event.channel_id, event.message_id, &content)
-                        .await
-                        .map(|_| true),
-                    None => Ok(false),
-                }
-            }
-            Ok(_) => Ok(false),
-            Err(error) => {
-                tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Brain-Hinweis fehlgeschlagen");
-                Ok(false)
-            }
-        }
-    }
-
-    async fn release_hint(
-        &self,
-        user_id: u64,
-        claimed: &LoungeState,
-        (hint_sent, last_hint_at): (bool, Option<i64>),
-    ) -> Result<(), String> {
-        let mut released = claimed.clone();
-        released.hint_sent = hint_sent;
-        released.last_hint_at = last_hint_at;
-        if !self
-            .store
-            .compare_exchange(user_id, Some(claimed), &released)
-            .await?
-        {
-            tracing::warn!(
-                user_id,
-                "Invite-Lounge: Hinweis-Anspruch nach Brain-Ausfall nicht freigegeben"
-            );
-        }
-        Ok(())
-    }
-
-    async fn has_hint(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        bot_id: u64,
-    ) -> Result<bool, String> {
-        let mut before = None;
-        loop {
-            let page = self.port.history(channel_id, before).await?;
-            if page.is_empty() {
-                return Ok(false);
-            }
-            if hint_references(&page, bot_id).contains(&message_id) {
-                return Ok(true);
-            }
-            let oldest = page
-                .iter()
-                .map(|message| message.message_id)
-                .min()
-                .ok_or("Leere Verlaufsseite")?;
-            if oldest <= message_id {
-                return Ok(false);
-            }
-            if before.is_some_and(|id| oldest >= id) {
-                return Err("Der Verlauf liefert keine ältere Seite".into());
-            }
-            before = Some(oldest);
-        }
-    }
-
     async fn dispatch_due(&self, user_id: u64, now: i64) -> Result<(), String> {
         let Some(previous) = self.store.load(user_id).await? else {
             return Ok(());
@@ -918,7 +885,7 @@ impl InviteLoungeWatcher {
             return self.follow_steam(user_id, &previous, wait, now).await;
         }
         let check_in_now = check_in_due(request, &previous.status, now);
-        if !check_in_now && !is_due(request, &previous.status, now) {
+        if !check_in_now && !is_due(request, &previous.status) {
             return Ok(());
         }
         if self.someone_on_it(user_id, &previous, request).await? {
@@ -1212,12 +1179,7 @@ impl InviteLoungeWatcher {
     #[cfg(test)]
     async fn poll_due(&self, now: i64) -> Result<(), String> {
         for user_id in self.due_users().await? {
-            if let Err(err) = self.dispatch_due(user_id, now).await {
-                tracing::warn!(%err, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
-            }
-            if let Err(err) = self.deliver_outbox(user_id).await {
-                tracing::warn!(%err, user_id, "Invite-Lounge-Meldung konnte nicht zugestellt werden");
-            }
+            self.follow_up(user_id, now).await;
         }
         Ok(())
     }
@@ -1228,97 +1190,6 @@ impl InviteLoungeWatcher {
         users.sort_unstable();
         users.dedup();
         Ok(users)
-    }
-
-    #[cfg(test)]
-    async fn backfill(&self, now: i64) -> Result<(), String> {
-        self.record_history(now).await?;
-        self.poll_due(now).await
-    }
-
-    async fn record_history(&self, now: i64) -> Result<(), String> {
-        if self.store.backfill_done().await? {
-            return Ok(());
-        }
-        if self.port.bot_id().is_none() {
-            return Err("Die Discord-ID des Bots fehlt".into());
-        }
-        let since = now - NEWCOMER_MAX_JOIN_SECONDS;
-        let mut before = None;
-        let mut history = Vec::new();
-        loop {
-            let page = self.port.history(INVITE_LOUNGE_CHANNEL_ID, before).await?;
-            if page.is_empty() {
-                break;
-            }
-            let oldest_id = page
-                .iter()
-                .map(|message| message.message_id)
-                .min()
-                .ok_or("Leere Verlaufsseite")?;
-            if before.is_some_and(|id| oldest_id >= id) {
-                return Err("Der Verlauf liefert keine ältere Seite".into());
-            }
-            let reached_start = page.iter().any(|message| message.created_at < since);
-            history.extend(
-                page.into_iter()
-                    .filter(|message| message.created_at >= since),
-            );
-            if reached_start {
-                break;
-            }
-            before = Some(oldest_id);
-        }
-        let hints = hint_references(
-            &history,
-            self.port.bot_id().ok_or("Die Discord-ID des Bots fehlt")?,
-        );
-        history.sort_by_key(|message| message.message_id);
-        for message in history {
-            if message.is_bot
-                || message.author_id == self.port.bot_id().unwrap_or(0)
-                || is_offer(&message.content)
-            {
-                continue;
-            }
-            let code = friend_code(&message.content);
-            if code.is_none()
-                && request_kind(&message.content, self.port.bot_id().unwrap_or(0)).is_none()
-            {
-                continue;
-            }
-            loop {
-                let previous = self.store.load(message.author_id).await?;
-                let mut observed = previous.clone().unwrap_or_default();
-                if previous.is_none() {
-                    observed.last_hint_at = self.store.last_hint_at(message.author_id).await?;
-                }
-                if message.message_id <= observed.last_seen {
-                    break;
-                }
-                if observed.request.is_none() {
-                    if let Some(code) = code.as_ref() {
-                        observed.friend_code = Some(code.clone());
-                    }
-                }
-                if hints.contains(&message.message_id) {
-                    observed.last_hint_at = Some(
-                        observed
-                            .last_hint_at
-                            .unwrap_or(message.created_at)
-                            .max(message.created_at),
-                    );
-                }
-                if self
-                    .store
-                    .compare_exchange(message.author_id, previous.as_ref(), &observed)
-                    .await?
-                {
-                    break;
-                }
-            }
-        }
-        self.store.mark_backfill_done().await
     }
 }
 
@@ -1336,19 +1207,19 @@ pub fn spawn(
     let mut messages = dispatcher.subscribe_messages();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(15));
-        let mut history_ready = false;
         let mut actions_since_ready = false;
-        let mut history_tasks = tokio::task::JoinSet::new();
+        let mut caught_up = false;
+        let mut catch_ups = tokio::task::JoinSet::new();
+        let mut turns = tokio::task::JoinSet::new();
         let mut dispatches = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 event = messages.recv() => match event {
                     Ok(event) => {
                         let message = LoungeMessage::from(event);
-                        match watcher.record_message(message, chrono::Utc::now().timestamp(), None).await {
-                            Ok(Some(user_id)) => spawn_dispatch(&mut dispatches, watcher.clone(), user_id),
-                            Ok(None) => {},
-                            Err(err) => tracing::warn!(%err, "Invite-Lounge-Nachricht konnte nicht verarbeitet werden"),
+                        if watcher.watches(&message) {
+                            let reader = watcher.clone();
+                            turns.spawn(async move { reader.serve(message).await });
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1364,21 +1235,24 @@ pub fn spawn(
                             Err(err) => tracing::warn!(%err, "Invite-Lounge-Startzeit konnte nicht gespeichert werden"),
                         }
                     }
-                    if !history_ready && history_tasks.is_empty() {
+                    if actions_since_ready && !caught_up && catch_ups.is_empty() {
                         let reader = watcher.clone();
-                        history_tasks.spawn(async move { reader.record_history(now).await });
+                        catch_ups.spawn(async move { reader.catch_up(now).await });
                     }
                     match watcher.due_users().await {
                         Ok(users) => for user_id in users { spawn_dispatch(&mut dispatches, watcher.clone(), user_id); },
                         Err(err) => tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden"),
                     }
                 }
-                Some(result) = history_tasks.join_next(), if !history_tasks.is_empty() => {
+                Some(result) = catch_ups.join_next(), if !catch_ups.is_empty() => {
                     match result {
-                        Ok(Ok(())) => history_ready = true,
-                        Ok(Err(err)) => tracing::warn!(%err, "Invite-Lounge-Verlauf konnte nicht verarbeitet werden"),
-                        Err(err) => tracing::error!(%err, "Invite-Lounge-Verlaufstask ist abgebrochen"),
+                        Ok(Ok(())) => caught_up = true,
+                        Ok(Err(err)) => tracing::warn!(%err, "Invite-Lounge-Rückblick konnte nicht verarbeitet werden"),
+                        Err(err) => tracing::error!(%err, "Invite-Lounge-Rückblick ist abgebrochen"),
                     }
+                }
+                Some(result) = turns.join_next(), if !turns.is_empty() => {
+                    if let Err(err) = result { tracing::error!(%err, "Invite-Lounge-Nachrichtentask ist abgebrochen"); }
                 }
                 Some(result) = dispatches.join_next(), if !dispatches.is_empty() => {
                     if let Err(err) = result { tracing::error!(%err, "Invite-Lounge-Versandtask ist abgebrochen"); }
@@ -1394,130 +1268,291 @@ fn spawn_dispatch(
     user_id: u64,
 ) {
     dispatches.spawn(async move {
-        if let Err(err) = watcher.dispatch_due(user_id, (watcher.clock_millis)() / 1000).await {
-            tracing::warn!(%err, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
-        }
-        if let Err(err) = watcher.deliver_outbox(user_id).await {
-            tracing::warn!(%err, user_id, "Invite-Lounge-Meldung konnte nicht zugestellt werden");
-        }
+        let now = (watcher.clock_millis)() / 1000;
+        watcher.follow_up(user_id, now).await;
     });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestKind {
-    Direct,
-    Room,
+fn build_turn(
+    event: &LoungeMessage,
+    context: &[LoungeMessage],
+    bot_id: u64,
+    member: InviteMemberState,
+) -> Option<InviteTurn> {
+    let message = turn_text(&event.content, event.author_id, bot_id, MAX_TASK_TEXT_CHARS)?;
+    let line = |message: &LoungeMessage| {
+        turn_text(
+            &message.content,
+            event.author_id,
+            bot_id,
+            MAX_CHAT_LINE_CHARS,
+        )
+        .map(|text| InviteChatLine {
+            speaker: speaker(message, event.author_id, bot_id),
+            text,
+        })
+    };
+    let mut earlier: Vec<&LoungeMessage> = context
+        .iter()
+        .filter(|message| message.message_id < event.message_id)
+        .collect();
+    earlier.sort_by_key(|message| message.message_id);
+    earlier.dedup_by_key(|message| message.message_id);
+    let mut recent: Vec<InviteChatLine> = earlier.into_iter().filter_map(line).collect();
+    recent.drain(..recent.len().saturating_sub(dl_brain::MAX_TURN_RECENT_LINES));
+    let reply_to = event
+        .reply_message_id
+        .and_then(|id| context.iter().find(|message| message.message_id == id))
+        .and_then(line);
+    Some(InviteTurn {
+        message,
+        reply_to,
+        recent,
+        member,
+    })
 }
 
-fn update_state(
+fn speaker(message: &LoungeMessage, member_id: u64, bot_id: u64) -> InviteSpeaker {
+    if message.author_id == member_id {
+        InviteSpeaker::Member
+    } else if message.author_id == bot_id {
+        InviteSpeaker::Bot
+    } else {
+        InviteSpeaker::Other
+    }
+}
+
+fn turn_text(content: &str, member_id: u64, bot_id: u64, max_chars: usize) -> Option<String> {
+    let text = match MENTION_RE.as_ref() {
+        Some(regex) => regex
+            .replace_all(content, |caps: &Captures| {
+                mention_label(&caps[1], &caps[2], member_id, bot_id)
+            })
+            .into_owned(),
+        None => content.to_string(),
+    };
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.chars().take(max_chars).collect())
+}
+
+fn mention_label(kind: &str, id: &str, member_id: u64, bot_id: u64) -> &'static str {
+    let id = id.parse::<u64>().ok();
+    match kind {
+        "@&" => "@Rolle",
+        "#" => "#kanal",
+        _ if id == Some(bot_id) => "@Bot",
+        _ if id == Some(member_id) => "@Mitglied",
+        _ => "@jemand",
+    }
+}
+
+fn member_state(state: Option<&LoungeState>, facts: &MemberFacts) -> InviteMemberState {
+    InviteMemberState {
+        phase: state.map_or(InviteRequestPhase::None, request_phase),
+        has_friend_code: facts.known_code.is_some(),
+        code_in_message: facts.message_code.is_some(),
+        already_invited: facts.invited,
+        last_update: state
+            .and_then(|state| state.status.notices.last())
+            .map(|notice| notice.update()),
+    }
+}
+
+fn request_phase(state: &LoungeState) -> InviteRequestPhase {
+    let Some(request) = state.request.as_ref() else {
+        return InviteRequestPhase::None;
+    };
+    match request.phase {
+        Phase::WaitingForCode => InviteRequestPhase::WaitingForCode,
+        Phase::Dispatching => InviteRequestPhase::InProgress,
+        Phase::Attempted | Phase::Expired => InviteRequestPhase::Closed,
+        Phase::Pending
+            if request.direct || state.status.invite_now || state.status.wait.is_some() =>
+        {
+            InviteRequestPhase::InProgress
+        }
+        Phase::Pending if state.status.asked() => InviteRequestPhase::CheckInAsked,
+        Phase::Pending => InviteRequestPhase::WaitingForCommunity,
+    }
+}
+
+fn apply_turn(
     state: &mut LoungeState,
     event: &LoungeMessage,
-    kind: Option<RequestKind>,
-    code: Option<String>,
-    existing_hint: bool,
+    decision: Option<&InviteTurnDecision>,
+    facts: &MemberFacts,
     now: i64,
-    now_millis: i64,
 ) -> bool {
     state.last_seen = event.message_id;
-    let request_before = state.request.as_ref().map(|request| request.message_id);
-    let has_message_code = code.is_some();
-    let code_changed = code
+    let Some(decision) = decision else {
+        return false;
+    };
+    let code = facts.code();
+    let ready = !busy(state);
+    let invited = member_state(Some(state), facts).invited();
+    let applied = match decision.action {
+        InviteTurnAction::Silent => false,
+        InviteTurnAction::AskFriendCode => ask_friend_code(state, event, code.is_none()),
+        InviteTurnAction::WaitForCommunity => {
+            ready && !invited && wait_for_community(state, event, code)
+        }
+        InviteTurnAction::AskAlreadyInvited => {
+            ready && ask_already_invited(state, event, code.filter(|_| !invited), now)
+        }
+        InviteTurnAction::Invite => ready && !invited && invite_now(state, event, code),
+        InviteTurnAction::Close => ready && close_request(state, decision.text.is_none(), invited),
+        InviteTurnAction::Help => true,
+    };
+    if let (true, Some(text)) = (applied, decision.text.clone()) {
+        state.outbox.push(OutboxEntry::reply(
+            event.message_id,
+            event.channel_id,
+            text,
+            facts.invited,
+        ));
+    }
+    applied
+}
+
+fn busy(state: &LoungeState) -> bool {
+    state.request.as_ref().is_some_and(|request| {
+        request.phase == Phase::Dispatching
+            || (request.phase == Phase::Pending && state.status.wait.is_some())
+    })
+}
+
+fn pending(state: &LoungeState) -> bool {
+    state
+        .request
         .as_ref()
-        .is_some_and(|code| state.friend_code.as_ref() != Some(code));
-    if let Some(code) = code {
+        .is_some_and(|request| request.phase == Phase::Pending)
+}
+
+fn start_request(state: &mut LoungeState, event: &LoungeMessage, phase: Phase, direct: bool) {
+    state.request = Some(Request {
+        message_id: event.message_id,
+        created_at: event.created_at,
+        direct,
+        phase,
+    });
+    state.status = RequestStatus::for_channel(event.channel_id);
+}
+
+fn ask_friend_code(state: &mut LoungeState, event: &LoungeMessage, without_code: bool) -> bool {
+    if !without_code {
+        return false;
+    }
+    let closed = state
+        .request
+        .as_ref()
+        .is_none_or(|request| matches!(request.phase, Phase::Attempted | Phase::Expired));
+    if closed {
+        start_request(state, event, Phase::WaitingForCode, false);
+    }
+    true
+}
+
+fn wait_for_community(
+    state: &mut LoungeState,
+    event: &LoungeMessage,
+    code: Option<String>,
+) -> bool {
+    let Some(code) = code else {
+        return false;
+    };
+    state.friend_code = Some(code);
+    if !pending(state) {
+        start_request(state, event, Phase::Pending, false);
+    }
+    true
+}
+
+fn ask_already_invited(
+    state: &mut LoungeState,
+    event: &LoungeMessage,
+    code: Option<String>,
+    now: i64,
+) -> bool {
+    if !pending(state) {
+        let Some(code) = code else {
+            return true;
+        };
         state.friend_code = Some(code);
+        start_request(state, event, Phase::Pending, false);
     }
-    if let Some(kind) = kind {
-        let direct = kind == RequestKind::Direct;
-        let arrived_during_dispatch = state
-            .dispatch_started_at_millis
-            .is_some_and(|started| event.created_at_millis >= started)
-            && state
-                .last_dispatch_finished_at_millis
-                .is_some_and(|finished| event.created_at_millis <= finished);
-        let replace = state.request.as_ref().is_none_or(|request| {
-            let active_dispatch = request.phase == Phase::Dispatching
-                && state
-                    .dispatch_started_at_millis
-                    .is_some_and(|started| now_millis.saturating_sub(started) < 120_000);
-            !active_dispatch
-                && !arrived_during_dispatch
-                && (direct || request.phase == Phase::WaitingForCode)
-        });
-        if replace {
-            let continuing_direct = state
-                .request
-                .as_ref()
-                .is_some_and(|request| request.direct && request.phase == Phase::WaitingForCode);
-            state.request = Some(Request {
-                message_id: event.message_id,
-                created_at: event.created_at,
-                direct: direct || continuing_direct,
-                phase: if has_message_code
-                    || ((direct || continuing_direct) && state.friend_code.is_some())
-                {
-                    Phase::Pending
-                } else {
-                    Phase::WaitingForCode
-                },
-            });
-            // Eine wiederholte Bitte ohne Code erhält keinen zweiten Hinweis.
-            if !continuing_direct && state.friend_code.is_some() {
-                state.hint_sent = false;
-            }
-        }
-    } else if let Some(request) = state
-        .request
-        .as_mut()
-        .filter(|request| request.phase == Phase::WaitingForCode)
-    {
-        if state.friend_code.is_some() {
-            request.phase = Phase::Pending;
-            request.message_id = event.message_id;
-            request.created_at = event.created_at;
-        }
+    state.status.check_in_at = Some(now);
+    state.status.claim(Some(Notice::CheckIn));
+    true
+}
+
+fn invite_now(state: &mut LoungeState, event: &LoungeMessage, code: Option<String>) -> bool {
+    let Some(code) = code else {
+        return false;
+    };
+    state.friend_code = Some(code);
+    if pending(state) {
+        state.status.invite_now = true;
+    } else {
+        start_request(state, event, Phase::Pending, true);
     }
-    if code_changed {
-        if let Some(request) = state
-            .request
-            .as_mut()
-            .filter(|request| request.phase == Phase::Pending && !request.direct)
-        {
-            request.message_id = event.message_id;
-            request.created_at = event.created_at;
-        }
-    }
-    if state.request.as_ref().map(|request| request.message_id) != request_before {
-        state.status = RequestStatus::for_channel(event.channel_id);
-    }
-    if existing_hint {
-        state.hint_sent = true;
-    }
-    let needs_hint = state
+    true
+}
+
+fn close_request(state: &mut LoungeState, notify: bool, invited: bool) -> bool {
+    let open = state
         .request
         .as_ref()
-        .is_some_and(|request| request.phase == Phase::WaitingForCode)
-        && !state.hint_sent
-        && state
-            .last_hint_at
-            .is_none_or(|sent| now.saturating_sub(sent) >= COOLDOWN_SECONDS);
-    if needs_hint {
-        state.hint_sent = true;
-        state.last_hint_at = Some(now);
+        .is_some_and(|request| matches!(request.phase, Phase::Pending | Phase::WaitingForCode));
+    let Some(message_id) = state
+        .request
+        .as_ref()
+        .filter(|_| open)
+        .map(|request| request.message_id)
+    else {
+        return true;
+    };
+    state
+        .outbox
+        .retain(|entry| entry.request_message_id != message_id);
+    let notice = apply_step(state, Step::Finish(Some(Notice::Confirmed)));
+    if notify {
+        queue_notice(state, notice, invited);
     }
-    needs_hint
+    true
+}
+
+fn unanswered(history: &[LoungeMessage], bot_id: u64) -> Vec<LoungeMessage> {
+    let mut latest: BTreeMap<u64, &LoungeMessage> = BTreeMap::new();
+    for message in history
+        .iter()
+        .filter(|message| !message.is_bot && message.author_id != bot_id)
+    {
+        latest.insert(message.author_id, message);
+    }
+    let mut open: Vec<LoungeMessage> = latest
+        .into_values()
+        .filter(|message| !history.iter().any(|later| answers(later, message)))
+        .cloned()
+        .collect();
+    open.sort_by_key(|message| message.message_id);
+    open
+}
+
+fn answers(later: &LoungeMessage, message: &LoungeMessage) -> bool {
+    later.message_id > message.message_id
+        && later.author_id != message.author_id
+        && (later.reply_message_id == Some(message.message_id)
+            || mentions_user(&later.content, message.author_id))
 }
 
 fn is_fresh(created_at: i64, now: i64, max_age: i64) -> bool {
     (0..=max_age).contains(&now.saturating_sub(created_at))
 }
 
-fn is_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
+fn is_due(request: &Request, status: &RequestStatus) -> bool {
     request.phase == Phase::Pending
         && status.wait.is_none()
-        && (request.direct
-            || status.invite_now
-            || now.saturating_sub(request.created_at) >= ROOM_WAIT_SECONDS)
+        && (request.direct || status.invite_now)
 }
 
 fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
@@ -1527,7 +1562,7 @@ fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
         && status.wait.is_none()
         && !status.invite_now
         && status.check_in_at.is_none()
-        && check_in_window(now.saturating_sub(request.created_at), ROOM_WAIT_SECONDS)
+        && check_in_age(now.saturating_sub(request.created_at))
 }
 
 fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
@@ -1545,50 +1580,12 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
     state.status.claim(notice)
 }
 
-fn check_in_open(state: &LoungeState, event: &LoungeMessage, bot_id: u64) -> bool {
-    state.request.as_ref().is_some_and(|request| {
-        request.phase == Phase::Pending
-            && event.message_id > state.last_seen
-            && state.status.asked()
-            && state.status.wait.is_none()
-            && !state.status.invite_now
-            && state.status.channel_id == Some(event.channel_id)
-            && (replies_to_check_in(event, &state.status, request.message_id)
-                || mentions_user(&event.content, bot_id))
-            && state
-                .status
-                .check_in_at
-                .is_some_and(|asked| event.created_at >= asked)
-    })
-}
-
 fn queue_notice(state: &mut LoungeState, notice: Option<Notice>, invited: bool) {
     let (Some(notice), Some(request)) = (notice, state.request.as_ref()) else {
         return;
     };
     let invited = invited || notice == Notice::AlreadyInvited;
     let entry = OutboxEntry::notice(request.message_id, state.status.channel_id, notice, invited);
-    state.outbox.push(entry);
-}
-
-fn queue_answer(
-    state: &mut LoungeState,
-    answer_message_id: u64,
-    outcome: dl_brain::InviteCheckInOutcome,
-    answer: String,
-    invited: bool,
-) {
-    let Some(request) = state.request.as_ref() else {
-        return;
-    };
-    let entry = OutboxEntry::answer(
-        request.message_id,
-        state.status.channel_id,
-        answer_message_id,
-        outcome,
-        answer,
-        invited,
-    );
     state.outbox.push(entry);
 }
 
@@ -1621,33 +1618,6 @@ fn settle_notice(state: &mut LoungeState, position: usize, result: NoticeResult,
     }
 }
 
-fn answer_text(content: &str) -> Option<String> {
-    let trimmed = content.trim();
-    (!trimmed.is_empty()).then(|| trimmed.chars().take(DISCORD_ANSWER_CHARS).collect())
-}
-
-fn apply_check_in(
-    state: &mut LoungeState,
-    event: &LoungeMessage,
-    outcome: dl_brain::InviteCheckInOutcome,
-) -> bool {
-    state.last_seen = event.message_id;
-    let Some(request) = state.request.as_mut() else {
-        return false;
-    };
-    match outcome {
-        dl_brain::InviteCheckInOutcome::Arrived => {
-            request.phase = Phase::Attempted;
-            state.status.claim(Some(Notice::Confirmed)).is_some()
-        }
-        dl_brain::InviteCheckInOutcome::NotArrived => {
-            state.status.invite_now = true;
-            true
-        }
-        dl_brain::InviteCheckInOutcome::Unclear => true,
-    }
-}
-
 fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64, bot_id: u64) -> bool {
     message.message_id > request_id
         && message.author_id != user_id
@@ -1657,258 +1627,23 @@ fn answers_request(message: &LoungeMessage, request_id: u64, user_id: u64, bot_i
             || mentions_user(&message.content, user_id))
 }
 
-fn replies_to_check_in(event: &LoungeMessage, status: &RequestStatus, request_id: u64) -> bool {
-    event
-        .reply_message_id
-        .is_some_and(|reply| reply == request_id || Some(reply) == status.check_in_message_id)
-}
-
 fn mentions_user(content: &str, user_id: u64) -> bool {
     content.contains(&format!("<@{user_id}>")) || content.contains(&format!("<@!{user_id}>"))
 }
 
 fn friend_code(content: &str) -> Option<String> {
-    let without_urls = URL_RE.replace_all(content, " ");
+    let without_urls = match URL_RE.as_ref() {
+        Some(regex) => regex.replace_all(content, " ").into_owned(),
+        None => content.to_string(),
+    };
     FRIEND_CODE_RE
         .as_ref()?
         .find(&without_urls)
         .map(|found| found.as_str().to_string())
 }
 
-fn is_offer(content: &str) -> bool {
-    let folded = fold_german_umlauts(&content.to_lowercase());
-    let words: Vec<&str> = folded
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    words.contains(&"ich")
-        && words
-            .iter()
-            .any(|word| matches!(*word, "dich" | "euch" | "dir"))
-        && (words.iter().any(|word| {
-            word.starts_with("lad") || word.starts_with("einlad") || word.starts_with("invit")
-        }))
-}
-
-fn request_kind(content: &str, bot_id: u64) -> Option<RequestKind> {
-    if is_offer(content) {
-        return None;
-    }
-    let lower = content.to_lowercase();
-    let folded = fold_german_umlauts(&lower);
-    let words: Vec<&str> = folded
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    let invite = INVITE_TERM_RE
-        .as_ref()
-        .is_some_and(|regex| regex.is_match(&folded))
-        || words
-            .iter()
-            .any(|word| close_word(word, "einladen", 2) || close_word(word, "inviten", 1));
-    let asks = words.iter().any(|word| {
-        matches!(
-            *word,
-            "wie" | "benotige" | "brauche" | "krieg" | "kriege" | "mochte" | "will" | "suche"
-        )
-    });
-    let self_request = (asks && words.contains(&"ich"))
-        || words.iter().any(|word| {
-            matches!(*word, "mich" | "mcih" | "mir" | "uns" | "me")
-                || (word.starts_with('m') && word.len() >= 3 && close_word(word, "mich", 1))
-        });
-    let impersonal_request = IMPERSONAL_REQUEST_RE.is_match(&lower);
-    if !invite || !(self_request || impersonal_request) {
-        return None;
-    }
-    let room_address = words.iter().any(|word| {
-        matches!(
-            *word,
-            "jemand" | "wer" | "irgendwer" | "irgendjemand" | "einer" | "jmd"
-        )
-    });
-    let bot_mention =
-        content.contains(&format!("<@{bot_id}>")) || content.contains(&format!("<@!{bot_id}>"));
-    let direct_verb = words.iter().any(|word| {
-        ["kannst", "kannste", "konntest", "wurdest", "magst"]
-            .iter()
-            .any(|candidate| close_word(word, candidate, 1))
-    });
-    if bot_mention || (!room_address && (direct_verb || words.contains(&"du"))) {
-        Some(RequestKind::Direct)
-    } else if has_question_signal(&lower) || room_address || asks || impersonal_request {
-        Some(RequestKind::Room)
-    } else {
-        None
-    }
-}
-
-/// Kleine Tippfehler in Anrede und Einladungsverb werden ohne KI erkannt.
-fn close_word(word: &str, expected: &str, max_edits: usize) -> bool {
-    if word.len().abs_diff(expected.len()) > max_edits {
-        return false;
-    }
-    let expected: Vec<char> = expected.chars().collect();
-    let mut row: Vec<usize> = (0..=expected.len()).collect();
-    for (index, ch) in word.chars().enumerate() {
-        let mut diagonal = row[0];
-        row[0] = index + 1;
-        for (column, target) in expected.iter().enumerate() {
-            let old = row[column + 1];
-            row[column + 1] = (row[column] + 1)
-                .min(old + 1)
-                .min(diagonal + usize::from(ch != *target));
-            diagonal = old;
-        }
-    }
-    row[expected.len()] <= max_edits
-}
-
-fn hint_references(history: &[LoungeMessage], bot_id: u64) -> HashSet<u64> {
-    history
-        .iter()
-        .filter(|message| message.author_id == bot_id)
-        .filter_map(|message| message.reply_message_id)
-        .collect()
-}
-
-// Bisherige Hinweisentscheidung für bestehende Aufrufer und Regressionstests.
-// Versand und Zahlencode-Nachfrage nutzen die Regeln oben.
-pub fn should_reply_to_content(content: &str) -> bool {
-    is_invite_request(content) && !has_friend_code(content)
-}
-pub fn should_reply(content: &str, author_joined_at: Option<i64>, now: i64) -> bool {
-    is_newcomer(author_joined_at, now) && should_reply_to_content(content)
-}
-fn is_newcomer(joined_at: Option<i64>, now: i64) -> bool {
-    joined_at.is_some_and(|joined| now.saturating_sub(joined) < NEWCOMER_MAX_JOIN_SECONDS)
-}
-fn is_invite_request(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    let folded = fold_german_umlauts(&lower);
-    INVITE_TERM_RE
-        .as_ref()
-        .is_some_and(|regex| regex.is_match(&folded))
-        && has_question_signal(&lower)
-}
-fn has_question_signal(lower_content: &str) -> bool {
-    lower_content.contains('?')
-        || QUESTION_SIGNAL_RE
-            .as_ref()
-            .is_some_and(|regex| regex.is_match(lower_content))
-}
-fn has_friend_code(content: &str) -> bool {
-    FRIEND_CODE_RE
-        .as_ref()
-        .is_some_and(|regex| regex.is_match(content))
-        || STEAM_LINK_RE
-            .as_ref()
-            .is_some_and(|regex| regex.is_match(content))
-}
-fn fold_german_umlauts(value: &str) -> String {
-    value
-        .replace('ä', "a")
-        .replace('ö', "o")
-        .replace('ü', "u")
-        .replace('ß', "ss")
-}
 fn cooldown_key(user_id: u64) -> String {
     format!("user:{user_id}")
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nette_frage_ohne_code_triggert() {
-        assert!(should_reply_to_content(
-            "Hey, kann mich jemand bitte zu Deadlock inviten?"
-        ));
-    }
-
-    #[test]
-    fn frage_mit_neunstelligem_code_triggert_nicht() {
-        assert!(!should_reply_to_content(
-            "Mag mich jemand zum Playtest einladen? Mein Code ist 123456789"
-        ));
-    }
-
-    #[test]
-    fn trennbares_verb_einzuladen_triggert() {
-        assert!(should_reply_to_content(
-            "Hallöchen zusammen, bin neu hier und suche zum einen jemand der so freundlich wäre mich in Deadlock einzuladen und zum anderen bissl Anschluss zum Game"
-        ));
-    }
-
-    #[test]
-    fn getrenntes_laedt_mich_ein_triggert() {
-        assert!(should_reply_to_content("Wer lädt mich ein?"));
-        assert!(should_reply_to_content("Kann mich jemand mal einladen"));
-    }
-
-    #[test]
-    fn antwort_ohne_fragesignal_triggert_nicht() {
-        assert!(!should_reply_to_content("ich lad dich ein"));
-    }
-
-    #[test]
-    fn steam_link_zaehlt_als_code() {
-        assert!(!should_reply_to_content(
-            "Kann mich jemand inviten https://steamcommunity.com/id/example"
-        ));
-        assert!(!should_reply_to_content(
-            "Wer hat einen Invite fuer mich? s.team/p/abc-def"
-        ));
-    }
-
-    #[test]
-    fn veteran_mit_invite_frage_triggert_nicht() {
-        let now = 1_700_000_000;
-        let content = "Hast du schon eine Einladung bekommen? Ich kann dich gerne im Laufe des Tages einladen";
-
-        assert!(!should_reply(content, Some(now - 400 * 24 * 60 * 60), now));
-    }
-
-    #[test]
-    fn neuling_mit_invite_frage_triggert() {
-        let now = 1_700_000_000;
-        let content = "Hast du schon eine Einladung bekommen? Ich kann dich gerne im Laufe des Tages einladen";
-
-        assert!(should_reply(content, Some(now - 2 * 24 * 60 * 60), now));
-    }
-
-    #[test]
-    fn unbekanntes_beitrittsdatum_triggert_nicht() {
-        let now = 1_700_000_000;
-
-        assert!(!should_reply(
-            "Hey, kann mich jemand bitte zu Deadlock inviten?",
-            None,
-            now,
-        ));
-    }
-
-    #[test]
-    fn grenzfall_genau_sieben_tage_triggert_nicht() {
-        let now = 1_700_000_000;
-
-        assert!(!should_reply(
-            "Hey, kann mich jemand bitte zu Deadlock inviten?",
-            Some(now - NEWCOMER_MAX_JOIN_SECONDS),
-            now,
-        ));
-    }
-
-    #[test]
-    fn neuling_mit_freundescode_triggert_nicht() {
-        let now = 1_700_000_000;
-
-        assert!(!should_reply(
-            "Kann mich jemand inviten? Mein Code ist 123456789",
-            Some(now - 60),
-            now,
-        ));
-    }
 }
 
 #[cfg(test)]

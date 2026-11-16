@@ -258,9 +258,8 @@ fn conversation_text(task: &DiscordConversation) -> &str {
         DiscordConversation::Concierge { question, .. }
         | DiscordConversation::Faq { question, .. } => question,
         DiscordConversation::PassiveHelp { message, .. }
-        | DiscordConversation::VoiceHint { message }
-        | DiscordConversation::InviteLounge { message }
-        | DiscordConversation::InviteCheckIn { message } => message,
+        | DiscordConversation::VoiceHint { message } => message,
+        DiscordConversation::InviteTurn { turn } => &turn.message,
         DiscordConversation::InviteNotice { .. } => "",
     }
 }
@@ -273,9 +272,8 @@ fn conversation_task(
         && matches!(
             task,
             DiscordConversation::VoiceHint { .. }
-                | DiscordConversation::InviteLounge { .. }
                 | DiscordConversation::InviteNotice { .. }
-                | DiscordConversation::InviteCheckIn { .. }
+                | DiscordConversation::InviteTurn { .. }
         )
     {
         return Err(classified_backend_error("anfrage"));
@@ -312,15 +310,12 @@ fn conversation_task(
         DiscordConversation::VoiceHint { message } => ConversationTask::DiscordVoiceHint {
             message: message.clone(),
         },
-        DiscordConversation::InviteLounge { message } => ConversationTask::DiscordInviteLounge {
-            message: message.clone(),
-        },
         DiscordConversation::InviteNotice { notice } => ConversationTask::DiscordInviteNotice {
             notice: notice.clone(),
         },
-        DiscordConversation::InviteCheckIn { message } => ConversationTask::DiscordInviteCheckIn {
-            reply: message.clone(),
-        },
+        DiscordConversation::InviteTurn { turn } => {
+            ConversationTask::DiscordInviteTurn { turn: turn.clone() }
+        }
     })
 }
 
@@ -342,9 +337,11 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
             message_id,
         }),
         BotTaskResult::Conversation {
-            reply: BotReply::Judged { outcome },
+            reply: BotReply::Decided { decision },
             ..
-        } => Ok(ConversationReply::Judged { outcome }),
+        } if decision.valid() && decision.action != crate::InviteTurnAction::Silent => {
+            Ok(ConversationReply::Decided { decision })
+        }
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed {
             failure: TaskFailure::DeliveryRejected,
@@ -1032,14 +1029,28 @@ mod tests {
             project_conversation(result(BotReply::answered("Antwort"))).ok(),
             Some(ConversationReply::answered("Antwort"))
         );
+        let decision = crate::InviteTurnDecision {
+            intent: crate::InviteIntent::WantsInvite,
+            action: crate::InviteTurnAction::Invite,
+            text: Some("Kommt gleich.".into()),
+        };
         assert_eq!(
-            project_conversation(result(BotReply::Judged {
-                outcome: brain_contracts::invite::InviteCheckInOutcome::NotArrived,
+            project_conversation(result(BotReply::Decided {
+                decision: decision.clone(),
             }))
             .ok(),
-            Some(ConversationReply::Judged {
-                outcome: brain_contracts::invite::InviteCheckInOutcome::NotArrived,
-            })
+            Some(ConversationReply::Decided { decision })
+        );
+        assert_eq!(
+            project_conversation(result(BotReply::Decided {
+                decision: crate::InviteTurnDecision {
+                    intent: crate::InviteIntent::Unrelated,
+                    action: crate::InviteTurnAction::Silent,
+                    text: None,
+                },
+            }))
+            .ok(),
+            Some(ConversationReply::Silent)
         );
         assert_eq!(
             project_conversation(result(BotReply::Delivered {

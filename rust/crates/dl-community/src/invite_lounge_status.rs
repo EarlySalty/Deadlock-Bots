@@ -1,4 +1,4 @@
-use dl_brain::{InviteCheckInOutcome, InviteLoungeUpdate, InviteProblem, InviteStatus};
+use dl_brain::{InviteLoungeUpdate, InviteProblem, InviteStatus};
 use serde::{Deserialize, Serialize};
 
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
@@ -31,9 +31,7 @@ impl Notice {
             Self::Rejected => problem(InviteProblem::SteamRejected),
             Self::NotAccepted => problem(InviteProblem::FriendRequestNotAccepted),
             Self::CheckIn => InviteLoungeUpdate::CheckIn,
-            Self::Confirmed => InviteLoungeUpdate::CheckInAnswer {
-                outcome: InviteCheckInOutcome::Arrived,
-            },
+            Self::Confirmed => InviteLoungeUpdate::Confirmed,
         }
     }
 
@@ -52,12 +50,28 @@ impl Notice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum StoredUpdate {
+    Current(InviteLoungeUpdate),
+    Retired(serde_json::Value),
+}
+
+impl StoredUpdate {
+    pub(super) fn current(&self) -> Option<InviteLoungeUpdate> {
+        match self {
+            Self::Current(update) => Some(*update),
+            Self::Retired(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct OutboxEntry {
     pub(super) key: String,
     pub(super) request_message_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) channel_id: Option<u64>,
-    pub(super) update: InviteLoungeUpdate,
+    pub(super) update: StoredUpdate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) answer: Option<String>,
     pub(super) already_invited: bool,
@@ -87,22 +101,20 @@ impl OutboxEntry {
         )
     }
 
-    pub(super) fn answer(
-        request_message_id: u64,
-        channel_id: Option<u64>,
-        answer_message_id: u64,
-        outcome: InviteCheckInOutcome,
-        answer: String,
+    pub(super) fn reply(
+        message_id: u64,
+        channel_id: u64,
+        text: String,
         already_invited: bool,
     ) -> Self {
         let mut entry = Self::new(
-            format!("invite-lounge:{request_message_id}:answer:{answer_message_id}"),
-            request_message_id,
-            channel_id,
-            InviteLoungeUpdate::CheckInAnswer { outcome },
+            format!("invite-lounge:{message_id}:reply"),
+            message_id,
+            Some(channel_id),
+            InviteLoungeUpdate::Reply,
             already_invited,
         );
-        entry.answer = Some(answer);
+        entry.answer = Some(text);
         entry
     }
 
@@ -117,7 +129,7 @@ impl OutboxEntry {
             key,
             request_message_id,
             channel_id,
-            update,
+            update: StoredUpdate::Current(update),
             answer: None,
             already_invited,
             attempts: 0,
@@ -148,13 +160,7 @@ impl OutboxEntry {
     }
 
     pub(super) fn remembers_check_in(&self) -> bool {
-        matches!(
-            self.update,
-            InviteLoungeUpdate::CheckIn
-                | InviteLoungeUpdate::CheckInAnswer {
-                    outcome: InviteCheckInOutcome::Unclear
-                }
-        )
+        self.update.current() == Some(InviteLoungeUpdate::CheckIn)
     }
 }
 
@@ -349,8 +355,8 @@ pub(super) fn check_in_step(invited: bool, answered: bool) -> CheckIn {
     }
 }
 
-pub(super) fn check_in_window(age: i64, room_wait: i64) -> bool {
-    (CHECK_IN_SECONDS..room_wait).contains(&age)
+pub(super) fn check_in_age(age: i64) -> bool {
+    age >= CHECK_IN_SECONDS
 }
 
 #[cfg(test)]
@@ -552,9 +558,9 @@ mod tests {
 
     #[test]
     fn nachfrage_nach_dreissig_minuten_nur_ohne_antwort_und_ohne_einladung() {
-        assert!(!check_in_window(CHECK_IN_SECONDS - 1, 3600));
-        assert!(check_in_window(CHECK_IN_SECONDS, 3600));
-        assert!(!check_in_window(3600, 3600));
+        assert!(!check_in_age(CHECK_IN_SECONDS - 1));
+        assert!(check_in_age(CHECK_IN_SECONDS));
+        assert!(check_in_age(7 * 24 * 60 * 60));
         assert_eq!(check_in_step(false, false), CheckIn::Ask);
         assert_eq!(check_in_step(false, true), CheckIn::Skip);
         assert_eq!(check_in_step(true, false), CheckIn::AlreadyInvited);
@@ -564,28 +570,37 @@ mod tests {
 
     #[test]
     fn bestaetigung_meldet_den_eingang() {
-        assert_eq!(
-            Notice::Confirmed.update(),
-            InviteLoungeUpdate::CheckInAnswer {
-                outcome: InviteCheckInOutcome::Arrived
-            }
-        );
+        assert_eq!(Notice::Confirmed.update(), InviteLoungeUpdate::Confirmed);
+    }
+
+    #[test]
+    fn alter_ausgangseintrag_bleibt_lesbar_und_unveraendert() {
+        let stored = r#"{"key":"invite-lounge:5:answer:6","request_message_id":5,"channel_id":7,"update":{"kind":"check_in_answer","outcome":"arrived"},"answer":"ja","already_invited":false,"attempts":0,"next_at_millis":0}"#;
+        let entry: OutboxEntry = serde_json::from_str(stored).expect("alter Eintrag");
+        assert_eq!(entry.update.current(), None);
+        assert!(!entry.remembers_check_in());
+        assert_eq!(serde_json::to_string(&entry).expect("json"), stored);
+        let current = OutboxEntry::notice(5, Some(7), Notice::Confirmed, false);
+        let json = serde_json::to_string(&current).expect("json");
+        assert!(json.contains(r#""update":{"kind":"confirmed"}"#), "{json}");
+        let back: OutboxEntry = serde_json::from_str(&json).expect("eintrag");
+        assert_eq!(back.update.current(), Some(InviteLoungeUpdate::Confirmed));
     }
 
     #[test]
     fn ausgang_hat_stabile_schluessel_und_begrenzte_wiederholungen() {
         let entry = OutboxEntry::notice(55, Some(1), Notice::Invite, true);
         assert_eq!(entry.key, "invite-lounge:55:invite");
-        let answer = OutboxEntry::answer(
-            55,
-            Some(1),
-            60,
-            InviteCheckInOutcome::Unclear,
-            "weiß nicht".into(),
-            false,
+        let reply = OutboxEntry::reply(60, 1, "Pack noch deinen Code dazu :)".into(), false);
+        assert_eq!(reply.key, "invite-lounge:60:reply");
+        assert_eq!(reply.request_message_id, 60);
+        assert_eq!(reply.update.current(), Some(InviteLoungeUpdate::Reply));
+        assert_eq!(
+            reply.answer.as_deref(),
+            Some("Pack noch deinen Code dazu :)")
         );
-        assert_eq!(answer.key, "invite-lounge:55:answer:60");
-        assert!(answer.remembers_check_in());
+        assert!(!reply.remembers_check_in());
+        assert!(OutboxEntry::notice(55, Some(1), Notice::CheckIn, false).remembers_check_in());
         assert!(!entry.remembers_check_in());
         let mut entry = entry;
         assert!(entry.ready(0));

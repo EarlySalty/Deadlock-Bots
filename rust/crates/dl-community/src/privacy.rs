@@ -4139,6 +4139,18 @@ pub async fn delete_user_data(
         }
         counts.insert("kv_onboarding_dm".to_string(), onboarding_dm);
 
+        let lounge_key = crate::invite_lounge::privacy_kv_key(user_id);
+        let mut invite_lounge = 0i64;
+        for ns in crate::invite_lounge::PRIVACY_KV_NAMESPACES {
+            let result = sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(ns)
+                .bind(&lounge_key)
+                .execute(&mut *tx)
+                .await?;
+            invite_lounge += rows_to_i64(result.rows_affected());
+        }
+        counts.insert("kv_invite_lounge".to_string(), invite_lounge);
+
         let native_onboarding = sqlx::query(
             "DELETE FROM bot.kv_store
               WHERE ns = $1
@@ -4391,6 +4403,15 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             serde_json::json!({
                 "bridge": kv_value(pool, "onboarding_bridge_dm", &uid_key).await?,
                 "tour": kv_value(pool, "onboarding_tour", &uid_key).await?,
+            }),
+        );
+        let lounge_key = crate::invite_lounge::privacy_kv_key(user_id);
+        let [requests_ns, cooldown_ns] = crate::invite_lounge::PRIVACY_KV_NAMESPACES;
+        kv_out.insert(
+            "invite_lounge".into(),
+            serde_json::json!({
+                "requests": kv_value(pool, requests_ns, &lounge_key).await?,
+                "cooldown": kv_value(pool, cooldown_ns, &lounge_key).await?,
             }),
         );
         let rows = sqlx::query(
@@ -9697,7 +9718,10 @@ mod tests {
               ('voice_nudge_done','42','1'),
               ('native_onboarding:completed','1:42','{"guild_id":1,"user_id":42}'),
               ('onboarding_bridge_dm','42','dm_done'),
-              ('onboarding_tour','42','{"schema":1,"status":"active"}')
+              ('onboarding_tour','42','{"schema":1,"status":"active"}'),
+              ('invite_lounge:requests','user:42','{"last_seen":1}'),
+              ('invite_lounge:cooldown','user:42','1'),
+              ('invite_lounge:requests','user:99','{"last_seen":1}')
             "#,
         )
         .execute(db.pool())
@@ -9744,6 +9768,7 @@ mod tests {
         assert_eq!(s.counts.get("kv_ai_onboarding_views").copied(), Some(1));
         assert_eq!(s.counts.get("kv_voice_nudge").copied(), Some(1));
         assert_eq!(s.counts.get("kv_onboarding_dm").copied(), Some(2));
+        assert_eq!(s.counts.get("kv_invite_lounge").copied(), Some(2));
         assert_eq!(
             s.counts.get("kv_native_onboarding_completed").copied(),
             Some(1)

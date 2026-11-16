@@ -249,7 +249,8 @@ pub(crate) mod test_brain {
     use async_trait::async_trait;
     use dl_brain::{
         AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker, DiscordAnswerTask,
-        DiscordConversation, DiscordConversationRequest, InviteCheckInOutcome, NoticeTarget,
+        DiscordConversation, DiscordConversationRequest, InviteIntent, InviteTurnAction,
+        InviteTurnDecision, NoticeTarget,
     };
     use tokio::sync::Notify;
 
@@ -264,14 +265,24 @@ pub(crate) mod test_brain {
             }))
     }
 
-    pub(crate) fn check_in_reply(outcome: InviteCheckInOutcome) -> ScriptedReply {
-        Ok(ConversationReply::Judged { outcome })
+    pub(crate) fn decided(
+        intent: InviteIntent,
+        action: InviteTurnAction,
+        text: Option<&str>,
+    ) -> ScriptedReply {
+        Ok(ConversationReply::Decided {
+            decision: InviteTurnDecision {
+                intent,
+                action,
+                text: text.map(str::to_string),
+            },
+        })
     }
 
     #[derive(Default)]
     pub(crate) struct ScriptedBrain {
         replies: Mutex<VecDeque<ScriptedReply>>,
-        check_ins: Mutex<VecDeque<ScriptedReply>>,
+        turns: Mutex<VecDeque<ScriptedReply>>,
         notices: Mutex<VecDeque<ScriptedReply>>,
         default_reply: Option<ConversationReply>,
         gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
@@ -299,12 +310,9 @@ pub(crate) mod test_brain {
             })
         }
 
-        pub(crate) fn always_with_check_ins(
-            text: &str,
-            check_ins: Vec<ScriptedReply>,
-        ) -> Arc<Self> {
+        pub(crate) fn always_with_turns(text: &str, turns: Vec<ScriptedReply>) -> Arc<Self> {
             Arc::new(Self {
-                check_ins: Mutex::new(check_ins.into()),
+                turns: Mutex::new(turns.into()),
                 default_reply: Some(ConversationReply::answered(text)),
                 ..Self::default()
             })
@@ -318,6 +326,10 @@ pub(crate) mod test_brain {
             let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
             *self.gate.lock().expect("gate") = Some(gate.clone());
             gate
+        }
+
+        pub(crate) fn script_turns(&self, replies: Vec<ScriptedReply>) {
+            self.turns.lock().expect("turns").extend(replies);
         }
 
         pub(crate) fn script_notices(&self, replies: Vec<ScriptedReply>) {
@@ -347,9 +359,8 @@ pub(crate) mod test_brain {
             }
             | DiscordConversation::Faq { question, history } => (question, history.as_slice()),
             DiscordConversation::PassiveHelp { message, .. }
-            | DiscordConversation::VoiceHint { message }
-            | DiscordConversation::InviteLounge { message }
-            | DiscordConversation::InviteCheckIn { message } => (message, [].as_slice()),
+            | DiscordConversation::VoiceHint { message } => (message, [].as_slice()),
+            DiscordConversation::InviteTurn { turn } => (&turn.message, [].as_slice()),
             DiscordConversation::InviteNotice { notice } => {
                 return serde_json::to_string(&notice.update).unwrap_or_default();
             }
@@ -430,11 +441,11 @@ pub(crate) mod test_brain {
                 let scripted = self.notices.lock().expect("notices").pop_front();
                 return scripted.unwrap_or_else(|| Ok(delivered(&notice.target)));
             }
-            if matches!(request.task, DiscordConversation::InviteCheckIn { .. }) {
+            if matches!(request.task, DiscordConversation::InviteTurn { .. }) {
                 return self
-                    .check_ins
+                    .turns
                     .lock()
-                    .expect("check_ins")
+                    .expect("turns")
                     .pop_front()
                     .unwrap_or(Ok(ConversationReply::Silent));
             }

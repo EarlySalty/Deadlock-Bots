@@ -37,7 +37,7 @@ value = 'f5'
 label = 'Kann mich ein Mensch direkt einladen?'
 emoji = '💌'
 answer = '''**💌 Kann mich ein Mensch direkt einladen?**
-Ja — Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1426220702054355077>. Und wenn gerade kein Mensch greifbar ist: Der Bot übernimmt automatisch, du musst nichts extra tun.'''
+Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Meldet sich nach einer halben Stunde niemand, fragt der Bot nach, ob du schon eine Einladung hast. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.'''
 
 [[options]]
 value = 'f6'
