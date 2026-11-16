@@ -1950,6 +1950,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "'{data,object,parent,subscription_details,subscription}'",
         ),
         (
+            "plus_billing_events_invoice_subscription_object_idx",
+            "hash",
+            "'{data,object,parent,subscription_details,subscription,id}'",
+        ),
+        (
             "plus_billing_events_payment_intent_idx",
             "hash",
             "'{data,object,payment_intent}'",
