@@ -828,6 +828,7 @@ impl ResolvedSupportConfig {
 
 const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "prozent", "stand", "ziel"];
 const PAY_PLACEHOLDERS: &[&str] = &["stufen", "rolle"];
+const PAY_PLACEHOLDERS_WITHOUT_ROLE: &[&str] = &["stufen"];
 const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
 
 fn placeholder_warnings(
@@ -835,33 +836,35 @@ fn placeholder_warnings(
     options: &SupportPanelOptions,
     warnings: &mut Vec<String>,
 ) {
-    let twitch_required: &[&str] = if options.twitch {
-        TWITCH_PLACEHOLDERS
+    let pay_required = if options.role_grant {
+        PAY_PLACEHOLDERS
     } else {
-        &[]
+        PAY_PLACEHOLDERS_WITHOUT_ROLE
     };
-    let checks: [(&str, &str, &[&str], &[&str]); 9] = [
-        (&texts.intro, "intro", &[], &[]),
-        (&texts.perks, "perks", &[], &[]),
-        (&texts.steam, "steam", &[], &[]),
-        (&texts.planned, "planned", &[], &[]),
-        (&texts.free, "free", &[], &[]),
+    let checks: [(bool, &str, &str, &[&str], &[&str]); 9] = [
+        (true, &texts.intro, "intro", &[], &[]),
+        (options.role_grant, &texts.perks, "perks", &[], &[]),
+        (true, &texts.steam, "steam", &[], &[]),
+        (true, &texts.planned, "planned", &[], &[]),
+        (true, &texts.free, "free", &[], &[]),
         (
+            true,
             &texts.funding,
             "funding",
             FUNDING_PLACEHOLDERS,
             FUNDING_PLACEHOLDERS,
         ),
-        (&texts.pay, "pay", PAY_PLACEHOLDERS, PAY_PLACEHOLDERS),
+        (true, &texts.pay, "pay", pay_required, PAY_PLACEHOLDERS),
         (
+            options.twitch,
             &texts.twitch,
             "twitch",
-            twitch_required,
+            TWITCH_PLACEHOLDERS,
             TWITCH_PLACEHOLDERS,
         ),
-        (&texts.thanks, "thanks", &[], &[]),
+        (true, &texts.thanks, "thanks", &[], &[]),
     ];
-    for (text, field, required, allowed) in checks {
+    for (_, text, field, required, allowed) in checks.into_iter().filter(|check| check.0) {
         let found = placeholder_names(text);
         for missing in required.iter().filter(|name| !found.contains(name)) {
             warnings.push(format!(
@@ -2047,6 +2050,27 @@ enabled = false
                     .contains("[texts].twitch enthält keinen Platzhalter {kanaele}"))
         );
         assert_eq!(placeholder_names("{a} {B} {} {x_y} {"), vec!["a", "x_y"]);
+        warnings.clear();
+        texts = ResolvedSupportConfig::from_defaults().texts;
+        texts.pay = "{stufen}".to_string();
+        texts.perks = "Rolle {name}".to_string();
+        texts.twitch = "Kanäle {liste}".to_string();
+        let hidden = SupportPanelOptions {
+            role_grant: false,
+            twitch: false,
+            ..options()
+        };
+        placeholder_warnings(&texts, &hidden, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        placeholder_warnings(&texts, &options(), &mut warnings);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("[texts].pay enthält keinen Platzhalter {rolle}")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning
+                .contains("[texts].perks enthält den unbekannten Platzhalter {name}")));
     }
 
     #[test]
