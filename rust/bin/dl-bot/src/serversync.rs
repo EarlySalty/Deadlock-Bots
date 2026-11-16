@@ -1156,6 +1156,25 @@ impl ServerSyncService {
         format!("{}{}", self.discord_api_base.trim_end_matches('/'), path)
     }
 
+    async fn fetch_live_guild_model_bounded(&self) -> ServerSyncResult<GuildModel> {
+        let timeout = dl_discord::adapter::discord_call_timeout();
+        tokio::time::timeout(
+            timeout,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            ServerSyncError::internal(format!(
+                "Discord-Servermodell nicht innerhalb von {} ms geladen",
+                timeout.as_millis()
+            ))
+        })?
+        .map_err(ServerSyncError::from)
+    }
+
     async fn fetch_guild_members(&self) -> ServerSyncResult<Vec<serenity::all::Member>> {
         dl_discord::adapter::fetch_all_guild_members(
             &self.adapter.http,
@@ -3608,11 +3627,7 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let content = build_regelwerk_text(&live)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
         let stored_message_id = self.load_regelwerk_message_id().await?;
@@ -4340,11 +4355,7 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
