@@ -195,7 +195,7 @@ pub fn join_alternatives(labels: Vec<String>) -> String {
 }
 
 pub fn format_whole_euro(eur: u64) -> String {
-    format!("{} €", group_thousands(eur))
+    with_euro_sign(&group_thousands(eur))
 }
 
 impl SupportFunding {
@@ -621,9 +621,13 @@ pub fn format_euro(cents: i64) -> String {
     let abs = cents.unsigned_abs();
     let euros = group_thousands(abs / 100);
     match abs % 100 {
-        0 => format!("{sign}{euros} €"),
-        rest => format!("{sign}{euros},{rest:02} €"),
+        0 => with_euro_sign(&format!("{sign}{euros}")),
+        rest => with_euro_sign(&format!("{sign}{euros},{rest:02}")),
     }
+}
+
+fn with_euro_sign(amount: &str) -> String {
+    format!("{amount} €")
 }
 
 fn group_thousands(value: u64) -> String {
