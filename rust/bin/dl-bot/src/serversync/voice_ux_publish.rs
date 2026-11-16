@@ -148,8 +148,6 @@ pub struct VoiceUxPayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
-    #[serde(skip)]
     pub bytes: Vec<u8>,
 }
 
@@ -808,7 +806,6 @@ fn payload_with_banner_sections(
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
                 filename: banner.filename.clone(),
-                relative_path: banner.relative_path.clone(),
                 bytes: banner.bytes.clone(),
             });
             children.push(media_gallery(media_id, &banner.filename));
@@ -841,7 +838,6 @@ fn payload_with_optional_banner(
         attachments.push(VoiceUxPayloadAttachment {
             id: 0,
             filename: banner.filename.clone(),
-            relative_path: banner.relative_path.clone(),
             bytes: banner.bytes.clone(),
         });
         container_with_leading_banner(media_id, &banner.filename, container)

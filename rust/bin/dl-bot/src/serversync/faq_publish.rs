@@ -224,8 +224,6 @@ pub struct FaqPayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
-    #[serde(skip)]
     pub bytes: Vec<u8>,
 }
 
@@ -628,7 +626,6 @@ fn faq_messages(
         attachments.push(FaqPayloadAttachment {
             id: 0,
             filename: banner.filename.clone(),
-            relative_path: banner.relative_path.clone(),
             bytes: banner.bytes.clone(),
         });
     }

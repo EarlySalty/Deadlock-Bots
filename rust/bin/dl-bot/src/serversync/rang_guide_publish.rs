@@ -162,8 +162,6 @@ pub struct RangGuidePayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
-    #[serde(skip)]
     pub bytes: Vec<u8>,
 }
 
@@ -783,7 +781,6 @@ fn chunk_rang_guide_components(
                 .map(|(index, banner)| RangGuidePayloadAttachment {
                     id: index as u8,
                     filename: banner.filename.clone(),
-                    relative_path: banner.relative_path.clone(),
                     bytes: banner.bytes.clone(),
                 })
                 .collect();
@@ -1398,7 +1395,6 @@ step3_body = "{long_step3}"
                 .map(|index| RangGuidePayloadAttachment {
                     id: index as u8,
                     filename: format!("banner-{index}.png"),
-                    relative_path: format!("assets/welcome-banners/banner-{index}.png"),
                     bytes: Vec::new(),
                 })
                 .collect(),
