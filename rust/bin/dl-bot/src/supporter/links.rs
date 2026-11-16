@@ -1162,8 +1162,22 @@ mod tests {
         for bypass in [
             "https://evil.example\\.stripe.com/c",
             "https://evil.example\\@checkout.stripe.com/c",
+            "https://evil.example@checkout.stripe.com/c",
+            "https://checkout.stripe.com@evil.example/c",
+            "https://checkout.stripe.com:8443/c",
         ] {
             assert!(!is_stripe_url(bypass), "{bypass}");
+        }
+        assert!(is_public_url(
+            "https://deutsche-deadlock-community.de/twitch/x"
+        ));
+        for foreign in [
+            "https://deutsche-deadlock-community.de.evil.example/x",
+            "https://deutsche-deadlock-community.de@evil.example/x",
+            "https://deutsche-deadlock-community.de:8443/x",
+            "http://deutsche-deadlock-community.de/x",
+        ] {
+            assert!(!is_public_url(foreign), "{foreign}");
         }
         let long = format!(
             "https://checkout.stripe.com/{}",
