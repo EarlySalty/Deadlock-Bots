@@ -23,6 +23,9 @@ pub const CONCIERGE_TIMEOUT_ERROR: &str =
 pub const TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
 pub const TEMPVOICE_EMPTY_LANE_GRACE_ERROR: &str =
     "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen";
+pub const DISCORD_GUILD_INVITE_LIMIT: u16 = 1_000;
+pub const TWITCH_INVITE_LINKS_RANGE: RangeInclusive<u16> = 0..=DISCORD_GUILD_INVITE_LIMIT;
+pub const TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
 pub const LLM_MAX_OUTPUT_TOKENS_RANGE: RangeInclusive<u32> = 1..=32_768;
 pub const LLM_TEMPERATURE_RANGE: RangeInclusive<f64> = 0.0..=2.0;
 pub const LLM_REQUEST_TIMEOUT_SECONDS_RANGE: RangeInclusive<u64> = 1..=110;
@@ -323,9 +326,10 @@ impl BotConfig {
     pub fn validate(&self) -> Result<(), BotConfigError> {
         self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
-        if self.twitch_invites.personal_links_per_channel > 1000
-            || self.twitch_invites.guild_invite_reserve > 1000
-            || !(1..=86400).contains(&self.twitch_invites.evaluation_interval_seconds)
+        if !TWITCH_INVITE_LINKS_RANGE.contains(&self.twitch_invites.personal_links_per_channel)
+            || !TWITCH_INVITE_LINKS_RANGE.contains(&self.twitch_invites.guild_invite_reserve)
+            || !TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE
+                .contains(&self.twitch_invites.evaluation_interval_seconds)
             || self
                 .twitch_invites
                 .excluded_voice_channel_ids

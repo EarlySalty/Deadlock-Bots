@@ -1529,7 +1529,7 @@ pub fn brain_command_spec(max_question_len: usize) -> CommandSpec {
                 "name": "frage",
                 "description": "Was möchtest du wissen?",
                 "required": true,
-                "max_length": max_question_len.min(4000),
+                "max_length": max_question_len,
             }, {
                 "type": 11,
                 "name": "bild",

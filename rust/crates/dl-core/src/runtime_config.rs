@@ -17,9 +17,21 @@ pub const SUPPORTER_MAX_TIERS: usize = 5;
 pub const SUPPORTER_CUTOVER_GRACE_DAYS: i32 = 31;
 pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
-pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
+pub const DISCORD_STRING_OPTION_MAX_LENGTH: usize = 6_000;
+pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> =
+    1..=DISCORD_STRING_OPTION_MAX_LENGTH;
 pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1000;
-pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=8760;
+pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 0..=8760;
+pub const DISCORD_ID_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
+pub const RUNTIME_MAX_SPAN: u64 = 31_536_000;
+pub const RUNTIME_DELAY_SECONDS_RANGE: RangeInclusive<u64> = 0..=RUNTIME_MAX_SPAN;
+pub const RUNTIME_POSITIVE_SPAN_RANGE: RangeInclusive<i64> = 1..=RUNTIME_MAX_SPAN as i64;
+pub const BROKER_SECONDS_RANGE: RangeInclusive<f64> = 0.001..=RUNTIME_MAX_SPAN as f64;
+pub const BROKER_IDEMPOTENCY_MAX_ENTRIES_RANGE: RangeInclusive<usize> = 1..=1_000_000;
+pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=usize::MAX;
+pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
+pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=3600.0;
+pub const UNIT_INTERVAL_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> =
     SUPPORTER_MIN_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
 pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
@@ -345,11 +357,15 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if seconds > 31_536_000 {
+            if !RUNTIME_DELAY_SECONDS_RANGE.contains(&seconds) {
                 return Err(invalid());
             }
         }
-        if self.ai.brain_daily_user_limit == Some(0) {
+        if self
+            .ai
+            .brain_daily_user_limit
+            .is_some_and(|limit| !BRAIN_DAILY_USER_LIMIT_RANGE.contains(&limit))
+        {
             return Err(invalid());
         }
         if self
@@ -455,14 +471,14 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !seconds.is_finite() || !(0.001..=31_536_000.0).contains(&seconds) {
+            if !seconds.is_finite() || !BROKER_SECONDS_RANGE.contains(&seconds) {
                 return Err(invalid());
             }
         }
         if self
             .start
             .broker_idempotency_max_entries
-            .is_some_and(|value| value == 0 || value > 1_000_000)
+            .is_some_and(|value| !BROKER_IDEMPOTENCY_MAX_ENTRIES_RANGE.contains(&value))
         {
             return Err(invalid());
         }
@@ -513,7 +529,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            if !threshold.is_finite() || !UNIT_INTERVAL_RANGE.contains(&threshold) {
                 return Err(invalid());
             }
         }
@@ -528,18 +544,16 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !(1..=31_536_000).contains(&ttl) {
+            if !RUNTIME_POSITIVE_SPAN_RANGE.contains(&ttl) {
                 return Err(invalid());
             }
         }
-        if self
+        if self.bridges.twitch_timeout_seconds.is_some_and(|value| {
+            !value.is_finite() || !TWITCH_TIMEOUT_SECONDS_RANGE.contains(&value)
+        }) || self
             .bridges
-            .twitch_timeout_seconds
-            .is_some_and(|value| !value.is_finite() || !(0.5..=3600.0).contains(&value))
-            || self
-                .bridges
-                .matcher_fuzzy_floor
-                .is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+            .matcher_fuzzy_floor
+            .is_some_and(|value| !value.is_finite() || !UNIT_INTERVAL_RANGE.contains(&value))
         {
             return Err(invalid());
         }
@@ -550,7 +564,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if !(0..=100).contains(&threshold) {
+            if !MATCHER_THRESHOLD_RANGE.contains(&threshold) {
                 return Err(invalid());
             }
         }
@@ -583,7 +597,7 @@ impl RuntimeConfig {
         .into_iter()
         .flatten()
         {
-            if id == 0 || id > i64::MAX as u64 {
+            if !DISCORD_ID_RANGE.contains(&id) {
                 return Err(invalid());
             }
         }

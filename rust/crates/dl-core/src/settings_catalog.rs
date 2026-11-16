@@ -57,11 +57,163 @@ pub struct ChangeRequest {
     pub changes: BTreeMap<String, Value>,
 }
 
-fn temperature_bounds() -> (i64, i64) {
-    (
-        bc::LLM_TEMPERATURE_RANGE.start().floor() as i64,
-        bc::LLM_TEMPERATURE_RANGE.end().ceil() as i64,
-    )
+type Bounds = (String, String);
+
+fn integer_bounds<T: Copy + TryInto<i64>>(range: &std::ops::RangeInclusive<T>) -> Option<Bounds> {
+    let (min, max) = range_bounds(range);
+    Some((min.to_string(), max.to_string()))
+}
+
+fn number_bounds(range: &std::ops::RangeInclusive<f64>) -> Option<Bounds> {
+    Some((range.start().to_string(), range.end().to_string()))
+}
+
+fn type_bounds(integer_type: &str) -> Option<Bounds> {
+    match integer_type {
+        "u8" => integer_bounds(&(u8::MIN..=u8::MAX)),
+        "u16" => integer_bounds(&(u16::MIN..=u16::MAX)),
+        "u32" => integer_bounds(&(u32::MIN..=u32::MAX)),
+        "u64" | "usize" => integer_bounds(&(0..=i64::MAX)),
+        "i16" => integer_bounds(&(i16::MIN..=i16::MAX)),
+        "i64" => integer_bounds(&(i64::MIN..=i64::MAX)),
+        "" => None,
+        _ => panic!("nicht klassifizierter Ganzzahltyp"),
+    }
+}
+
+const DISCORD_ID_PATHS: &[&str] = &[
+    "twitch_invites.excluded_voice_channel_ids",
+    "runtime.start.broker_channels",
+    "runtime.start.broker_guilds",
+    "runtime.start.broker_roles",
+    "runtime.dashboard.auth_guild_ids",
+    "runtime.community.concierge_test_users",
+    "runtime.moderation.scan_channel_ids",
+    "runtime.ai.brain_channels",
+    "runtime.start.owner_id",
+    "runtime.start.command_guild_id",
+    "runtime.start.mcp_guild_id",
+    "runtime.start.mcp_verified_role_id",
+    "runtime.bridges.matcher_guild_id",
+    "runtime.bridges.matcher_notify_channel_id",
+    "runtime.bridges.matcher_role_id",
+    "runtime.dashboard.owner_user_id",
+    "runtime.dashboard.moderator_role_id",
+    "runtime.dashboard.audit_bot_user_id",
+    "runtime.dashboard.insights_guild_id",
+    "runtime.community.lfg_panel_channel_id",
+    "runtime.community.lfg_forum_channel_id",
+    "runtime.community.lfg_freetext_channel_id",
+    "runtime.community.brain_help_channel_id",
+    "runtime.community.scrim_category_id",
+    "runtime.community.concierge_fallback_category_id",
+    "runtime.community.concierge_pate_category_id",
+    "runtime.community.concierge_pate_channel_id",
+    "runtime.community.concierge_pate_panel_channel_id",
+    "runtime.community.concierge_pate_help_channel_id",
+    "runtime.community.concierge_mod_role_id",
+    "runtime.moderation.channel_id",
+    "runtime.ai.transparency_channel_id",
+];
+
+fn loader_bounds(path: &str) -> Option<Bounds> {
+    if let Some(name) = path.strip_prefix("llm.use_cases.") {
+        return match name.rsplit_once('.').map(|(_, field)| field) {
+            Some("max_output_tokens") => integer_bounds(&bc::LLM_MAX_OUTPUT_TOKENS_RANGE),
+            Some("temperature") => number_bounds(&bc::LLM_TEMPERATURE_RANGE),
+            Some("request_timeout_seconds") => {
+                integer_bounds(&bc::LLM_REQUEST_TIMEOUT_SECONDS_RANGE)
+            }
+            _ => None,
+        };
+    }
+    if DISCORD_ID_PATHS.contains(&path) {
+        return integer_bounds(&rc::DISCORD_ID_RANGE);
+    }
+    match path {
+        "twitch_invites.personal_links_per_channel" | "twitch_invites.guild_invite_reserve" => {
+            integer_bounds(&bc::TWITCH_INVITE_LINKS_RANGE)
+        }
+        "twitch_invites.evaluation_interval_seconds" => {
+            integer_bounds(&bc::TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE)
+        }
+        "concierge.timeout_seconds" => integer_bounds(&bc::CONCIERGE_TIMEOUT_SECONDS_RANGE),
+        "tempvoice.empty_lane_grace_seconds" => {
+            integer_bounds(&bc::TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE)
+        }
+        "runtime.start.broker_idempotency_ttl_seconds"
+        | "runtime.start.broker_inflight_ttl_seconds"
+        | "runtime.start.broker_waiter_timeout_seconds" => number_bounds(&rc::BROKER_SECONDS_RANGE),
+        "runtime.start.broker_idempotency_max_entries" => {
+            integer_bounds(&rc::BROKER_IDEMPOTENCY_MAX_ENTRIES_RANGE)
+        }
+        "runtime.bridges.twitch_timeout_seconds" => {
+            number_bounds(&rc::TWITCH_TIMEOUT_SECONDS_RANGE)
+        }
+        "runtime.bridges.matcher_auto_threshold" | "runtime.bridges.matcher_review_threshold" => {
+            integer_bounds(&rc::MATCHER_THRESHOLD_RANGE)
+        }
+        "runtime.bridges.matcher_fuzzy_floor"
+        | "runtime.moderation.analyze_flag_threshold"
+        | "runtime.moderation.auto_verify_threshold"
+        | "runtime.moderation.propose_verify_threshold" => number_bounds(&rc::UNIT_INTERVAL_RANGE),
+        "runtime.bridges.matcher_max_ai_per_scan" => {
+            integer_bounds(&rc::MATCHER_MAX_AI_PER_SCAN_RANGE)
+        }
+        "runtime.bridges.matcher_scan_interval_hours" => {
+            integer_bounds(&rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE)
+        }
+        "runtime.dashboard.session_ttl_seconds"
+        | "runtime.dashboard.oauth_state_ttl_seconds"
+        | "runtime.community.survey_interval_days"
+        | "runtime.community.concierge_active_minutes"
+        | "runtime.moderation.timeout_minutes"
+        | "runtime.moderation.behavior_proposal_timeout_minutes" => {
+            integer_bounds(&rc::RUNTIME_POSITIVE_SPAN_RANGE)
+        }
+        "runtime.community.router_auto_move_delay_seconds"
+        | "runtime.ai.transparency_error_repeat_seconds"
+        | "runtime.ai.transparency_error_followup_seconds"
+        | "runtime.ai.brain_cooldown_seconds" => integer_bounds(&rc::RUNTIME_DELAY_SECONDS_RANGE),
+        "runtime.ai.brain_daily_user_limit" => integer_bounds(&rc::BRAIN_DAILY_USER_LIMIT_RANGE),
+        "runtime.ai.brain_max_question_len" => integer_bounds(&rc::BRAIN_MAX_QUESTION_LEN_RANGE),
+        "runtime.community.supporter_role_sync_max_revokes" => {
+            integer_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE)
+        }
+        "runtime.community.supporter_sync_interval_seconds" => {
+            integer_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE)
+        }
+        SUPPORTER_TIERS_PATH => {
+            integer_bounds(&(rc::SUPPORTER_TIER_MIN_EUR..=rc::SUPPORTER_TIER_MAX_EUR))
+        }
+        "runtime.community.supporter_funding_goal_cents" => {
+            integer_bounds(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE)
+        }
+        _ => None,
+    }
+}
+
+fn german_number(raw: &str) -> String {
+    let (sign, digits) = raw.strip_prefix('-').map_or(("", raw), |rest| ("-", rest));
+    let (whole, fraction) = digits
+        .split_once('.')
+        .map_or((digits, None), |(w, f)| (w, Some(f)));
+    let grouped = if whole.len() > 3 {
+        let mut out = String::new();
+        for (index, digit) in whole.chars().enumerate() {
+            if index > 0 && (whole.len() - index) % 3 == 0 {
+                out.push('.');
+            }
+            out.push(digit);
+        }
+        out
+    } else {
+        whole.to_owned()
+    };
+    match fraction {
+        Some(fraction) => format!("{sign}{grouped},{fraction}"),
+        None => format!("{sign}{grouped}"),
+    }
 }
 
 #[derive(Debug)]
@@ -145,74 +297,25 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                     _ => (Kind::String, "", None, vec![]),
                 }
             };
-            let mut bounds = match integer_type {
-                "u8" => Some((0i64, 255i64)),
-                "u16" => Some((0, 65535)),
-                "u32" => Some((0, u32::MAX as i64)),
-                "u64" | "usize" => Some((0, i64::MAX)),
-                "i16" => Some((i16::MIN as i64, i16::MAX as i64)),
-                "i64" => Some((i64::MIN, i64::MAX)),
-                "" => None,
-                _ => panic!("nicht klassifizierter Ganzzahltyp"),
-            };
             let path = replace(columns[0]);
-            if path.starts_with("llm.use_cases.") {
-                if path.ends_with(".max_output_tokens") {
-                    bounds = Some(range_bounds(&bc::LLM_MAX_OUTPUT_TOKENS_RANGE));
-                }
-                if path.ends_with(".temperature") {
-                    bounds = Some(temperature_bounds());
-                }
-                if path.ends_with(".request_timeout_seconds") {
-                    bounds = Some(range_bounds(&bc::LLM_REQUEST_TIMEOUT_SECONDS_RANGE));
-                }
-            }
-            match path.as_str() {
-                "concierge.timeout_seconds" => {
-                    bounds = Some(range_bounds(&bc::CONCIERGE_TIMEOUT_SECONDS_RANGE))
-                }
-                "tempvoice.empty_lane_grace_seconds" => {
-                    bounds = Some(range_bounds(&bc::TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE))
-                }
-                "runtime.bridges.matcher_max_ai_per_scan" => {
-                    bounds = Some(range_bounds(&rc::MATCHER_MAX_AI_PER_SCAN_RANGE))
-                }
-                "runtime.bridges.matcher_scan_interval_hours" => {
-                    bounds = Some(range_bounds(&rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE))
-                }
-                "runtime.ai.brain_max_question_len" => {
-                    bounds = Some(range_bounds(&rc::BRAIN_MAX_QUESTION_LEN_RANGE))
-                }
-                "runtime.community.supporter_role_sync_max_revokes" => {
-                    bounds = Some(range_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE))
-                }
-                "runtime.community.supporter_sync_interval_seconds" => {
-                    bounds = Some(range_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE))
-                }
-                SUPPORTER_TIERS_PATH => {
-                    bounds = Some(range_bounds(
-                        &(rc::SUPPORTER_TIER_MIN_EUR..=rc::SUPPORTER_TIER_MAX_EUR),
-                    ))
-                }
-                "runtime.community.supporter_funding_goal_cents" => {
-                    bounds = Some((
-                        *rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start(),
-                        *rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end(),
-                    ))
-                }
-                _ => {}
-            }
+            let bounds = loader_bounds(&path).or_else(|| type_bounds(integer_type));
+            let with_bounds = |text: String| match &bounds {
+                Some((min, max)) => text
+                    .replace("{min}", &german_number(min))
+                    .replace("{max}", &german_number(max)),
+                None => text,
+            };
             result.push(Field {
                 path,
                 group: replace(columns[2]),
-                label: replace(columns[3]),
+                label: with_bounds(replace(columns[3])),
                 kind,
                 nullable,
                 writable: columns[4] == "edit",
                 restart_required: true,
-                help: replace(columns[5]),
-                min: bounds.map(|(min, _)| min.to_string()),
-                max: bounds.map(|(_, max)| max.to_string()),
+                help: with_bounds(replace(columns[5])),
+                min: bounds.as_ref().map(|(min, _)| min.clone()),
+                max: bounds.map(|(_, max)| max),
                 length,
                 choices,
             });
@@ -525,6 +628,58 @@ pub fn apply(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn katalogtexte_nennen_grenzen_nur_als_platzhalter() {
+        for field in crate::admin_settings::fields() {
+            for text in [&field.label, &field.help] {
+                assert!(
+                    !text.contains("{min}") && !text.contains("{max}"),
+                    "{}: Platzhalter ohne Grenze",
+                    field.path
+                );
+            }
+        }
+        for line in crate::admin_settings::SPEC
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let columns: Vec<_> = line.split('\t').collect();
+            let Some((min, max)) = loader_bounds(columns[0]) else {
+                continue;
+            };
+            let mut literals = vec![
+                format!("{min}–{max}"),
+                format!("{min} bis {max}"),
+                format!("{}–{}", german_number(&min), german_number(&max)),
+                format!("{} bis {}", german_number(&min), german_number(&max)),
+            ];
+            if max.len() > 3 {
+                literals.extend([max.clone(), german_number(&max)]);
+            }
+            for text in [columns[3], columns[5]] {
+                for literal in &literals {
+                    assert!(
+                        !text.contains(literal.as_str()),
+                        "{}: Grenze `{literal}` steht als Zahl im Text",
+                        columns[0]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deutsche_zahlen_fuer_grenzen() {
+        assert_eq!(german_number("1000"), "1.000");
+        assert_eq!(german_number("86400"), "86.400");
+        assert_eq!(german_number("120"), "120");
+        assert_eq!(german_number("0.5"), "0,5");
+        assert_eq!(
+            german_number("-9223372036854775808"),
+            "-9.223.372.036.854.775.808"
+        );
+    }
     fn supporter_field(path: &str) -> Field {
         crate::admin_settings::fields()
             .into_iter()
@@ -539,8 +694,8 @@ mod tests {
                 format!(
                     "Standard ist {}, höchstens {}. Bei {} wird niemandem",
                     rc::SUPPORTER_DEFAULT_MAX_REVOKES,
-                    rc::SUPPORTER_MAX_REVOKES_RANGE.end(),
-                    rc::SUPPORTER_MAX_REVOKES_RANGE.start()
+                    german_number(&rc::SUPPORTER_MAX_REVOKES_RANGE.end().to_string()),
+                    german_number(&rc::SUPPORTER_MAX_REVOKES_RANGE.start().to_string())
                 ),
                 rc::SUPPORTER_MAX_REVOKES_RANGE.start().to_string(),
                 rc::SUPPORTER_MAX_REVOKES_RANGE.end().to_string(),
@@ -550,8 +705,8 @@ mod tests {
                 format!(
                     "Standard ist {}, mindestens {}, höchstens {}.",
                     rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
-                    rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start(),
-                    rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end()
+                    german_number(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start().to_string()),
+                    german_number(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end().to_string())
                 ),
                 rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start().to_string(),
                 rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end().to_string(),
@@ -562,8 +717,8 @@ mod tests {
                     "Standard ist {}, also {} €. Erlaubt sind {} bis {}.",
                     rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
                     rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100,
-                    rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start(),
-                    rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end()
+                    german_number(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().to_string()),
+                    german_number(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().to_string())
                 ),
                 rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().to_string(),
                 rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().to_string(),
@@ -578,8 +733,8 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(", "),
                     rc::SUPPORTER_MAX_TIERS,
-                    rc::SUPPORTER_TIER_MIN_EUR,
-                    rc::SUPPORTER_TIER_MAX_EUR
+                    german_number(&rc::SUPPORTER_TIER_MIN_EUR.to_string()),
+                    german_number(&rc::SUPPORTER_TIER_MAX_EUR.to_string())
                 ),
                 rc::SUPPORTER_TIER_MIN_EUR.to_string(),
                 rc::SUPPORTER_TIER_MAX_EUR.to_string(),
@@ -666,20 +821,21 @@ mod tests {
             rc::BRAIN_MAX_QUESTION_LEN_RANGE.start().to_string(),
             rc::BRAIN_MAX_QUESTION_LEN_RANGE.end().to_string(),
         );
+        let de = |value: &dyn ToString| german_number(&value.to_string());
         let token_label = format!(
             "Maximale Ausgabetokens ({}–{})",
-            llm_tokens.start(),
-            llm_tokens.end()
+            de(llm_tokens.start()),
+            de(llm_tokens.end())
         );
         let temperature_label = format!(
             "Temperatur ({}–{})",
-            llm_temperature.start(),
-            llm_temperature.end()
+            de(llm_temperature.start()),
+            de(llm_temperature.end())
         );
         let timeout_label = format!(
             "Zeitlimit je Anfrageversuch ({}–{} Sekunden)",
-            llm_timeout.start(),
-            llm_timeout.end()
+            de(llm_timeout.start()),
+            de(llm_timeout.end())
         );
         let mut seen = 0;
         for field in fields
@@ -738,7 +894,6 @@ mod tests {
             );
         }
         for (hours, ok) in [
-            (rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.start() - 1, false),
             (*rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.start(), true),
             (*rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.end(), true),
             (rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.end() + 1, false),
