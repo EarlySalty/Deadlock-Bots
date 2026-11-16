@@ -342,7 +342,6 @@ struct SupportBodyTextsToml {
     free: Option<String>,
     funding: Option<String>,
     pay: Option<String>,
-    plus: Option<String>,
     twitch: Option<String>,
     thanks: Option<String>,
     title: Option<String>,
@@ -358,7 +357,6 @@ struct SupportBodyTextsToml {
 impl SupportBodyTextsToml {
     fn has_legacy_fields(&self) -> bool {
         [
-            &self.plus,
             &self.title,
             &self.boost,
             &self.donation,
@@ -812,7 +810,7 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.buttons.twitch, file.buttons.twitch);
         if legacy {
             warnings.push(
-                "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Steam Plus, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
+                "Support-Textdatei enthält alte Felder (Ko-fi, Warum, KI-Abos, Stripe-Link oder ältere Abschnitte). Die werden nicht mehr angezeigt."
                     .to_string(),
             );
         }
