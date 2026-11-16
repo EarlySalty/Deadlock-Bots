@@ -139,6 +139,13 @@ mod tests {
         (http, server)
     }
 
+    fn member_fixture(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "user": {"id": id, "username": "member", "discriminator": "0001", "avatar": null},
+            "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
+        })
+    }
+
     fn limits() -> Duration {
         Duration::from_millis(150)
     }
@@ -153,18 +160,22 @@ mod tests {
         let seen = calls.clone();
         let app = axum::Router::new().route(
             "/api/v10/guilds/{guild}/members",
-            axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
-                let seen = seen.clone();
-                async move {
-                    if query.contains_key("after") {
-                        return axum::Json(serde_json::json!([]));
+            axum::routing::get(
+                move |axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let seen = seen.clone();
+                    async move {
+                        if query.contains_key("after") {
+                            return axum::Json(serde_json::json!([]));
+                        }
+                        if seen.fetch_add(1, Ordering::SeqCst) < 2 {
+                            std::future::pending::<()>().await;
+                        }
+                        axum::Json(serde_json::json!([member_fixture("7")]))
                     }
-                    if seen.fetch_add(1, Ordering::SeqCst) < 2 {
-                        std::future::pending::<()>().await;
-                    }
-                    axum::Json(serde_json::json!([{"user": {"id": "7", "username": "member", "discriminator": "0001", "avatar": null}, "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0}]))
-                }
-            }),
+                },
+            ),
         );
         let (http, server) = discord(app).await;
         for _ in 0..2 {
@@ -203,20 +214,24 @@ mod tests {
             .expect("boost source");
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
-        let app = axum::Router::new().route("/api/v10/guilds/{guild}/members", axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>| {
-            let seen = seen.clone();
-            async move {
-                match seen.fetch_add(1, Ordering::SeqCst) {
-                    0 => std::future::pending::<axum::Json<serde_json::Value>>().await,
-                    1 => axum::Json(serde_json::json!([])),
-                    _ if query.contains_key("after") => axum::Json(serde_json::json!([])),
-                    _ => axum::Json(serde_json::json!([{
-                        "user": {"id": "2", "username": "member", "discriminator": "0001", "avatar": null},
-                        "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
-                    }])),
-                }
-            }
-        }));
+        let app = axum::Router::new().route(
+            "/api/v10/guilds/{guild}/members",
+            axum::routing::get(
+                move |axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let seen = seen.clone();
+                    async move {
+                        match seen.fetch_add(1, Ordering::SeqCst) {
+                            0 => std::future::pending::<axum::Json<serde_json::Value>>().await,
+                            1 => axum::Json(serde_json::json!([])),
+                            _ if query.contains_key("after") => axum::Json(serde_json::json!([])),
+                            _ => axum::Json(serde_json::json!([member_fixture("2")])),
+                        }
+                    }
+                },
+            ),
+        );
         let (http, server) = discord(app).await;
         let sync = supporter_sync(&db, http);
         for _ in 0..2 {
