@@ -831,6 +831,14 @@ const PAY_PLACEHOLDERS: &[&str] = &["stufen", "rolle"];
 const PAY_PLACEHOLDERS_WITHOUT_ROLE: &[&str] = &["stufen"];
 const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
 
+type PlaceholderCheck<'a> = (
+    bool,
+    &'a str,
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+);
+
 fn placeholder_warnings(
     texts: &ResolvedSupportTexts,
     options: &SupportPanelOptions,
@@ -841,7 +849,7 @@ fn placeholder_warnings(
     } else {
         PAY_PLACEHOLDERS_WITHOUT_ROLE
     };
-    let checks: [(bool, &str, &str, &[&str], &[&str]); 9] = [
+    let checks: [PlaceholderCheck; 9] = [
         (true, &texts.intro, "intro", &[], &[]),
         (options.role_grant, &texts.perks, "perks", &[], &[]),
         (true, &texts.steam, "steam", &[], &[]),
