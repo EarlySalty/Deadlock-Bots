@@ -1499,7 +1499,7 @@ fn welcome_banner(
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBannerOutput, String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let bytes = dl_core::optional_file::read(&repo_root.join(&relative_path))
+    let bytes = crate::serversync::read_banner_file(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Banner `{relative_path}` {reason}"))?;
     if bytes.is_none() {
         warnings.push(format!(
@@ -1523,7 +1523,7 @@ fn divider_attachment_for_category(
         return Ok(None);
     };
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let Some(bytes) = dl_core::optional_file::read(&repo_root.join(&relative_path))
+    let Some(bytes) = crate::serversync::read_banner_file(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Divider `{relative_path}` {reason}"))?
     else {
         warnings.push(format!(
