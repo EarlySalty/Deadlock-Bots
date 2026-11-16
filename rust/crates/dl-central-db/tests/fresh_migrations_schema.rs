@@ -1932,23 +1932,67 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     let migration_2026100114_signature_after_first =
         migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
-    let billing_subject_indexes = scalar_i64(
-        &pool,
-        "SELECT count(*)
-           FROM pg_indexes
-          WHERE schemaname = 'steam'
-            AND tablename = 'plus_billing_events'
-            AND indexname IN (
-                'plus_billing_events_object_id_idx',
-                'plus_billing_events_subscription_idx',
-                'plus_billing_events_subscription_object_idx',
-                'plus_billing_events_invoice_subscription_idx',
-                'plus_billing_events_payment_intent_idx',
-                'plus_billing_events_payment_intent_object_idx'
-            )",
+    for (index_name, method, expression) in [
+        ("plus_billing_events_object_id_idx", "btree", "(object_id)"),
+        (
+            "plus_billing_events_subscription_idx",
+            "hash",
+            "'{data,object,subscription}'",
+        ),
+        (
+            "plus_billing_events_subscription_object_idx",
+            "hash",
+            "'{data,object,subscription,id}'",
+        ),
+        (
+            "plus_billing_events_invoice_subscription_idx",
+            "hash",
+            "'{data,object,parent,subscription_details,subscription}'",
+        ),
+        (
+            "plus_billing_events_payment_intent_idx",
+            "hash",
+            "'{data,object,payment_intent}'",
+        ),
+        (
+            "plus_billing_events_payment_intent_object_idx",
+            "hash",
+            "'{data,object,payment_intent,id}'",
+        ),
+    ] {
+        let definition: Option<String> = sqlx::query_scalar(
+            "SELECT indexdef
+               FROM pg_indexes
+              WHERE schemaname = 'steam'
+                AND tablename = 'plus_billing_events'
+                AND indexname = $1",
+        )
+        .bind(index_name)
+        .fetch_optional(&pool)
+        .await
+        .expect("read billing indexes");
+        let definition = definition.unwrap_or_else(|| panic!("{index_name} fehlt"));
+        assert!(
+            definition.contains(&format!("USING {method} ")) && definition.contains(expression),
+            "{index_name}: {definition}"
+        );
+    }
+    let oversized = sqlx::query(
+        "INSERT INTO steam.plus_billing_events (stripe_event_id, event_type, object_id, payload)
+         SELECT 'evt_oversized', 'invoice.paid', NULL,
+                jsonb_build_object('data', jsonb_build_object('object', jsonb_build_object(
+                    'subscription', big, 'payment_intent', big)))
+           FROM (SELECT string_agg(md5(i::text), '') AS big
+                   FROM generate_series(1, 400) AS i) AS value",
     )
-    .await;
-    assert_eq!(billing_subject_indexes, 6);
+    .execute(&pool)
+    .await
+    .expect("expanded payload larger than a btree row");
+    assert_eq!(oversized.rows_affected(), 1);
+    sqlx::query("DELETE FROM steam.plus_billing_events WHERE stripe_event_id = 'evt_oversized'")
+        .execute(&pool)
+        .await
+        .expect("remove oversized billing row");
 
     run_migrator(&db_dsn, "second run");
 
