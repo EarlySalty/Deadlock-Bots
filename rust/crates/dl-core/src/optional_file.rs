@@ -113,6 +113,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("echt")).expect("real dir");
         std::os::unix::fs::symlink(dir.join("echt"), &resolved).expect("resolved link");
         assert_eq!(present(&resolved.join("abwesend.txt")), Ok(false));
+        let under_file = present(&file.join("unter-datei.txt"));
+        assert!(
+            matches!(&under_file, Err(reason) if reason.starts_with("konnte nicht geprüft werden: ")),
+            "{under_file:?}"
+        );
 
         use std::os::unix::fs::PermissionsExt;
         let locked_file = dir.join("gesperrt.txt");

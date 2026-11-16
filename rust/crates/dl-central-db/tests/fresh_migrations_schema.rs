@@ -1932,56 +1932,82 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     let migration_2026100114_signature_after_first =
         migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
-    for (index_name, method, expression) in [
-        ("plus_billing_events_object_id_idx", "btree", "(object_id)"),
+    let mut reference = pool.begin().await.expect("begin index reference");
+    sqlx::query(
+        "CREATE TEMP TABLE billing_index_reference (LIKE steam.plus_billing_events) ON COMMIT DROP",
+    )
+    .execute(&mut *reference)
+    .await
+    .expect("create index reference table");
+    for (index_name, method, key) in [
+        (
+            "plus_billing_events_object_id_idx",
+            "btree",
+            "object_id".to_string(),
+        ),
         (
             "plus_billing_events_subscription_idx",
             "hash",
-            "'{data,object,subscription}'",
+            "(payload #>> '{data,object,subscription}')".to_string(),
         ),
         (
             "plus_billing_events_subscription_object_idx",
             "hash",
-            "'{data,object,subscription,id}'",
+            "(payload #>> '{data,object,subscription,id}')".to_string(),
         ),
         (
             "plus_billing_events_invoice_subscription_idx",
             "hash",
-            "'{data,object,parent,subscription_details,subscription}'",
+            "(payload #>> '{data,object,parent,subscription_details,subscription}')".to_string(),
         ),
         (
             "plus_billing_events_invoice_subscription_object_idx",
             "hash",
-            "'{data,object,parent,subscription_details,subscription,id}'",
+            "(payload #>> '{data,object,parent,subscription_details,subscription,id}')".to_string(),
         ),
         (
             "plus_billing_events_payment_intent_idx",
             "hash",
-            "'{data,object,payment_intent}'",
+            "(payload #>> '{data,object,payment_intent}')".to_string(),
         ),
         (
             "plus_billing_events_payment_intent_object_idx",
             "hash",
-            "'{data,object,payment_intent,id}'",
+            "(payload #>> '{data,object,payment_intent,id}')".to_string(),
         ),
     ] {
-        let definition: Option<String> = sqlx::query_scalar(
-            "SELECT indexdef
-               FROM pg_indexes
-              WHERE schemaname = 'steam'
-                AND tablename = 'plus_billing_events'
-                AND indexname = $1",
-        )
-        .bind(index_name)
-        .fetch_optional(&pool)
+        let reference_name = format!("reference_{index_name}");
+        sqlx::query(&format!(
+            "CREATE INDEX {reference_name} ON billing_index_reference USING {method} ({key})"
+        ))
+        .execute(&mut *reference)
         .await
-        .expect("read billing indexes");
-        let definition = definition.unwrap_or_else(|| panic!("{index_name} fehlt"));
-        assert!(
-            definition.contains(&format!("USING {method} ")) && definition.contains(expression),
-            "{index_name}: {definition}"
+        .unwrap_or_else(|error| panic!("{reference_name}: {error}"));
+        let shape = "SELECT am.amname, index.indnatts::int4, index.indisunique,
+                            index.indpred IS NULL, pg_get_indexdef(index.indexrelid, 1, false)
+                       FROM pg_index index
+                       JOIN pg_class class ON class.oid = index.indexrelid
+                       JOIN pg_am am ON am.oid = class.relam
+                      WHERE index.indexrelid = to_regclass($1)";
+        let actual: Option<(String, i32, bool, bool, String)> = sqlx::query_as(shape)
+            .bind(format!("steam.{index_name}"))
+            .fetch_optional(&mut *reference)
+            .await
+            .expect("read billing index");
+        let expected: (String, i32, bool, bool, String) = sqlx::query_as(shape)
+            .bind(&reference_name)
+            .fetch_one(&mut *reference)
+            .await
+            .expect("read reference index");
+        let actual = actual.unwrap_or_else(|| panic!("{index_name} fehlt"));
+        assert_eq!(actual, expected, "{index_name}");
+        assert_eq!(
+            (actual.0.as_str(), actual.1, actual.2, actual.3),
+            (method, 1, false, true),
+            "{index_name}"
         );
     }
+    reference.rollback().await.expect("drop index reference");
     let oversized = sqlx::query(
         "INSERT INTO steam.plus_billing_events (stripe_event_id, event_type, object_id, payload)
          SELECT 'evt_oversized', 'invoice.paid', NULL,
