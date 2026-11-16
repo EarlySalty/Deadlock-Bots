@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -700,19 +698,13 @@ fn load_support_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedSupportConfig, String> {
     let path = repo_root.join(SUPPORT_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Support-Textdatei `{SUPPORT_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedSupportConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Support-Textdatei `{SUPPORT_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = crate::serversync::read_optional_text(&path)
+        .map_err(|reason| format!("Support-Textdatei `{SUPPORT_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Support-Textdatei `{SUPPORT_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedSupportConfig::from_defaults());
     };
 
     let file = toml::from_str::<SupportTextsToml>(&raw).map_err(|err| {
@@ -1249,6 +1241,7 @@ fn interactive_button(id: u64, style: u8, label: &str, custom_id: &str) -> Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     fn write_support_texts_file(repo_root: &Path, body: &str) {
@@ -1785,6 +1778,18 @@ enabled = false
         assert_eq!(output.messages[0].action, "planned_repost");
         assert_eq!(output.messages[1].action, "planned_post");
         assert_eq!(output.messages[2].action, "planned_post");
+    }
+
+    #[test]
+    fn textdatei_als_kaputter_link_bricht_ab_statt_defaults_zu_nutzen() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(SUPPORT_TEXTS_FILE);
+        fs::create_dir_all(path.parent().expect("texts parent")).expect("mkdir texts parent");
+        std::os::unix::fs::symlink(temp.path().join("ziel-fehlt.toml"), &path).expect("symlink");
+        let Err(err) = load_support_snapshot(temp.path()) else {
+            panic!("kaputter Textdatei-Link muss den Snapshot abbrechen");
+        };
+        assert!(err.contains("Support-Textdatei"), "{err}");
     }
 
     #[test]

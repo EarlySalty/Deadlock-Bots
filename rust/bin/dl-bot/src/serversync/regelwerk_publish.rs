@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -476,19 +474,13 @@ fn load_regelwerk_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedRegelwerkConfig, String> {
     let path = repo_root.join(REGELWERK_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedRegelwerkConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = crate::serversync::read_optional_text(&path)
+        .map_err(|reason| format!("Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedRegelwerkConfig::from_defaults());
     };
 
     let file = toml::from_str::<RegelwerkTextsToml>(&raw).map_err(|err| {
@@ -816,6 +808,7 @@ fn button(id: u64, label: &str, style: u8, custom_id: &str) -> Value {
 mod tests {
     use super::*;
     use dl_discord::InteractionHandler;
+    use std::fs;
     use std::path::Path;
 
     fn write_regelwerk_texts_file(repo_root: &Path, body: &str) {

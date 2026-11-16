@@ -1032,7 +1032,7 @@ pub(crate) fn read_optional_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, String> {
     let path = repo_root.join(relative_path);
-    let present = banner_file_present(&path)
+    let present = optional_file_present(&path)
         .map_err(|reason| format!("{label}-Banner `{}` {reason}", path.display()))?;
     if !present {
         warnings.push(format!(
@@ -1048,7 +1048,16 @@ pub(crate) fn read_optional_banner(
     })
 }
 
-pub(crate) fn banner_file_present(path: &std::path::Path) -> Result<bool, String> {
+pub(crate) fn read_optional_text(path: &std::path::Path) -> Result<Option<String>, String> {
+    if !optional_file_present(path)? {
+        return Ok(None);
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .map_err(|err| format!("konnte nicht gelesen werden: {err}"))
+}
+
+pub(crate) fn optional_file_present(path: &std::path::Path) -> Result<bool, String> {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(true),
         Ok(_) => Err("ist keine Datei".to_string()),
