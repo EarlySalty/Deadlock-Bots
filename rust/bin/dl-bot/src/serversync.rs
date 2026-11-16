@@ -4235,8 +4235,8 @@ impl ServerSyncOps for ServerSyncService {
                                 continue;
                             }
                             output.warnings.push(format!(
-                            "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                        ));
+                                "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                            ));
                         }
 
                         let message_id = self
@@ -4533,8 +4533,8 @@ impl ServerSyncOps for ServerSyncService {
                                 continue;
                             }
                             output.warnings.push(format!(
-                            "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                        ));
+                                "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                            ));
                         }
 
                         let message_id = self
@@ -4766,8 +4766,8 @@ impl ServerSyncOps for ServerSyncService {
                                 continue;
                             }
                             output.warnings.push(format!(
-                            "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                        ));
+                                "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                            ));
                         }
 
                         let message_id = self
@@ -5188,8 +5188,8 @@ impl ServerSyncOps for ServerSyncService {
                                 continue;
                             }
                             output.warnings.push(format!(
-                            "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                        ));
+                                "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                            ));
                         }
 
                         let message_id = self
@@ -6024,8 +6024,8 @@ impl ServerSyncOps for ServerSyncService {
                                     continue;
                                 }
                                 output.warnings.push(format!(
-                                "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
-                            ));
+                                    "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
+                                ));
                             }
                             let message_id = self
                                 .post_voice_ux_message(
