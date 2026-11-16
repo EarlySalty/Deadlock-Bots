@@ -169,6 +169,14 @@ pub fn twitch_channel_list() -> String {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn banned_copy_in(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    SUPPORT_BANNED_COPY
+        .into_iter()
+        .find(|banned| lower.contains(&banned.to_lowercase()))
+}
+
 pub fn join_alternatives(labels: Vec<String>) -> String {
     match labels.split_last() {
         None => String::new(),
@@ -467,14 +475,19 @@ pub fn build_support_output_from(
     dry_run: bool,
 ) -> Result<SupportPublishOutput, String> {
     let mut warnings = snapshot.config_warnings.clone();
-    placeholder_warnings(&snapshot.config.texts, options, &mut warnings);
+    let blocks = SupportBlocks::new(&snapshot.config.texts, funding, options);
+    placeholder_warnings(&blocks, &mut warnings);
     warnings.extend(snapshot.banner_warnings.iter().cloned());
-    let built_messages =
-        support_messages(snapshot.banner.clone(), &snapshot.config, funding, options);
+    let built_messages = support_messages(snapshot.banner.clone(), &snapshot.config, &blocks);
+    let positional_ids = stored.message_ids.len() == built_messages.len();
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
-        let stored_message_id = stored.message_ids.get(message_index).copied();
+        let stored_message_id = stored
+            .message_ids
+            .get(message_index)
+            .copied()
+            .filter(|_| positional_ids);
         messages.push(SupportMessageOutput {
             message_index,
             message_key: support_message_key(message_index),
@@ -538,31 +551,40 @@ pub fn changed_messages<'a>(
     current: &SupportPublishOutput,
     next: &'a SupportPublishOutput,
     message_ids: &[u64],
-) -> Option<Vec<(u64, &'a SupportMessageOutput)>> {
-    if current.messages.len() != next.messages.len() || next.messages.len() != message_ids.len() {
-        return None;
-    }
-    Some(
-        current
-            .messages
-            .iter()
-            .zip(&next.messages)
-            .zip(message_ids)
-            .filter(|((left, right), _)| left.payload != right.payload)
-            .map(|((_, right), message_id)| (*message_id, right))
-            .collect(),
-    )
+) -> Vec<(u64, &'a SupportMessageOutput)> {
+    current
+        .messages
+        .iter()
+        .zip(&next.messages)
+        .zip(message_ids)
+        .filter(|((left, right), _)| left.payload != right.payload)
+        .map(|((_, right), message_id)| (*message_id, right))
+        .collect()
+}
+
+pub fn new_warnings<'a>(
+    current: &SupportPublishOutput,
+    next: &'a SupportPublishOutput,
+) -> Vec<&'a String> {
+    next.warnings
+        .iter()
+        .filter(|warning| !current.warnings.contains(warning))
+        .collect()
 }
 
 pub fn support_payload_is_unchanged(output: &SupportPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn render_funding_text(template: &str, funding: SupportFunding) -> String {
-    template
-        .replace("{balken}", &funding_bar(funding))
-        .replace("{stand}", &format_euro(funding.raised_cents))
-        .replace("{ziel}", &format_euro(funding.goal_cents))
+fn funding_block(template: &str, funding: SupportFunding) -> SupportBlock<'_> {
+    SupportBlock {
+        values: vec![
+            (PLACEHOLDER_BAR, funding_bar(funding)),
+            (PLACEHOLDER_RAISED, format_euro(funding.raised_cents)),
+            (PLACEHOLDER_GOAL, format_euro(funding.goal_cents)),
+        ],
+        ..SupportBlock::fixed("funding", template)
+    }
 }
 
 fn funding_bar(funding: SupportFunding) -> String {
@@ -765,60 +787,116 @@ impl ResolvedSupportConfig {
     }
 }
 
-const FUNDING_PLACEHOLDERS: &[&str] = &["balken", "stand", "ziel"];
-const PAY_PLACEHOLDERS: &[&str] = &["stufen"];
-const TWITCH_PLACEHOLDERS: &[&str] = &["kanaele"];
+const PLACEHOLDER_BAR: &str = "balken";
+const PLACEHOLDER_RAISED: &str = "stand";
+const PLACEHOLDER_GOAL: &str = "ziel";
+const PLACEHOLDER_TIERS: &str = "stufen";
+const PLACEHOLDER_CHANNELS: &str = "kanaele";
 
-type PlaceholderCheck<'a> = (
-    bool,
-    &'a str,
-    &'static str,
-    &'a [&'static str],
-    &'static [&'static str],
-);
+struct SupportBlock<'a> {
+    field: &'static str,
+    template: &'a str,
+    shown: bool,
+    values: Vec<(&'static str, String)>,
+}
 
-fn placeholder_warnings(
-    texts: &ResolvedSupportTexts,
-    options: &SupportPanelOptions,
-    warnings: &mut Vec<String>,
-) {
-    let checks: [PlaceholderCheck; 9] = [
-        (true, &texts.intro, "intro", &[], &[]),
-        (options.role_grant, &texts.perks, "perks", &[], &[]),
-        (true, &texts.steam, "steam", &[], &[]),
-        (true, &texts.planned, "planned", &[], &[]),
-        (true, &texts.free, "free", &[], &[]),
-        (
-            true,
-            &texts.funding,
-            "funding",
-            FUNDING_PLACEHOLDERS,
-            FUNDING_PLACEHOLDERS,
-        ),
-        (true, &texts.pay, "pay", PAY_PLACEHOLDERS, PAY_PLACEHOLDERS),
-        (
-            options.twitch,
-            &texts.twitch,
-            "twitch",
-            TWITCH_PLACEHOLDERS,
-            TWITCH_PLACEHOLDERS,
-        ),
-        (true, &texts.thanks, "thanks", &[], &[]),
-    ];
-    for (_, text, field, required, allowed) in checks.into_iter().filter(|check| check.0) {
-        let found = placeholder_names(text);
-        for missing in required.iter().filter(|name| !found.contains(name)) {
-            warnings.push(format!(
-                "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {{{missing}}}; der Wert fehlt dann im Panel."
-            ));
+impl<'a> SupportBlock<'a> {
+    fn fixed(field: &'static str, template: &'a str) -> Self {
+        Self {
+            field,
+            template,
+            shown: true,
+            values: Vec::new(),
         }
-        for unknown in found.iter().filter(|name| !allowed.contains(name)) {
-            warnings.push(format!(
+    }
+
+    fn rendered(&self) -> String {
+        if !self.shown {
+            return String::new();
+        }
+        self.values
+            .iter()
+            .fold(self.template.to_string(), |text, (name, value)| {
+                text.replace(&format!("{{{name}}}"), value)
+            })
+    }
+}
+
+struct SupportBlocks<'a> {
+    intro: SupportBlock<'a>,
+    perks: SupportBlock<'a>,
+    steam: SupportBlock<'a>,
+    planned: SupportBlock<'a>,
+    free: SupportBlock<'a>,
+    funding: SupportBlock<'a>,
+    pay: SupportBlock<'a>,
+    twitch: SupportBlock<'a>,
+    thanks: SupportBlock<'a>,
+}
+
+impl<'a> SupportBlocks<'a> {
+    fn new(
+        texts: &'a ResolvedSupportTexts,
+        funding: SupportFunding,
+        options: &SupportPanelOptions,
+    ) -> Self {
+        Self {
+            intro: SupportBlock::fixed("intro", &texts.intro),
+            perks: SupportBlock {
+                shown: options.role_grant,
+                ..SupportBlock::fixed("perks", &texts.perks)
+            },
+            steam: SupportBlock::fixed("steam", &texts.steam),
+            planned: SupportBlock::fixed("planned", &texts.planned),
+            free: SupportBlock::fixed("free", &texts.free),
+            funding: funding_block(&texts.funding, funding),
+            pay: SupportBlock {
+                values: vec![(PLACEHOLDER_TIERS, format_tier_list(&options.tiers_eur))],
+                ..SupportBlock::fixed("pay", &texts.pay)
+            },
+            twitch: SupportBlock {
+                shown: options.twitch,
+                values: vec![(PLACEHOLDER_CHANNELS, twitch_channel_list())],
+                ..SupportBlock::fixed("twitch", &texts.twitch)
+            },
+            thanks: SupportBlock::fixed("thanks", &texts.thanks),
+        }
+    }
+
+    fn all(&self) -> [&SupportBlock<'a>; 9] {
+        [
+            &self.intro,
+            &self.perks,
+            &self.steam,
+            &self.planned,
+            &self.free,
+            &self.funding,
+            &self.pay,
+            &self.twitch,
+            &self.thanks,
+        ]
+    }
+}
+
+fn placeholder_warnings(blocks: &SupportBlocks<'_>, warnings: &mut Vec<String>) {
+    for block in blocks.all().into_iter().filter(|block| block.shown) {
+        let field = block.field;
+        let found = placeholder_names(block.template);
+        let known: Vec<&str> = block.values.iter().map(|(name, _)| *name).collect();
+        for missing in known.iter().filter(|name| !found.contains(name)) {
+            warnings.extend([format!(
+                "Support-Textdatei: [texts].{field} enthält keinen Platzhalter {{{missing}}}; der Wert fehlt dann im Panel."
+            )]);
+        }
+        for unknown in found.iter().filter(|name| !known.contains(name)) {
+            warnings.extend([format!(
                 "Support-Textdatei: [texts].{field} enthält den unbekannten Platzhalter {{{unknown}}}; er erscheint dann wörtlich im Panel."
-            ));
+            )]);
         }
     }
 }
+
+const PLACEHOLDER_NAME_MAX_CHARS: usize = 40;
 
 fn placeholder_names(text: &str) -> Vec<&str> {
     let mut names = Vec::new();
@@ -829,8 +907,11 @@ fn placeholder_names(text: &str) -> Vec<&str> {
             break;
         };
         let name = &after[..end];
-        if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_lowercase() || ch == '_') {
-            names.push(name);
+        if !name.is_empty()
+            && name.chars().count() <= PLACEHOLDER_NAME_MAX_CHARS
+            && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+        {
+            names.extend([name]);
             rest = &after[end + 1..];
         } else {
             rest = after;
@@ -848,21 +929,20 @@ fn apply_optional(target: &mut String, value: Option<String>) {
 fn support_messages(
     banner: Option<SupportBannerOutput>,
     config: &ResolvedSupportConfig,
-    funding: SupportFunding,
-    options: &SupportPanelOptions,
+    blocks: &SupportBlocks<'_>,
 ) -> Vec<SupportBuiltMessage> {
     let messages = vec![
-        main_message(banner, config, options),
+        main_message(banner, blocks),
         message_from_container(
             SUPPORT_COMPONENT_ID_BENEFITS_CONTAINER,
             None,
             section_children(&[
-                (SUPPORT_COMPONENT_ID_PLANNED, &config.texts.planned),
-                (SUPPORT_COMPONENT_ID_FREE, &config.texts.free),
+                (SUPPORT_COMPONENT_ID_PLANNED, &blocks.planned.rendered()),
+                (SUPPORT_COMPONENT_ID_FREE, &blocks.free.rendered()),
             ]),
             Vec::new(),
         ),
-        pay_message(config, funding, options),
+        pay_message(config, blocks),
     ];
     debug_assert_eq!(messages.len(), SUPPORT_MESSAGE_COUNT);
     messages
@@ -870,8 +950,7 @@ fn support_messages(
 
 fn main_message(
     banner: Option<SupportBannerOutput>,
-    config: &ResolvedSupportConfig,
-    options: &SupportPanelOptions,
+    blocks: &SupportBlocks<'_>,
 ) -> SupportBuiltMessage {
     let mut children = Vec::new();
     let mut attachments = Vec::new();
@@ -886,15 +965,10 @@ fn main_message(
             bytes: banner.bytes.clone(),
         });
     }
-    let perks = if options.role_grant {
-        config.texts.perks.as_str()
-    } else {
-        ""
-    };
     children.extend(section_children(&[
-        (SUPPORT_COMPONENT_ID_MAIN_TEXT, &config.texts.intro),
-        (SUPPORT_COMPONENT_ID_PERKS, perks),
-        (SUPPORT_COMPONENT_ID_STEAM, &config.texts.steam),
+        (SUPPORT_COMPONENT_ID_MAIN_TEXT, &blocks.intro.rendered()),
+        (SUPPORT_COMPONENT_ID_PERKS, &blocks.perks.rendered()),
+        (SUPPORT_COMPONENT_ID_STEAM, &blocks.steam.rendered()),
     ]));
     message_from_container(
         SUPPORT_COMPONENT_ID_MAIN_CONTAINER,
@@ -904,28 +978,19 @@ fn main_message(
     )
 }
 
-fn render_pay_text(texts: &ResolvedSupportTexts, options: &SupportPanelOptions) -> String {
-    let mut parts = vec![texts
-        .pay
-        .replace("{stufen}", &format_tier_list(&options.tiers_eur))];
-    if options.twitch {
-        parts.push(texts.twitch.replace("{kanaele}", &twitch_channel_list()));
-    }
-    parts.retain(|part| !part.trim().is_empty());
-    parts.join("\n")
+fn render_pay_text(blocks: &SupportBlocks<'_>) -> String {
+    [blocks.pay.rendered(), blocks.twitch.rendered()]
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn pay_message(
-    config: &ResolvedSupportConfig,
-    funding: SupportFunding,
-    options: &SupportPanelOptions,
-) -> SupportBuiltMessage {
-    let funding_text = render_funding_text(&config.texts.funding, funding);
-    let pay_text = render_pay_text(&config.texts, options);
+fn pay_message(config: &ResolvedSupportConfig, blocks: &SupportBlocks<'_>) -> SupportBuiltMessage {
     let mut children = section_children(&[
-        (SUPPORT_COMPONENT_ID_FUNDING, &funding_text),
-        (SUPPORT_COMPONENT_ID_PAY_BODY, &pay_text),
-        (SUPPORT_COMPONENT_ID_PAY_THANKS, &config.texts.thanks),
+        (SUPPORT_COMPONENT_ID_FUNDING, &blocks.funding.rendered()),
+        (SUPPORT_COMPONENT_ID_PAY_BODY, &render_pay_text(blocks)),
+        (SUPPORT_COMPONENT_ID_PAY_THANKS, &blocks.thanks.rendered()),
     ]);
     if !children.is_empty() {
         children.push(separator(SUPPORT_COMPONENT_ID_PAY_SEP_ACTIONS, 2));
@@ -950,7 +1015,7 @@ fn pay_message(
             SUPPORT_BUTTON_MANAGE,
         ),
     ];
-    if options.twitch {
+    if blocks.twitch.shown {
         row.push(interactive_button(
             SUPPORT_COMPONENT_ID_TWITCH_BUTTON,
             2,
@@ -1111,9 +1176,12 @@ fn validate_component_shape(value: &Value) -> Result<(), String> {
 fn validate_button(value: &Value) -> Result<(), String> {
     let label = value.get("label").and_then(Value::as_str).unwrap_or("");
     let label_chars = label.chars().count();
-    if label.trim().is_empty() || label_chars > BUTTON_LABEL_MAX_CHARS {
+    if label.trim().is_empty() {
+        return Err("Support-Button-Label ist leer".to_string());
+    }
+    if label_chars > BUTTON_LABEL_MAX_CHARS {
         return Err(format!(
-            "Support-Button-Label muss 1 bis {BUTTON_LABEL_MAX_CHARS} Zeichen haben, hat {label_chars}"
+            "Support-Button-Label darf höchstens {BUTTON_LABEL_MAX_CHARS} Zeichen haben, hat {label_chars}"
         ));
     }
     Ok(())
@@ -1309,13 +1377,7 @@ mod tests {
     }
 
     fn assert_no_banned_copy(output: &SupportPublishOutput, variant: &str) {
-        let rendered = rendered_copy(output).to_lowercase();
-        for banned in SUPPORT_BANNED_COPY {
-            assert!(
-                !rendered.contains(&banned.to_lowercase()),
-                "{variant}: {banned}"
-            );
-        }
+        assert_eq!(banned_copy_in(&rendered_copy(output)), None, "{variant}");
     }
 
     const STORED_IDS: [u64; SUPPORT_MESSAGE_COUNT] = [7001, 7002, 7003];
@@ -1418,18 +1480,7 @@ enabled = false
             true,
         )
         .expect("output");
-        let rendered = output
-            .messages
-            .iter()
-            .flat_map(|message| text_contents(&message.payload))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for banned in SUPPORT_BANNED_COPY {
-            assert!(
-                !rendered.to_lowercase().contains(&banned.to_lowercase()),
-                "{banned}"
-            );
-        }
+        assert_no_banned_copy(&output, "alte Felder");
         let labels: Vec<String> = output
             .messages
             .iter()
@@ -1652,15 +1703,15 @@ enabled = false
     fn balken_zeigt_betrag_und_mindestens_ein_segment() {
         let template = "{balken} {stand} von {ziel}";
         assert_eq!(
-            render_funding_text(template, funding(0)),
+            funding_block(template, funding(0)).rendered(),
             "▱▱▱▱▱▱▱▱▱▱ 0 € von 50 €"
         );
         assert_eq!(
-            render_funding_text(template, funding(50)),
+            funding_block(template, funding(50)).rendered(),
             "▰▱▱▱▱▱▱▱▱▱ 0,50 € von 50 €"
         );
         assert_eq!(
-            render_funding_text(template, funding(7550)),
+            funding_block(template, funding(7550)).rendered(),
             "▰▰▰▰▰▰▰▰▰▰ 75,50 € von 50 €"
         );
         let big = SupportFunding {
@@ -1668,7 +1719,7 @@ enabled = false
             goal_cents: 0,
         };
         assert_eq!(
-            render_funding_text(template, big),
+            funding_block(template, big).rendered(),
             "▱▱▱▱▱▱▱▱▱▱ 1.234.567 € von 0 €"
         );
         let tiny = SupportFunding {
@@ -1676,14 +1727,16 @@ enabled = false
             goal_cents: 100_000,
         };
         assert_eq!(
-            render_funding_text(template, tiny),
+            funding_block(template, tiny).rendered(),
             "▰▱▱▱▱▱▱▱▱▱ 5 € von 1.000 €"
         );
         let huge = SupportFunding {
             raised_cents: i64::MAX,
             goal_cents: 7,
         };
-        assert!(render_funding_text(template, huge).starts_with("▰▰▰▰▰▰▰▰▰▰ "));
+        assert!(funding_block(template, huge)
+            .rendered()
+            .starts_with("▰▰▰▰▰▰▰▰▰▰ "));
     }
 
     #[test]
@@ -1775,9 +1828,14 @@ enabled = false
         )
         .expect("output");
         assert!(output.repost_required);
-        assert_eq!(output.messages[0].action, "planned_repost");
-        assert_eq!(output.messages[1].action, "planned_post");
-        assert_eq!(output.messages[2].action, "planned_post");
+        assert_eq!(output.stored_message_ids, vec![7001]);
+        assert!(
+            output
+                .messages
+                .iter()
+                .all(|message| message.action == "planned_post"
+                    && message.stored_message_id.is_none())
+        );
     }
 
     #[test]
@@ -1794,7 +1852,6 @@ enabled = false
 
     #[test]
     fn unlesbarer_banner_bricht_ab_statt_ohne_banner_zu_posten() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = load_support_snapshot(temp.path()).expect("snapshot ohne banner");
         assert!(missing.banner.is_none());
@@ -1807,10 +1864,21 @@ enabled = false
         let path = temp
             .path()
             .join(format!("{SUPPORT_BANNER_DIR}/{SUPPORT_HERO_FILENAME}"));
+        fs::remove_file(&path).expect("remove banner");
+        fs::create_dir_all(&path).expect("banner path as directory");
+        let Err(err) = load_support_snapshot(temp.path()) else {
+            panic!("Banner-Pfad als Ordner muss den Snapshot abbrechen");
+        };
+        assert!(err.contains("ist keine Datei"), "{err}");
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::remove_dir(&path).expect("remove banner directory");
+        write_banner_bytes(temp.path(), b"banner");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
-        if fs::read(&path).is_ok() {
-            return;
-        }
+        assert!(
+            fs::read(&path).is_err(),
+            "gesperrte Datei bleibt lesbar (Lauf als root?), der Lesefehler-Fall ist so nicht prüfbar"
+        );
         let Err(err) = load_support_snapshot(temp.path()) else {
             panic!("unlesbarer Banner muss den Snapshot abbrechen");
         };
@@ -1876,6 +1944,116 @@ enabled = false
     }
 
     #[test]
+    fn luecken_in_den_gespeicherten_ids_ordnen_keiner_karte_eine_fremde_id_zu() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = build_support_publish_output(
+            temp.path(),
+            &stored(&STORED_IDS[1..], None),
+            funding(0),
+            &options(),
+            true,
+        )
+        .expect("output");
+        assert!(output.repost_required);
+        assert_eq!(output.stored_message_ids, STORED_IDS[1..].to_vec());
+        for message in &output.messages {
+            assert_eq!(message.stored_message_id, None, "{}", message.message_key);
+            assert_eq!(message.action, "planned_post", "{}", message.message_key);
+        }
+    }
+
+    fn dry_run_card(message: &SupportMessageOutput) -> String {
+        let mut blocks = Vec::new();
+        for container in &message.payload.components {
+            for child in container["components"].as_array().into_iter().flatten() {
+                match child["type"].as_u64() {
+                    Some(12) => blocks.extend(
+                        child["items"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|item| item["media"]["url"].as_str())
+                            .map(|url| format!("[Banner: {url}]")),
+                    ),
+                    Some(10) => blocks.extend(child["content"].as_str().map(str::to_string)),
+                    Some(14) => blocks.extend(["---".to_string()]),
+                    Some(1) => blocks.extend([child["components"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|button| {
+                            format!(
+                                "[{}] ({})",
+                                button["label"].as_str().unwrap_or_default(),
+                                button["custom_id"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ")]),
+                    _ => {}
+                }
+            }
+        }
+        blocks.join("\n\n")
+    }
+
+    #[test]
+    fn dry_run_doku_entspricht_dem_render() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let path = repo.join(".tasks/2026-11-11-supporter-panel/dry-run.md");
+        let snapshot = load_support_snapshot(&repo).expect("repo snapshot");
+        let funding = SupportFunding {
+            raised_cents: 0,
+            goal_cents: dl_core::runtime_config::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+        };
+        let mut options = SupportPanelOptions {
+            tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
+            twitch: false,
+            role_grant: false,
+        };
+        let off = build_support_output_from(&snapshot, &stored(&[], None), funding, &options, true)
+            .expect("render ohne Rolle");
+        options.role_grant = true;
+        let on = build_support_output_from(&snapshot, &stored(&[], None), funding, &options, true)
+            .expect("render mit Rolle");
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        assert!(on.warnings.is_empty(), "{:?}", on.warnings);
+        let header = format!(
+            "# Support panel dry-run\n\nGenerated by the test `dry_run_doku_entspricht_dem_render` in `rust/bin/dl-bot/src/serversync/support_publish.rs`; `SUPPORT_DRY_RUN_WRITE=1` rewrites this file, otherwise the test fails when the file differs from the render. Rendered by `build_support_output_from` with `dry_run = true`, empty KV and the repo files under `assets/`, with the dl-core defaults: tiers {}, funding {} of {}, Twitch off, `supporter_role_grant_apply` off. Warnings: none. Nothing was posted to Discord. Buttons are shown as label and custom_id. The last section is card 1 with `supporter_role_grant_apply = true`; cards 2 and 3 are the same in both renders.",
+            format_tier_list(&options.tiers_eur),
+            format_euro(funding.raised_cents),
+            format_euro(funding.goal_cents)
+        );
+        let mut sections = vec![header];
+        sections.extend(off.messages.iter().map(|message| {
+            format!(
+                "## Card {} ({}), action {}\n\n{}",
+                message.message_index + 1,
+                message.message_key,
+                message.action,
+                dry_run_card(message)
+            )
+        }));
+        sections.extend(on.messages.first().map(|message| {
+            format!(
+                "## Card 1 ({}) with `supporter_role_grant_apply = true`, action {}\n\n{}",
+                message.message_key,
+                message.action,
+                dry_run_card(message)
+            )
+        }));
+        let generated = format!("{}\n", sections.join("\n\n"));
+        if std::env::var_os("SUPPORT_DRY_RUN_WRITE").is_some() {
+            fs::write(&path, &generated).expect("dry-run schreiben");
+        }
+        let documented = fs::read_to_string(&path).expect("dry-run lesen");
+        assert_eq!(
+            documented, generated,
+            "dry-run.md weicht vom Render ab; mit SUPPORT_DRY_RUN_WRITE=1 neu erzeugen"
+        );
+    }
+
+    #[test]
     fn repo_support_textdatei_ueberschreibt_nichts() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let raw = fs::read_to_string(repo.join(SUPPORT_TEXTS_FILE)).expect("repo textdatei");
@@ -1924,7 +2102,7 @@ enabled = false
             Vec::new(),
         );
         let overflow_error = validate_support_message_budget(&overflow.payload).expect_err("label");
-        assert!(overflow_error.contains(&format!("1 bis {BUTTON_LABEL_MAX_CHARS}")));
+        assert!(overflow_error.contains(&format!("höchstens {BUTTON_LABEL_MAX_CHARS} Zeichen")));
     }
 
     fn pay_text_for(options: &SupportPanelOptions) -> String {
@@ -1985,10 +2163,16 @@ enabled = false
     fn fehlende_platzhalter_werden_je_feld_gemeldet() {
         let mut texts = ResolvedSupportConfig::from_defaults().texts;
         let mut warnings = Vec::new();
-        placeholder_warnings(&texts, &options(), &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &options()),
+            &mut warnings,
+        );
         assert!(warnings.is_empty(), "{warnings:?}");
         texts.funding = "{stand}".to_string();
-        placeholder_warnings(&texts, &options(), &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &options()),
+            &mut warnings,
+        );
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings
             .iter()
@@ -1998,7 +2182,10 @@ enabled = false
         texts.pay = format!("{} ab {{mindestbetrag}} für {{tage}} Tage", texts.pay);
         texts.thanks = "Danke {name}".to_string();
         texts.twitch = "Twitch".to_string();
-        placeholder_warnings(&texts, &options(), &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &options()),
+            &mut warnings,
+        );
         assert_eq!(warnings.len(), 3, "{warnings:?}");
         for (field, name) in [
             ("pay", "{mindestbetrag}"),
@@ -2017,14 +2204,34 @@ enabled = false
             twitch: true,
             ..options()
         };
-        placeholder_warnings(&texts, &with_twitch, &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &with_twitch),
+            &mut warnings,
+        );
         assert!(
             warnings
                 .iter()
                 .any(|warning| warning
                     .contains("[texts].twitch enthält keinen Platzhalter {kanaele}"))
         );
-        assert_eq!(placeholder_names("{a} {B} {} {x_y} {"), vec!["a", "x_y"]);
+        assert_eq!(
+            placeholder_names("{a} {B} {} {x_y} {stufe2} {Stufen} {mit leer} {ä} {"),
+            vec!["a", "B", "x_y", "stufe2", "Stufen", "ä"]
+        );
+        warnings.clear();
+        texts = ResolvedSupportConfig::from_defaults().texts;
+        texts.pay = texts.pay.replace("{stufen}", "{Stufen}");
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &options()),
+            &mut warnings,
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "Support-Textdatei: [texts].pay enthält keinen Platzhalter {stufen}; der Wert fehlt dann im Panel.".to_string(),
+                "Support-Textdatei: [texts].pay enthält den unbekannten Platzhalter {Stufen}; er erscheint dann wörtlich im Panel.".to_string(),
+            ]
+        );
         warnings.clear();
         texts = ResolvedSupportConfig::from_defaults().texts;
         texts.pay = "{stufen}".to_string();
@@ -2035,9 +2242,15 @@ enabled = false
             twitch: false,
             ..options()
         };
-        placeholder_warnings(&texts, &hidden, &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &hidden),
+            &mut warnings,
+        );
         assert!(warnings.is_empty(), "{warnings:?}");
-        placeholder_warnings(&texts, &options(), &mut warnings);
+        placeholder_warnings(
+            &SupportBlocks::new(&texts, funding(0), &options()),
+            &mut warnings,
+        );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings
             .iter()

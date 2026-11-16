@@ -9,11 +9,11 @@ use dl_core::runtime_config::supporter_wire::{
     self as wire, CHECKOUT_PATH, DISCORD_ID_FIELD, FUNDING_PATH, PORTAL_PATH, TIER_FIELD, TIP_PATH,
     TWITCH_CONNECT_PATH,
 };
-use dl_core::runtime_config::{SUPPORTER_MAX_TIERS, SUPPORTER_TWITCH_CHANNELS};
+use dl_core::runtime_config::SUPPORTER_MAX_TIERS;
 
 use super::{FundingSource, SupporterConfig};
 use crate::serversync::support_publish::{
-    format_whole_euro, join_alternatives, tier_button_id, SupportFunding, SupportPanelOptions,
+    format_whole_euro, tier_button_id, twitch_channel_list, SupportFunding, SupportPanelOptions,
     SUPPORT_BUTTON_BECOME, SUPPORT_BUTTON_MANAGE, SUPPORT_BUTTON_TIP, SUPPORT_BUTTON_TWITCH,
     SUPPORT_TIER_BUTTON_PREFIX,
 };
@@ -83,14 +83,8 @@ fn cadence(interval: Duration) -> String {
 
 pub fn reply_twitch() -> String {
     format!(
-        "Verbinde hier deinen Twitch-Account. Danach prüft der Bot automatisch, ob du bei {} abonniert hast.\n-# Der Link gilt nur kurz und nur für dich.",
-        join_alternatives(
-            SUPPORTER_TWITCH_CHANNELS
-                .iter()
-                .map(|channel| channel.to_string())
-                .chain(std::iter::once("einem passenden Streamer".to_string()))
-                .collect()
-        )
+        "Verbinde hier deinen Twitch-Account. Danach prüft der Bot automatisch, ob du bei {} ein Abo hast.\n-# Der Link gilt nur kurz und nur für dich.",
+        twitch_channel_list()
     )
 }
 
@@ -1051,15 +1045,11 @@ mod tests {
     #[test]
     fn antworttexte_nennen_werte_aus_dem_code_und_keine_panel_knoepfe() {
         assert!(!REPLY_TIP.chars().any(|ch| ch.is_ascii_digit()));
-        let alternatives: Vec<String> = SUPPORTER_TWITCH_CHANNELS
-            .iter()
-            .map(|channel| channel.to_string())
-            .chain(std::iter::once("einem passenden Streamer".to_string()))
-            .collect();
-        assert!(reply_twitch().contains(&format!(
-            "bei {} abonniert",
-            join_alternatives(alternatives)
-        )));
+        let channels = twitch_channel_list();
+        assert!(reply_twitch().contains(&format!("bei {channels} ein Abo")));
+        assert!(crate::serversync::support_publish::SUPPORT_TWITCH
+            .replace("{kanaele}", &channels)
+            .contains(&format!("bei {channels} zählt")));
         for (interval, expected) in [
             (60, "jede Minute"),
             (300, "alle 5 Minuten"),
@@ -1154,10 +1144,11 @@ mod tests {
     #[test]
     fn antworttexte_enthalten_keine_verbotenen_woerter() {
         for text in every_reply_text() {
-            let lower = text.to_lowercase();
-            for banned in crate::serversync::support_publish::SUPPORT_BANNED_COPY {
-                assert!(!lower.contains(&banned.to_lowercase()), "{banned}: {text}");
-            }
+            assert_eq!(
+                crate::serversync::support_publish::banned_copy_in(&text),
+                None,
+                "{text}"
+            );
         }
     }
 

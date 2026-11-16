@@ -926,6 +926,9 @@ pub struct ServerSyncService {
     support_panel_lock: tokio::sync::Mutex<()>,
 }
 
+pub const SUPPORT_REFRESH_NEW_WARNINGS: &str =
+    "Neue Panel-Optionen zeigen Text mit Warnungen; erst Vorschau prüfen und neu veröffentlichen";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FundingRefresh {
     Updated,
@@ -2229,8 +2232,8 @@ impl ServerSyncService {
         Ok((
             funding,
             Some(format!(
-                "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {} Cent, bis der nächste Abgleich ihn aktualisiert.",
-                funding.raised_cents
+                "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {}, bis der nächste Abgleich ihn aktualisiert.",
+                support_publish::format_euro(funding.raised_cents)
             )),
         ))
     }
@@ -2327,10 +2330,10 @@ impl ServerSyncService {
         let next =
             support_publish::build_support_output_from(&snapshot, &stored, funding, &options, true)
                 .map_err(ServerSyncError::internal)?;
-        let Some(edits) = support_publish::changed_messages(&current, &next, &stored_message_ids)
-        else {
-            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
-        };
+        if !support_publish::new_warnings(&current, &next).is_empty() {
+            return Ok(FundingRefresh::Skipped(SUPPORT_REFRESH_NEW_WARNINGS));
+        }
+        let edits = support_publish::changed_messages(&current, &next, &stored_message_ids);
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
         for (message_id, message) in edits {
             if self
@@ -12861,6 +12864,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "[texts]\nthanks = \"Danke, dass du mitträgst\"\n",
         )
         .expect("rewrite texts");
+        let changed_tiers_for_twitch = changed_tiers.clone();
         source.set(
             Ok(support_publish::SupportFunding {
                 raised_cents: 6_000,
@@ -12873,6 +12877,21 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(
             text_refresh,
             FundingRefresh::Skipped("Panel-Text weicht vom veröffentlichten Stand ab")
+        );
+        assert_eq!(patch_count(&fake), before);
+
+        std::fs::write(
+            repo.path().join(support_publish::SUPPORT_TEXTS_FILE),
+            "[texts]\nthanks = \"Danke fürs Mittragen\"\ntwitch = \"**Twitch-Sub.** Zählt auch.\"\n",
+        )
+        .expect("hidden twitch text without placeholder");
+        let mut with_twitch = changed_tiers_for_twitch;
+        with_twitch.twitch = true;
+        source.set(Ok(with_new_goal), with_twitch);
+        let before = patch_count(&fake);
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped(SUPPORT_REFRESH_NEW_WARNINGS)
         );
         assert_eq!(patch_count(&fake), before);
     }
@@ -12975,7 +12994,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(preview
             .warnings
             .iter()
-            .any(|warning| warning.contains("zuletzt veröffentlichten Stand von 4321 Cent")));
+            .any(|warning| warning.contains(&format!(
+                "zuletzt veröffentlichten Stand von {},",
+                support_publish::format_euro(4321)
+            ))));
 
         set_serversync_kv(
             db.pool(),
