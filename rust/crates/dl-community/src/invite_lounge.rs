@@ -276,7 +276,7 @@ struct Recorded {
 struct HintJob {
     event: LoungeMessage,
     claimed: (bool, Option<i64>),
-    before: (bool, Option<i64>),
+    before: Option<i64>,
     check_history: bool,
 }
 
@@ -647,7 +647,7 @@ impl InviteLoungeWatcher {
             if previous.is_none() {
                 next.last_hint_at = self.earlier_hint_at(event.author_id).await;
             }
-            let hint_before = (next.hint_sent, next.last_hint_at);
+            let hint_before = next.last_hint_at;
             let wants_hint = update_state(
                 &mut next,
                 &event,
@@ -750,10 +750,7 @@ impl InviteLoungeWatcher {
             let Some(previous) = self.store.load(event.author_id).await? else {
                 return Ok(None);
             };
-            if waits_for_code(&previous) && (kind.is_some() || code.is_some()) {
-                return Ok(None);
-            }
-            let asked = asked(&previous);
+            let asked = may_be_asked(&previous);
             let new_code = code
                 .as_deref()
                 .filter(|code| previous.friend_code.as_deref() != Some(code));
@@ -870,6 +867,10 @@ impl InviteLoungeWatcher {
         now: i64,
     ) -> (Option<dl_brain::InviteCheckInOutcome>, bool) {
         if !held_answer_open(state, channel_id, held.message_id, now) {
+            return (None, false);
+        }
+        if let Err(error) = self.confirm_check_in(user_id, state).await {
+            tracing::warn!(user_id, %error, message_id = held.message_id, "Invite-Lounge: Nachfrage vor dem Urteil nicht prüfbar, Antwort wartet");
             return (None, false);
         }
         let Some(outcome) = self.judge_answer(user_id, channel_id, &held.content).await else {
@@ -1156,14 +1157,10 @@ impl InviteLoungeWatcher {
                 }
             }
         }
-        if let (true, Some(channel_id)) = (retrying, entry.channel_id) {
-            let since = entry.first_attempt_at_millis.unwrap_or(0);
-            match self
-                .bot_replied_since(channel_id, &entry.targets(), user_id, since)
-                .await
-            {
-                Ok(Some(_)) => return NoticeResult::Delivered,
-                Ok(None) => {}
+        if retrying {
+            match self.notice_landed(user_id, entry).await {
+                Ok(true) => return NoticeResult::Delivered,
+                Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(%error, user_id, key = %entry.key, "Invite-Lounge: Zustellung nicht prüfbar");
                     return NoticeResult::Retry;
@@ -1223,6 +1220,27 @@ impl InviteLoungeWatcher {
         }
     }
 
+    async fn notice_landed(&self, user_id: u64, entry: &OutboxEntry) -> Result<bool, String> {
+        let Some(channel_id) = entry.channel_id else {
+            return Ok(false);
+        };
+        let since = entry.first_attempt_at_millis.unwrap_or(0);
+        self.bot_replied_since(channel_id, &entry.targets(), user_id, since)
+            .await
+            .map(|reply| reply.is_some())
+    }
+
+    async fn confirm_check_in(&self, user_id: u64, state: &LoungeState) -> Result<(), String> {
+        let Some(entry) = unconfirmed_check_in(state) else {
+            return Ok(());
+        };
+        if self.notice_landed(user_id, entry).await? {
+            self.finish_notice(user_id, entry, NoticeResult::Delivered)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn bot_replied_since(
         &self,
         channel_id: u64,
@@ -1265,7 +1283,8 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn send_brain_hint(&self, event: &LoungeMessage) -> Result<bool, String> {
+    async fn send_brain_hint(&self, job: &HintJob) -> Result<bool, String> {
+        let event = &job.event;
         let request = dl_brain::DiscordConversationRequest {
             user_id: event.author_id,
             channel_id: event.channel_id,
@@ -1276,17 +1295,15 @@ impl InviteLoungeWatcher {
             images: dl_brain::AttachedImages::default(),
         };
         let reply = self.brain.converse(&request).await;
-        if matches!(reply, Ok(dl_brain::ConversationReply::Answered { .. }))
-            && !self.hint_owed(event).await?
-        {
-            return Ok(true);
-        }
         match reply {
             Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
+                let Some(target) = self.hint_target(job).await? else {
+                    return Ok(false);
+                };
                 match crate::answer_support::discord_content(&text, "invite_lounge") {
                     Some(content) => self
                         .port
-                        .reply_text(event.channel_id, event.message_id, &content)
+                        .reply_text(event.channel_id, target, &content)
                         .await
                         .map(|_| true),
                     None => Ok(false),
@@ -1302,13 +1319,7 @@ impl InviteLoungeWatcher {
 
     async fn send_hint(&self, job: HintJob) -> Result<(), String> {
         let user_id = job.event.author_id;
-        if !self.hint_owed(&job.event).await? {
-            return Ok(());
-        }
-        if job.check_history && self.hint_in_history(&job.event).await {
-            return Ok(());
-        }
-        match self.send_brain_hint(&job.event).await {
+        match self.post_hint(&job).await {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => {
@@ -1323,24 +1334,31 @@ impl InviteLoungeWatcher {
         self.release_hint(user_id, job.claimed, job.before).await
     }
 
-    async fn hint_owed(&self, event: &LoungeMessage) -> Result<bool, String> {
-        let owed = self
+    async fn post_hint(&self, job: &HintJob) -> Result<bool, String> {
+        if self.hint_target(job).await?.is_none() {
+            return Ok(false);
+        }
+        if job.check_history && self.hint_in_history(&job.event).await {
+            return Ok(true);
+        }
+        self.send_brain_hint(job).await
+    }
+
+    async fn hint_target(&self, job: &HintJob) -> Result<Option<u64>, String> {
+        let event = &job.event;
+        let target = self
             .store
             .load(event.author_id)
             .await?
-            .is_some_and(|state| {
-                state.request.as_ref().is_some_and(|request| {
-                    request.message_id == event.message_id && request.phase == Phase::WaitingForCode
-                })
-            });
-        if !owed {
+            .and_then(|state| owed_hint_target(&state, job));
+        if target.is_none() {
             tracing::info!(
                 user_id = event.author_id,
                 message_id = event.message_id,
-                "Invite-Lounge sendet keinen Hinweis, die Bitte wartet nicht mehr auf den Code"
+                "Invite-Lounge sendet keinen Hinweis, die Bitte wartet nicht mehr auf den Code oder hat einen neueren Hinweis"
             );
         }
-        Ok(owed)
+        Ok(target)
     }
 
     async fn hint_in_history(&self, event: &LoungeMessage) -> bool {
@@ -1367,17 +1385,15 @@ impl InviteLoungeWatcher {
         &self,
         user_id: u64,
         claimed: (bool, Option<i64>),
-        (hint_sent, last_hint_at): (bool, Option<i64>),
+        last_hint_at: Option<i64>,
     ) -> Result<(), String> {
         loop {
             let Some(previous) = self.store.load(user_id).await? else {
                 return Ok(());
             };
             let mut released = previous.clone();
-            if previous.hint_sent == claimed.0 {
-                released.hint_sent = hint_sent;
-            }
             if previous.last_hint_at == claimed.1 {
+                released.hint_sent = false;
                 released.last_hint_at = last_hint_at;
             }
             if released == previous {
@@ -2040,7 +2056,7 @@ fn update_state(
     if kind == Some(RequestKind::Room)
         && code.is_some()
         && !code_changed
-        && !asked(state)
+        && !may_be_asked(state)
         && note_repost(state, event, now)
     {
         return false;
@@ -2066,8 +2082,9 @@ fn update_state(
         });
         if replace {
             let open = open_request(state, event.channel_id, now);
-            let continuing_direct = open
-                .is_some_and(|request| request.direct && request.phase == Phase::WaitingForCode);
+            let continues_waiting =
+                open.is_some_and(|request| request.phase == Phase::WaitingForCode);
+            let continuing_direct = continues_waiting && open.is_some_and(|request| request.direct);
             let carried = open
                 .filter(|request| request.phase != Phase::WaitingForCode)
                 .and(state.friend_code.clone());
@@ -2083,7 +2100,7 @@ fn update_state(
                 direct || continuing_direct,
                 phase,
             ));
-            if follows_closed || (!continuing_direct && state.friend_code.is_some()) {
+            if !continues_waiting {
                 state.hint_sent = false;
             }
             restart = false;
@@ -2129,9 +2146,25 @@ fn update_state(
                 .is_none_or(|sent| now.saturating_sub(sent) >= COOLDOWN_SECONDS));
     if needs_hint {
         state.hint_sent = true;
-        state.last_hint_at = Some(now);
+        state.last_hint_at = Some(next_hint_claim(state.last_hint_at, now));
     }
     needs_hint
+}
+
+fn next_hint_claim(last_hint_at: Option<i64>, now: i64) -> i64 {
+    last_hint_at.map_or(now, |last| now.max(last.saturating_add(1)))
+}
+
+fn owed_hint_target(state: &LoungeState, job: &HintJob) -> Option<u64> {
+    state
+        .request
+        .as_ref()
+        .filter(|request| {
+            request.phase == Phase::WaitingForCode
+                && state.status.channel_id == Some(job.event.channel_id)
+                && (state.hint_sent, state.last_hint_at) == job.claimed
+        })
+        .map(|request| request.message_id)
 }
 
 fn fresh_request(state: &LoungeState, now: i64) -> Option<&Request> {
@@ -2242,7 +2275,7 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
 }
 
 fn takes_answers(phase: Phase) -> bool {
-    is_open(phase)
+    matches!(phase, Phase::Pending | Phase::Dispatching)
 }
 
 fn is_held(state: &LoungeState, message_id: u64) -> bool {
@@ -2282,19 +2315,24 @@ fn intake_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) 
                 .is_some_and(|request| message_id > request.message_id)
 }
 
-fn waits_for_code(state: &LoungeState) -> bool {
-    state
-        .request
-        .as_ref()
-        .is_some_and(|request| request.phase == Phase::WaitingForCode)
-}
-
 fn asked(state: &LoungeState) -> bool {
-    state.status.asked() && !check_in_queued(state)
+    state.status.asked() && !state.outbox.iter().any(OutboxEntry::is_check_in)
 }
 
-fn check_in_queued(state: &LoungeState) -> bool {
-    state.outbox.iter().any(OutboxEntry::is_check_in)
+fn may_be_asked(state: &LoungeState) -> bool {
+    state.status.asked()
+        && state
+            .outbox
+            .iter()
+            .filter(|entry| entry.is_check_in())
+            .all(|entry| entry.first_attempt_at_millis.is_some())
+}
+
+fn unconfirmed_check_in(state: &LoungeState) -> Option<&OutboxEntry> {
+    state
+        .outbox
+        .iter()
+        .find(|entry| entry.is_check_in() && entry.first_attempt_at_millis.is_some())
 }
 
 fn note_ignored_answer(state: &LoungeState, event: &LoungeMessage, now: i64, reason: &str) {
@@ -2396,7 +2434,7 @@ fn queue_has_room(queue: &[HeldAnswer], message_id: u64) -> bool {
 }
 
 fn takes_answer_code(state: &LoungeState, message_id: u64) -> bool {
-    asked(state)
+    may_be_asked(state)
         && invite_untouched(state)
         && queue_has_room(&state.status.held_answers, message_id)
 }
@@ -2513,8 +2551,8 @@ fn settle_notice(
         }
         NoticeResult::Dropped => {
             let removed = state.outbox.remove(position);
-            unclaim_check_in(state, &removed);
             tracing::warn!(key = %removed.key, "Invite-Lounge: Meldung vom Broker abgelehnt");
+            end_unasked_request(state, &removed);
         }
         NoticeResult::Gone => drop_gone_notices(state, claimed),
         NoticeResult::Retry => {
@@ -2524,21 +2562,38 @@ fn settle_notice(
                 .is_some_and(|entry| entry.reschedule(now_millis));
             if !keep {
                 let removed = state.outbox.remove(position);
-                unclaim_check_in(state, &removed);
                 tracing::warn!(key = %removed.key, attempts = removed.attempts, "Invite-Lounge: Meldung nach sieben Tagen ohne Zustellung aufgegeben");
+                end_unasked_request(state, &removed);
             }
         }
     }
     gone
 }
 
-fn unclaim_check_in(state: &mut LoungeState, removed: &OutboxEntry) {
-    if removed.is_check_in() {
-        state
-            .status
-            .notices
-            .retain(|notice| *notice != Notice::CheckIn);
+fn end_unasked_request(state: &mut LoungeState, removed: &OutboxEntry) {
+    if !removed.is_check_in() {
+        return;
     }
+    state
+        .status
+        .notices
+        .retain(|notice| *notice != Notice::CheckIn);
+    let Some(request_id) = state
+        .request
+        .as_ref()
+        .filter(|request| {
+            request.phase == Phase::Pending && request.ids().contains(&removed.request_message_id)
+        })
+        .map(|request| request.message_id)
+    else {
+        return;
+    };
+    apply_step(state, Step::Expire);
+    state.last_result = Some("Nachfrage nicht zustellbar; still beendet".into());
+    tracing::info!(
+        request_message_id = request_id,
+        "Invite-Lounge beendet die Bitte still, die Nachfrage ließ sich nicht zustellen"
+    );
 }
 
 fn drop_gone_notices(state: &mut LoungeState, claimed: &OutboxEntry) {
