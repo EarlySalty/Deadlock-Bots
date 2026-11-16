@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
 pub const VOICE_UX_CHANNEL_ID: u64 = dl_voice::router::ROUTER_TEXT_CHANNEL_ID;
@@ -957,19 +956,16 @@ fn optional_voice_ux_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<VoiceUxBannerOutput>, String> {
     let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Voice-UX-Banner `{relative_path}` fehlt; Publish laeuft ohne diesen Banner"
-        ));
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Voice-UX",
+        &relative_path,
+        "Publish laeuft ohne diesen Banner",
+        warnings,
+    )?
+    else {
         return Ok(None);
-    }
-    let bytes = fs::read(&path).map_err(|err| {
-        format!(
-            "Voice-UX-Banner `{}` konnte nicht gelesen werden: {err}",
-            path.display()
-        )
-    })?;
+    };
     Ok(Some(VoiceUxBannerOutput {
         filename: filename.to_string(),
         relative_path,
@@ -981,6 +977,7 @@ fn optional_voice_ux_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     fn write_voice_ux_banner(repo_root: &Path, filename: &str, bytes: &[u8]) {

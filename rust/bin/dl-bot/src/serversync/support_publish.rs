@@ -1060,19 +1060,16 @@ fn optional_support_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<SupportBannerOutput>, String> {
     let relative_path = format!("{SUPPORT_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Support-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
-        ));
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Support",
+        &relative_path,
+        "Publish laeuft ohne Banner",
+        warnings,
+    )?
+    else {
         return Ok(None);
-    }
-    let bytes = fs::read(&path).map_err(|err| {
-        format!(
-            "Support-Banner `{}` konnte nicht gelesen werden: {err}",
-            path.display()
-        )
-    })?;
+    };
     Ok(Some(SupportBannerOutput {
         filename: filename.to_string(),
         relative_path,

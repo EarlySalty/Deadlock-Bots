@@ -829,19 +829,16 @@ fn optional_rang_guide_banner(
     warnings: &mut Vec<String>,
 ) -> Result<Option<RangGuideBannerOutput>, String> {
     let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Rang-Guide-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
-        ));
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Rang-Guide",
+        &relative_path,
+        "Publish laeuft ohne Banner",
+        warnings,
+    )?
+    else {
         return Ok(None);
-    }
-    let bytes = fs::read(&path).map_err(|err| {
-        format!(
-            "Rang-Guide-Banner `{}` konnte nicht gelesen werden: {err}",
-            path.display()
-        )
-    })?;
+    };
     Ok(Some(RangGuideBannerOutput {
         filename: filename.to_string(),
         relative_path,

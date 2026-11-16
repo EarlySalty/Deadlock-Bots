@@ -1024,6 +1024,28 @@ pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> St
     format!("{prefix}{message_index}")
 }
 
+pub(crate) fn read_optional_banner(
+    repo_root: &std::path::Path,
+    label: &str,
+    relative_path: &str,
+    missing_suffix: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Vec<u8>>, String> {
+    let path = repo_root.join(relative_path);
+    if !path.is_file() {
+        warnings.push(format!(
+            "{label}-Banner `{relative_path}` fehlt; {missing_suffix}"
+        ));
+        return Ok(None);
+    }
+    std::fs::read(&path).map(Some).map_err(|err| {
+        format!(
+            "{label}-Banner `{}` konnte nicht gelesen werden: {err}",
+            path.display()
+        )
+    })
+}
+
 async fn upsert_serversync_kv<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     key: &str,
