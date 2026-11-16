@@ -17,6 +17,9 @@ pub const SUPPORTER_MAX_TIERS: usize = 5;
 pub const SUPPORTER_CUTOVER_GRACE_DAYS: i32 = 31;
 pub const SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 60..=86_400;
 pub const SUPPORTER_MAX_REVOKES_RANGE: RangeInclusive<u64> = 0..=100;
+pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
+pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1000;
+pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 1..=8760;
 pub const SUPPORTER_FUNDING_GOAL_CENTS_RANGE: RangeInclusive<i64> =
     SUPPORTER_MIN_CENTS..=STRIPE_MAX_UNIT_AMOUNT_CENTS;
 pub const SUPPORTER_DEFAULT_MAX_REVOKES: u64 = 10;
@@ -338,7 +341,15 @@ impl RuntimeConfig {
         if self
             .ai
             .brain_max_question_len
-            .is_some_and(|length| length == 0 || length > 65_536)
+            .is_some_and(|length| !BRAIN_MAX_QUESTION_LEN_RANGE.contains(&length))
+            || self
+                .bridges
+                .matcher_max_ai_per_scan
+                .is_some_and(|count| !MATCHER_MAX_AI_PER_SCAN_RANGE.contains(&count))
+            || self
+                .bridges
+                .matcher_scan_interval_hours
+                .is_some_and(|hours| !MATCHER_SCAN_INTERVAL_HOURS_RANGE.contains(&hours))
         {
             return Err(invalid());
         }

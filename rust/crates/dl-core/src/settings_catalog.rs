@@ -1,14 +1,15 @@
 //! Versionierter Admin-Vertrag. Nur Einträge im geprüften Katalog sind schreibbar.
 //! Ganzzahlen laufen als Dezimalstrings über JSON, niemals als JavaScript-Number.
+use crate::bot_config as bc;
 use crate::runtime_config as rc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-fn range_bounds(range: &std::ops::RangeInclusive<u64>) -> (i64, i64) {
+fn range_bounds<T: Copy + TryInto<i64>>(range: &std::ops::RangeInclusive<T>) -> (i64, i64) {
     (
-        i64::try_from(*range.start()).unwrap_or(i64::MAX),
-        i64::try_from(*range.end()).unwrap_or(i64::MAX),
+        (*range.start()).try_into().unwrap_or(i64::MAX),
+        (*range.end()).try_into().unwrap_or(i64::MAX),
     )
 }
 
@@ -54,6 +55,13 @@ pub struct Catalog {
 pub struct ChangeRequest {
     pub revision: String,
     pub changes: BTreeMap<String, Value>,
+}
+
+fn temperature_bounds() -> (i64, i64) {
+    (
+        bc::LLM_TEMPERATURE_RANGE.start().floor() as i64,
+        bc::LLM_TEMPERATURE_RANGE.end().ceil() as i64,
+    )
 }
 
 #[derive(Debug)]
@@ -150,21 +158,31 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
             let path = replace(columns[0]);
             if path.starts_with("llm.use_cases.") {
                 if path.ends_with(".max_output_tokens") {
-                    bounds = Some((1, 32_768));
+                    bounds = Some(range_bounds(&bc::LLM_MAX_OUTPUT_TOKENS_RANGE));
                 }
                 if path.ends_with(".temperature") {
-                    bounds = Some((0, 2));
+                    bounds = Some(temperature_bounds());
                 }
                 if path.ends_with(".request_timeout_seconds") {
-                    bounds = Some((1, 110));
+                    bounds = Some(range_bounds(&bc::LLM_REQUEST_TIMEOUT_SECONDS_RANGE));
                 }
             }
             match path.as_str() {
-                "concierge.timeout_seconds" => bounds = Some((1, 110)),
-                "tempvoice.empty_lane_grace_seconds" => bounds = Some((1, 86_400)),
-                "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),
-                "runtime.bridges.matcher_scan_interval_hours" => bounds = Some((1, 8760)),
-                "runtime.ai.brain_max_question_len" => bounds = Some((1, 65_536)),
+                "concierge.timeout_seconds" => {
+                    bounds = Some(range_bounds(&bc::CONCIERGE_TIMEOUT_SECONDS_RANGE))
+                }
+                "tempvoice.empty_lane_grace_seconds" => {
+                    bounds = Some(range_bounds(&bc::TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE))
+                }
+                "runtime.bridges.matcher_max_ai_per_scan" => {
+                    bounds = Some(range_bounds(&rc::MATCHER_MAX_AI_PER_SCAN_RANGE))
+                }
+                "runtime.bridges.matcher_scan_interval_hours" => {
+                    bounds = Some(range_bounds(&rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE))
+                }
+                "runtime.ai.brain_max_question_len" => {
+                    bounds = Some(range_bounds(&rc::BRAIN_MAX_QUESTION_LEN_RANGE))
+                }
                 "runtime.community.supporter_role_sync_max_revokes" => {
                     bounds = Some(range_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE))
                 }
@@ -575,6 +593,184 @@ mod tests {
             assert_eq!(field.max.as_deref(), Some(max.as_str()), "{path}");
         }
     }
+    #[test]
+    fn katalog_grenzen_texte_und_pruefungen_folgen_denselben_konstanten() {
+        let llm_tokens = bc::LLM_MAX_OUTPUT_TOKENS_RANGE;
+        let llm_temperature = bc::LLM_TEMPERATURE_RANGE;
+        let llm_timeout = bc::LLM_REQUEST_TIMEOUT_SECONDS_RANGE;
+        let concierge = bc::CONCIERGE_TIMEOUT_SECONDS_RANGE;
+        let grace = bc::TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE;
+        assert_eq!(
+            bc::LLM_PARAMETER_ERROR,
+            format!(
+                "KI-Parameter: {}–{} Ausgabetokens, Temperatur {}–{}, Zeitlimit {}–{} Sekunden; Denkaufwand none/low/medium/high",
+                llm_tokens.start(),
+                llm_tokens.end(),
+                llm_temperature.start(),
+                llm_temperature.end(),
+                llm_timeout.start(),
+                llm_timeout.end()
+            )
+        );
+        assert_eq!(
+            bc::CONCIERGE_TIMEOUT_ERROR,
+            format!(
+                "concierge.timeout_seconds muss zwischen {} und {} liegen",
+                concierge.start(),
+                concierge.end()
+            )
+        );
+        assert_eq!(
+            bc::TEMPVOICE_EMPTY_LANE_GRACE_ERROR,
+            format!(
+                "tempvoice.empty_lane_grace_seconds muss zwischen {} und {} liegen",
+                grace.start(),
+                grace.end()
+            )
+        );
+        let fields = crate::admin_settings::fields();
+        let bounds = |path: &str| {
+            let field = fields
+                .iter()
+                .find(|field| field.path == path)
+                .unwrap_or_else(|| panic!("{path} fehlt im Katalog"));
+            (field.min.clone(), field.max.clone())
+        };
+        let expect = |path: &str, min: String, max: String| {
+            assert_eq!(bounds(path), (Some(min), Some(max)), "{path}");
+        };
+        expect(
+            "concierge.timeout_seconds",
+            concierge.start().to_string(),
+            concierge.end().to_string(),
+        );
+        expect(
+            "tempvoice.empty_lane_grace_seconds",
+            grace.start().to_string(),
+            grace.end().to_string(),
+        );
+        for (path, range) in [
+            (
+                "runtime.bridges.matcher_max_ai_per_scan",
+                rc::MATCHER_MAX_AI_PER_SCAN_RANGE,
+            ),
+            (
+                "runtime.bridges.matcher_scan_interval_hours",
+                rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE,
+            ),
+        ] {
+            expect(path, range.start().to_string(), range.end().to_string());
+        }
+        expect(
+            "runtime.ai.brain_max_question_len",
+            rc::BRAIN_MAX_QUESTION_LEN_RANGE.start().to_string(),
+            rc::BRAIN_MAX_QUESTION_LEN_RANGE.end().to_string(),
+        );
+        let token_label = format!(
+            "Maximale Ausgabetokens ({}–{})",
+            llm_tokens.start(),
+            llm_tokens.end()
+        );
+        let temperature_label = format!(
+            "Temperatur ({}–{})",
+            llm_temperature.start(),
+            llm_temperature.end()
+        );
+        let timeout_label = format!(
+            "Zeitlimit je Anfrageversuch ({}–{} Sekunden)",
+            llm_timeout.start(),
+            llm_timeout.end()
+        );
+        let mut seen = 0;
+        for field in fields
+            .iter()
+            .filter(|field| field.path.starts_with("llm.use_cases."))
+        {
+            let (label, min, max) = if field.path.ends_with(".max_output_tokens") {
+                (
+                    &token_label,
+                    llm_tokens.start().to_string(),
+                    llm_tokens.end().to_string(),
+                )
+            } else if field.path.ends_with(".temperature") {
+                (
+                    &temperature_label,
+                    llm_temperature.start().to_string(),
+                    llm_temperature.end().to_string(),
+                )
+            } else if field.path.ends_with(".request_timeout_seconds") {
+                (
+                    &timeout_label,
+                    llm_timeout.start().to_string(),
+                    llm_timeout.end().to_string(),
+                )
+            } else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(&field.label, label, "{}", field.path);
+            assert_eq!(field.min.as_deref(), Some(min.as_str()), "{}", field.path);
+            assert_eq!(field.max.as_deref(), Some(max.as_str()), "{}", field.path);
+        }
+        assert!(seen >= 3, "{seen}");
+    }
+
+    #[test]
+    fn katalog_grenzen_werden_beim_laden_erzwungen() {
+        let runtime = |bridges: rc::BridgeOptions, ai: rc::AiOptions| rc::RuntimeConfig {
+            bridges,
+            ai,
+            ..Default::default()
+        };
+        for (count, ok) in [
+            (*rc::MATCHER_MAX_AI_PER_SCAN_RANGE.start(), true),
+            (*rc::MATCHER_MAX_AI_PER_SCAN_RANGE.end(), true),
+            (rc::MATCHER_MAX_AI_PER_SCAN_RANGE.end() + 1, false),
+        ] {
+            let bridges = rc::BridgeOptions {
+                matcher_max_ai_per_scan: Some(count),
+                ..Default::default()
+            };
+            assert_eq!(
+                runtime(bridges, Default::default()).validate().is_ok(),
+                ok,
+                "{count}"
+            );
+        }
+        for (hours, ok) in [
+            (rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.start() - 1, false),
+            (*rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.start(), true),
+            (*rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.end(), true),
+            (rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE.end() + 1, false),
+        ] {
+            let bridges = rc::BridgeOptions {
+                matcher_scan_interval_hours: Some(hours),
+                ..Default::default()
+            };
+            assert_eq!(
+                runtime(bridges, Default::default()).validate().is_ok(),
+                ok,
+                "{hours}"
+            );
+        }
+        for (length, ok) in [
+            (rc::BRAIN_MAX_QUESTION_LEN_RANGE.start() - 1, false),
+            (*rc::BRAIN_MAX_QUESTION_LEN_RANGE.start(), true),
+            (*rc::BRAIN_MAX_QUESTION_LEN_RANGE.end(), true),
+            (rc::BRAIN_MAX_QUESTION_LEN_RANGE.end() + 1, false),
+        ] {
+            let ai = rc::AiOptions {
+                brain_max_question_len: Some(length),
+                ..Default::default()
+            };
+            assert_eq!(
+                runtime(Default::default(), ai).validate().is_ok(),
+                ok,
+                "{length}"
+            );
+        }
+    }
+
     #[test]
     fn unterstuetzer_stufen_ausserhalb_der_grenzen_werden_abgelehnt() {
         let fields = vec![supporter_field("runtime.community.supporter_tiers_eur")];
