@@ -10,7 +10,7 @@
 //!   Clip-Contest-Plaetze und -Stimmen.
 //!
 //! URL aus `runtime.bridges.twitch_api_url`, nur numerisches Loopback, keine
-//! Redirects, Token `TWITCH_INTERNAL_API_TOKEN` aus dem Infisical-Bootstrap
+//! Redirects, interner Twitch-Token aus dem Infisical-Bootstrap
 //! (wie der Twitch-Invite-Sync in `dl-bot`).
 
 use chrono::{DateTime, NaiveDate, Utc};

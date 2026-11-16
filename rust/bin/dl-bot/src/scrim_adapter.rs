@@ -370,7 +370,9 @@ impl RelayClientError {
 impl fmt::Display for RelayClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingToken => write!(f, "TURNIER_INTERNAL_API_TOKEN fehlt"),
+            Self::MissingToken => {
+                write!(f, "{} fehlt", dl_core::runtime_config::TURNIER_TOKEN_NAME)
+            }
             Self::Transport(error) => write!(f, "Turnier-Scrim-Relay nicht erreichbar: {error}"),
             Self::Http { status, message } => {
                 write!(f, "Turnier-Scrim-Relay HTTP {}: {message}", status.as_u16())
@@ -547,7 +549,11 @@ impl TurnierScrimClient {
                 .unwrap_or_else(|| "http://127.0.0.1:8900".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            token: lookup("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default(),
+            token: dl_core::runtime_config::token_by_names(
+                &lookup,
+                &[dl_core::runtime_config::TURNIER_TOKEN_NAME],
+            )
+            .unwrap_or_default(),
         }
     }
 

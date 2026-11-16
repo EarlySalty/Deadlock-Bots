@@ -478,8 +478,14 @@ pub fn spawn(
     adapter: Arc<DiscordAdapter>,
     config: &BotConfig,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let Some(token) = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN") else {
-        tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt, Twitch-Invite-Sync inaktiv");
+    let Some(token) = dl_core::runtime_config::token_by_names(
+        dl_core::runtime_config::secret_value,
+        &[dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME],
+    ) else {
+        tracing::warn!(
+            "{} fehlt, Twitch-Invite-Sync inaktiv",
+            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME
+        );
         return None;
     };
     let base = config

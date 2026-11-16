@@ -2429,7 +2429,7 @@ mod tests {
         DashboardConfig::from_lookup(move |key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("client".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            "MASTER_BROKER_TOKEN" => Some("brk".to_string()),
+            dl_core::runtime_config::MASTER_BROKER_TOKEN_NAME => Some("brk".to_string()),
             "DISCORD_API_BASE" => Some(api_base.clone()),
             _ => None,
         })
@@ -3036,7 +3036,9 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
+            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
+                Some("test-token".to_string())
+            }
             _ => None,
         });
         let (_dir, db, app_state) = test_app(cfg).await;
@@ -3081,7 +3083,9 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
+            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
+                Some("test-token".to_string())
+            }
             _ => None,
         });
         let (_dir, db, app_state) = test_app(cfg).await;
@@ -3140,7 +3144,9 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|key| match key {
             "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
-            "TWITCH_INTERNAL_API_TOKEN" => Some("twitch-test-token".to_string()),
+            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME => {
+                Some("twitch-test-token".to_string())
+            }
             _ => None,
         });
         let (_dir, _db, app) = test_app(cfg).await;

@@ -84,8 +84,10 @@ const ADMIN_COMMANDS: [&str; 6] = [
 
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
+pub use dl_core::runtime_config::token_by_names;
+
 pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    trimmed(lookup, supporter_wire::TWITCH_TOKEN_NAME)
+    token_by_names(lookup, &[supporter_wire::TWITCH_TOKEN_NAME])
 }
 
 pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
@@ -94,10 +96,6 @@ pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Stri
 
 pub fn internal_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     token_by_names(lookup, &supporter_wire::STEAM_INTERNAL_TOKEN_NAMES)
-}
-
-pub fn token_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Option<String> {
-    names.iter().find_map(|name| trimmed(&lookup, name))
 }
 
 fn trimmed(lookup: impl Fn(&str) -> Option<String>, key: &str) -> Option<String> {

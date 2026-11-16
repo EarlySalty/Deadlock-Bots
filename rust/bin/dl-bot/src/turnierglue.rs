@@ -254,7 +254,10 @@ impl TurnierClient {
 
     async fn request(&self, request: reqwest::RequestBuilder) -> Result<ProposalEnvelope, String> {
         if self.token.trim().is_empty() {
-            return Err("TURNIER_INTERNAL_API_TOKEN fehlt".to_string());
+            return Err(format!(
+                "{} fehlt",
+                dl_core::runtime_config::TURNIER_TOKEN_NAME
+            ));
         }
         let response = request
             .header(INTERNAL_TOKEN_HEADER, &self.token)
@@ -290,14 +293,11 @@ impl TurnierProposalService {
     ) -> Self {
         let base_url = lookup("TURNIER_INTERNAL_API_BASE_URL")
             .unwrap_or_else(|| "http://127.0.0.1:8900".to_string());
-        let token = dl_bridges::steam::token_by_names(&lookup, &["TURNIER_INTERNAL_API_TOKEN"])
-            .or_else(|| {
-                dl_bridges::steam::token_by_names(
-                    &lookup,
-                    &dl_core::runtime_config::BROKER_TOKEN_NAMES,
-                )
-            })
-            .unwrap_or_default();
+        let token = dl_core::runtime_config::token_by_names(
+            &lookup,
+            &dl_core::runtime_config::TURNIER_TOKEN_NAMES,
+        )
+        .unwrap_or_default();
         Self {
             client: TurnierClient::new(base_url, token),
             adapter,

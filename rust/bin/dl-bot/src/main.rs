@@ -51,7 +51,8 @@ fn shared_broker_token() -> Option<String> {
 fn warn_if_lagebild_token_empty(token: &str) {
     if token.is_empty() {
         tracing::warn!(
-            "TURNIER_INTERNAL_API_TOKEN is empty; Lagebild endpoint will reject every request with 401"
+            "{} is empty; Lagebild endpoint will reject every request with 401",
+            dl_core::runtime_config::TURNIER_TOKEN_NAME
         );
     }
 }
@@ -745,7 +746,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
         None => {
             tracing::warn!(
-                "TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge + Matcher inaktiv"
+                "{} fehlt, Twitch-Live-Bridge und Matcher inaktiv",
+                dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME
             );
             None
         }
@@ -1433,7 +1435,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .with_context(|| format!("Broker-Port binden: {broker_addr}"))?;
     tracing::info!(addr = %broker_addr, "Master-Broker gebunden");
-    let lagebild_token = env("TURNIER_INTERNAL_API_TOKEN").unwrap_or_default();
+    let lagebild_token = dl_core::runtime_config::token_by_names(
+        operating_value,
+        &[dl_core::runtime_config::TURNIER_TOKEN_NAME],
+    )
+    .unwrap_or_default();
     warn_if_lagebild_token_empty(&lagebild_token);
     let mut broker_app = dl_broker::router(broker.clone())
         .merge(dl_broker::twitch_invites::router(
@@ -1506,7 +1512,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
-    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
+    let mcp_token = dl_core::runtime_config::token_by_names(
+        dl_core::runtime_config::secret_value,
+        &[dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME],
+    );
     let mcp_state = Arc::new(
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?
@@ -2346,7 +2355,7 @@ transparency_enabled=false
 
         let logs = logs.lock().expect("log buffer");
         let logs = String::from_utf8_lossy(&logs);
-        assert!(logs.contains("TURNIER_INTERNAL_API_TOKEN"));
+        assert!(logs.contains(dl_core::runtime_config::TURNIER_TOKEN_NAME));
         assert!(logs.contains("endpoint will reject every request with 401"));
     }
 

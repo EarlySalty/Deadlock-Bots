@@ -75,10 +75,14 @@ impl WebConfig {
             cors_origins,
             dashboard_base: get("DASHBOARD_INTERNAL_API_BASE")
                 .unwrap_or_else(|| "http://127.0.0.1:8766".to_string()),
-            relay_token: get("TURNIER_INTERNAL_API_TOKEN")
-                .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"))
-                .or_else(|| get("TWITCH_INTERNAL_API_TOKEN")),
-            twitch_token: get("TWITCH_INTERNAL_API_TOKEN"),
+            relay_token: dl_core::runtime_config::token_by_names(
+                &lookup,
+                &dl_core::runtime_config::PUBLIC_STATS_RELAY_TOKEN_NAMES,
+            ),
+            twitch_token: dl_core::runtime_config::token_by_names(
+                &lookup,
+                &[dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME],
+            ),
             stats_callback_url: get("PUBLIC_STATS_CALLBACK_URL").unwrap_or_else(|| {
                 "https://deutsche-deadlock-community.de/aktivitaet/auth/discord/complete"
                     .to_string()
@@ -128,14 +132,20 @@ mod tests {
 
     #[test]
     fn token_fallback_kette() {
-        let map = HashMap::from([("TWITCH_INTERNAL_API_TOKEN", "tw-token")]);
+        let map = HashMap::from([(
+            dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME,
+            "tw-token",
+        )]);
         let cfg = WebConfig::from_lookup(|k| map.get(k).map(|v| v.to_string()));
         assert_eq!(cfg.relay_token.as_deref(), Some("tw-token"));
         assert_eq!(cfg.twitch_token.as_deref(), Some("tw-token"));
 
         let map = HashMap::from([
-            ("TURNIER_INTERNAL_API_TOKEN", "turnier"),
-            ("TWITCH_INTERNAL_API_TOKEN", "tw"),
+            (dl_core::runtime_config::TURNIER_TOKEN_NAME, "turnier"),
+            (
+                dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME,
+                "tw",
+            ),
         ]);
         let cfg = WebConfig::from_lookup(|k| map.get(k).map(|v| v.to_string()));
         assert_eq!(cfg.relay_token.as_deref(), Some("turnier"));

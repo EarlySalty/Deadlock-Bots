@@ -62,18 +62,62 @@ const _: () = assert!(
         && STEAM_INVITE_BRIDGE_TIMEOUT_MS <= *STEAM_INVITE_TIMEOUT_MS_RANGE.end()
 );
 
+pub const MASTER_BROKER_TOKEN_NAME: &str = "MASTER_BROKER_TOKEN";
+pub const MAIN_BOT_TOKEN_NAME: &str = "MAIN_BOT_INTERNAL_TOKEN";
+pub const TURNIER_TOKEN_NAME: &str = "TURNIER_INTERNAL_API_TOKEN";
+pub const COACHING_BOT_TOKEN_NAME: &str = "COACHING_BOT_TOKEN";
+
 pub const BROKER_TOKEN_NAMES: [&str; 3] = [
-    "MASTER_BROKER_TOKEN",
-    "MAIN_BOT_INTERNAL_TOKEN",
+    MASTER_BROKER_TOKEN_NAME,
+    MAIN_BOT_TOKEN_NAME,
     supporter_wire::TWITCH_TOKEN_NAME,
 ];
+
+pub const TURNIER_TOKEN_NAMES: [&str; 4] = [
+    TURNIER_TOKEN_NAME,
+    BROKER_TOKEN_NAMES[0],
+    BROKER_TOKEN_NAMES[1],
+    BROKER_TOKEN_NAMES[2],
+];
+
+pub const PUBLIC_STATS_RELAY_TOKEN_NAMES: [&str; 3] = [
+    TURNIER_TOKEN_NAME,
+    MAIN_BOT_TOKEN_NAME,
+    supporter_wire::TWITCH_TOKEN_NAME,
+];
+
+pub const COACHING_WEBSITE_TOKEN_NAMES: [&str; 3] = [
+    supporter_wire::TWITCH_TOKEN_NAME,
+    MASTER_BROKER_TOKEN_NAME,
+    COACHING_BOT_TOKEN_NAME,
+];
+
+pub fn token_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| token_value(&lookup, name))
+}
+
+pub fn tokens_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for value in names.iter().filter_map(|name| token_value(&lookup, name)) {
+        if !tokens.contains(&value) {
+            tokens.push(value);
+        }
+    }
+    tokens
+}
+
+fn token_value(lookup: impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    lookup(name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 pub mod supporter_wire {
     pub const TWITCH_TOKEN_NAME: &str = "TWITCH_INTERNAL_API_TOKEN";
     pub const SUPPORTER_TOKEN_NAMES: [&str; 3] = [
         TWITCH_TOKEN_NAME,
-        "MASTER_BROKER_TOKEN",
-        "MAIN_BOT_INTERNAL_TOKEN",
+        super::MASTER_BROKER_TOKEN_NAME,
+        super::MAIN_BOT_TOKEN_NAME,
     ];
     pub const STEAM_INTERNAL_TOKEN_NAMES: [&str; 3] = [
         TWITCH_TOKEN_NAME,
@@ -832,14 +876,14 @@ pub fn secret_value(key: &str) -> Option<String> {
         "DISCORD_TOKEN"
         | "DISCORD_TOKEN_RANKED"
         | "CHANGELOG_API_TOKEN"
-        | "MASTER_BROKER_TOKEN"
-        | "MAIN_BOT_INTERNAL_TOKEN"
-        | "TWITCH_INTERNAL_API_TOKEN"
+        | MASTER_BROKER_TOKEN_NAME
+        | MAIN_BOT_TOKEN_NAME
+        | supporter_wire::TWITCH_TOKEN_NAME
         | "STEAM_INTERNAL_API_TOKEN"
         | "INTERNAL_API_TOKEN"
-        | "TURNIER_INTERNAL_API_TOKEN"
+        | TURNIER_TOKEN_NAME
         | "SERVERSYNC_INTERNAL_TOKEN"
-        | "COACHING_BOT_TOKEN"
+        | COACHING_BOT_TOKEN_NAME
         | "DISCORD_OAUTH_CLIENT_SECRET"
         | "PUBLIC_STATS_SESSION_SECRET"
         | "SESSIONS_ENCRYPTION_KEY"

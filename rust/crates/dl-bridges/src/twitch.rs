@@ -999,7 +999,7 @@ mod tests {
             ))
             .expect("Loopback-Konfiguration");
             let client = super::TwitchApiClient::from_env(|key| {
-                if key == "TWITCH_INTERNAL_API_TOKEN" {
+                if key == dl_core::runtime_config::supporter_wire::TWITCH_TOKEN_NAME {
                     Some("synthetic-test-token".into())
                 } else {
                     config.runtime_value(key)
