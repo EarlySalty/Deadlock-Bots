@@ -2,22 +2,13 @@
 
 Rendered by `build_support_publish_output` with `dry_run = true`, empty KV and payload format `3`, with the dl-core defaults (`config/bot.toml` sets no supporter values): tiers 5/10/20/50 €, goal 250 €, Twitch off (`supporter_twitch_api_base` unset), `supporter_role_grant_apply` unset (off). No warnings. Nothing was posted to Discord. Buttons are shown as label and custom_id.
 
-With `supporter_role_grant_apply = true` (go-live) these paragraphs differ; the cards below show the flag-off render.
+With `supporter_role_grant_apply = true` card 1 gets the perks block below between the intro and "Als Nächstes", after its own separator. Cards 2 and 3 are the same in both renders.
 
-Card 1 (support):
+Card 1 (support), on only:
 
-- on only: ## Was du jetzt bekommst
-- on only: **Mit den Streamern zusammen spielen.** Als Unterstützer bist du ein vertrauenswürdiges Mitglied der Community. Du kommst in den Streamer-VC und kannst dort mit den Streamern zusammen zocken.
-- on only: **Die Rolle Server Unterstützer.** Damit sieht jeder, dass du den Server mitträgst.
-
-Card 3 (support:zahlung):
-
-- off only: **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Kündigen kannst du jederzeit selbst über den Button unten.
-- off only: **Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.
-- off only: **Server-Boost.** Zählt vorerst als Unterstützung.
-- on only: **Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Die Rolle kommt automatisch. Kündigen kannst du jederzeit selbst über den Button unten.
-- on only: **Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite. Die Rolle kommt automatisch.
-- on only: **Server-Boost.** Zählt vorerst als Unterstützung. Die Rolle kommt automatisch.
+- ## Das bekommst du
+- **Streamer-VC.** Zock mit den Streamern zusammen.
+- **Rolle Server Unterstützer.** Jeder sieht, dass du den Server mitträgst.
 
 ## Card 1 (support), action planned_post
 
@@ -25,54 +16,42 @@ Card 3 (support:zahlung):
 
 # Server unterstützen
 
-Hier steht, wie du den Server und die Projekte unterstützen kannst. Jeder Weg zählt gleich.
+Damit trägst du den Server und unsere Projekte mit.
 
 ---
 
-## Steam Bot
+## Als Nächstes
 
-Als Nächstes wird der Steam Bot zur Funktion für Unterstützer. Dann holt er deine Matches bevorzugt ab, ähnlich wie bei https://deadlock-api.com/patron: schnellere Updates, deine ganze Match-Historie und dein Rang direkt von Steam.
-
-Echtzeit verspreche ich nicht, was möglich ist, hängt von Steam ab.
+**Steam Bot.** Holt deine Matches bevorzugt ab, mit ganzer Historie und Rang direkt von Steam.
 
 ## Card 2 (support:vorteile), action planned_post
 
 ## Was noch kommt
 
-Das ist geplant und noch nicht fertig:
-
-- **Patch-Watchlist.** Du suchst dir Helden und Items aus und bekommst Bescheid, wenn ein Patch genau daran etwas ändert.
-- **Build-Helfer im Deadlock Brain.** Du wählst einen Helden und bekommst passende Items mit einer Erklärung, auch gegen bestimmte Gegner.
-- **Mehr Match-Funktionen im Steam Bot.**
-- **Turniere und Scrims.** Unterstützer testen neue Turnierfunktionen als Erste. Dazu kommen zusätzliche Community-Abende und Fun-Turniere.
-- **Coaching-Material** für Unterstützer.
-- **Mitbestimmen.** Unterstützer stimmen ab, was als Nächstes gebaut wird.
+**Patch-Watchlist.** Du erfährst, wenn ein Patch deine Helden oder Items ändert.
+**Build-Helfer im Deadlock Brain.** Passende Items für deinen Helden, auch gegen bestimmte Gegner.
+**Turniere.** Neue Turnierfunktionen zuerst testen, dazu Fun-Turniere.
+**Coaching-Material.** Nur für Unterstützer.
+**Mitbestimmen.** Du stimmst ab, was als Nächstes gebaut wird.
 
 ---
 
-## Was kostenlos bleibt
+## Bleibt kostenlos
 
-Der Server wird nicht kostenpflichtig. Mitspieler suchen, die normalen Voice-Channels, Community-Aktivitäten, reguläre Turniere, Scrims und das normale Coaching bleiben frei.
-
-Bei regulären Turnieren und beim normalen Coaching bringt Unterstützung keinen Vorteil.
+Mitspieler suchen, Voice-Channels, Community-Abende, reguläre Turniere, Scrims und Coaching.
 
 ## Card 3 (support:zahlung), action planned_post
 
-## Monatsziel
-
-`░░░░░░░░░░░░░░░░░░░░` 0 %
-**0 € von 250 € im Monat**
--# Hier zählen die laufenden Abos und die einmaligen Beträge aus diesem Monat.
+**Monatsziel:** 0 € / 250 €
+▱▱▱▱▱▱▱▱▱▱
 
 ---
 
-## So kannst du unterstützen
+## So unterstützt du
 
-**Monatlich über Stripe.** 5 €, 10 €, 20 € oder 50 € im Monat. Kündigen kannst du jederzeit selbst über den Button unten.
-
-**Einmalig.** Den Betrag wählst du selbst, den Mindestbetrag zeigt dir die Zahlungsseite.
-
-**Server-Boost.** Zählt vorerst als Unterstützung.
+**Monatlich.** 5 €, 10 €, 20 € oder 50 € im Monat, jederzeit kündbar.
+**Einmalig.** Betrag frei wählbar.
+**Server-Boost.** Zählt auch.
 
 ---
 
