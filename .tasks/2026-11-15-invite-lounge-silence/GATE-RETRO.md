@@ -44,11 +44,11 @@ Clusters group the duplicates. Finding numbers refer to `gate-r4.log`.
 |---|---|
 | NIT 111, 112, 118, 132, 135 (live config, external branch, OFFENE-URSACHEN claims) | Facts outside the clone; checked at deploy time. The README no longer states live numbers; it states the derivation from the configured Brain timeout. |
 | NIT 113 (release hint on transport error may double a hint) | Speculative; one extra hint within 24 h, no reachable harm. |
-| NIT 115, 117, 119, 141 (rollback hazard of new fields on main binary) | Only on a rollback. README "Rollback" names the concrete step: before a main binary runs, clear or rewrite the rows that carry `held_answers`, `reposts`, `earlier` or an outbox `answer`. |
+| NIT 115, 117, 119, 141 (rollback hazard of new fields on main binary) | Only on a rollback. README "Rollback" names the concrete step: before a main binary runs, clear or rewrite the rows that carry `held_answers`, `reposts`, `earlier` or (since fix pass 8) an outbox `earlier_targets`. Correction in round 6: the outbox `answer` field already exists on main. |
 | NIT 116 | Same as I, fixed there. |
 | NIT 121 (`retry_held_answer` empty-queue branch) | Defensive, harmless. |
 | NIT 122, 124 (test `LEASE` literal) | Test parameter only; kept as a literal (see 4.7). |
-| NIT 123 (privacy eraser does not list the namespace) | Real, and partly new on this branch (`held_answers`, outbox `answer` carry member text; Fable). Not half-fixed here: the eraser gap covers `friend_code` on main too. Filed in claude-config OFFENE-URSACHEN (6b25202), README "Privacy". |
+| NIT 123 (privacy eraser does not list the namespace) | Real, and partly new on this branch (`held_answers`, outbox `answer` carry member text; Fable). Not half-fixed here: the eraser gap covers `friend_code` on main too. Filed in claude-config OFFENE-URSACHEN (6b25202), README "Privacy". Fixed in fix pass 8: the eraser and the export cover `invite_lounge:requests` and `invite_lounge:cooldown` (section 7). |
 | NIT 126, 133 (test naming, repeated `moving_clock`) | Style only. |
 | NIT 127, 129, 134, 137 (test precision, fake fidelity) | No rule is unguarded by them; test-only. |
 | NIT 128 (Postgres tests behind `--features testing`) | Run in the fixer pass with the test DB. |
@@ -143,3 +143,38 @@ Unfinished checks of the lost run:
 - The `graphify-first` hook blocks `git grep` in the reviewer sandbox: row in OFFENE-URSACHEN (c602b3c). The fix commit body lists the callers with line numbers instead.
 
 New tests: `gehaltenes_ja_waehrend_des_versands_schliesst_die_bitte_ohne_abschlussmeldung`, `ja_nach_ungueltigem_code_im_versand_laesst_keine_korrektur_mehr_zu`, `raumbitte_mit_neuem_code_in_anderem_kanal_korrigiert_den_ungueltigen_code_nicht`, `unlesbares_steam_konto_verliert_die_bitte_nicht`, `veraltete_bitte_im_versand_nimmt_keine_kopie_auf`. The first four fail with the old predicates (checked by reverting them). Checks: dl-community 371 passed, the same 4 DB-harness tests fail without `CENTRAL_TEST_DSN`; invite lounge 145 tests passed (without the Postgres tests); fmt clean; clippy reports nothing in the lounge files. The Postgres tests were not rerun: no SQL changed.
+
+## 7. Round 6 on c43470fa and fix pass 8
+
+Round 6 gave a verdict (BLOCK) and counts. Real findings, by cause (gate-learning):
+
+| Findings | Cause | Class | Fix |
+|---|---|---|---|
+| 57, 58 hint never sent for a code-less ask after a hinted and closed request | regression of the round-5 fix (stored code no longer reused) | the hint is owed once per request, every path that ends a request must leave the next one hintable | `update_state` clears `hint_sent` and skips the 24 h cooldown when the new request follows a closed, expired or stale one (`follows_closed`); `forget_request` clears both hint fields; the cooldown applies only to a member with no stored request (history backfill) |
+| 59, 109 room request after a closed or stale request dropped | instance of "open written per site without the window" | every replace decision uses the open rule | `is_closed` (not an open phase, or outside the window) makes the replace branch take the new room request |
+| 65, 71, 76, 116 outbox entries of a replaced or restarted anchor still delivered | untested path | every anchor change drops the old anchor's entries | `update_state` drops entries of all old ids whenever the anchor changes (replace, restart, plain-code completion) |
+| 69, 75, 87 "asked" counted from the claim, not the post; a rejected check-in stayed "asked" | spec gap | "asked" means the question is visible | `asked(state)`: claimed and no `CheckIn` entry waiting; `unclaim_check_in` on broker rejection or give-up; used by `apply_answer`, `takes_answer_code`, `record_answer`, `update_state` |
+| 70 `CheckIn::Skip` left an inert `Pending` request | regression (the 60 min exit was removed) | every "a human answered" result closes like `close_handled` | `Skip` finishes the request without a notice and purges its outbox |
+| 72 intake refused a new answer on a request closed while an answer was held | instance of the round-6 fix (judge side only) | judge and intake decide alike for a closed request with held answers | `intake_open` in `record_answer` |
+| 82 a "ja" in `WaitingForCode` was dropped | spec gap | "ja at any point ends the request" | `takes_answers` covers every open phase; request messages and codes in `WaitingForCode` still go to `update_state` (`waits_for_code`) |
+| 67 hint posted after the request no longer waited for its code | untested path | post-time effects re-check the state | `hint_owed` before the Brain call and before the post |
+| 68 `allows_actions` DB error dropped the message | instance of the round-6 class "fatal lookup in record_message" | write-once gate value read once | cached in `actions_since` (`OnceLock`) after the first successful read; before that first read an error still drops the message and is logged |
+| 88, 113 retry dedup looked only at the new anchor | untested path | dedup checks every target the notice could have landed on | `OutboxEntry::follow` keeps `earlier_targets`; `bot_replied_since` takes all targets |
+| 77 privacy eraser and export missed `invite_lounge:*` | critic-miss of an earlier round (filed instead of fixed) | every personal-data writer is wired into erase and export | `privacy.rs` erase (`kv_invite_lounge`) and export (`invite_lounge`) |
+| 83, 89 FAQ f5 promised an automatic invite | instance: a reader of the changed behaviour | user-facing text follows behaviour | `assets/faq_texts.toml` f5 rewritten |
+| 84, 99, 105, 115 `reread_waiting_request` repeated the open rule | instance | | takes its request from `open_request` |
+| 66 dead guard in `restart_for_new_code` | | | removed |
+| 73 re-read cadence reused `RETRY_SECONDS` | | | `REREAD_SECONDS` with derivation in README |
+| 94, 101 `is_http_404` doc comment narrower than the code | | | comment removed |
+| 95 modglue panel edit matched "10008" in the error text | twin outside the branch; serenity 0.12.5 `HttpError` Display prints only the message, so the check never matched | typed status check | 404 status match like the other modglue sites |
+| 96 tempvoice `looks_missing_message` string match | twin outside the branch; its port returns strings, not typed errors | | OFFENE-URSACHEN row (claude-config), not changed here |
+| 93 a gone reply target is logged as a Discord error with 502 | design of the broker mapping, outside the lounge | | OFFENE-URSACHEN row; README states the gap |
+| 80, 85, 90, 91 tests that did not run the rule they name | untested path | | `zweiter_dispatcher_verliert_den_anspruch_ohne_zweiten_versuch` (second dispatcher loses the CAS), reachable `(Pending, None)` fixture in `spaetes_ja_schliesst_die_bitte_in_jedem_offenen_zustand`, `hilfe_zwischen_frueherer_bitte_und_anker_zaehlt`; the Alp replay no longer claims the NotAccepted rule |
+| 79 "no attempt cap" credited to one-retry tests | | | `gehaltene_antwort_hat_keine_versuchsgrenze` (twelve errors) |
+| 60-64, 74, 78, 81, 86, 92, 97, 98, 100 README and TODO statements | | | rewritten against HEAD; "Live check" marked as pending |
+
+Renamed tests: `gehaltenes_nein_folgt_der_neu_geposteten_bitte` is now `nein_vor_der_sichtbaren_nachfrage_laedt_nicht_ein_und_folgt_der_neu_geposteten_bitte` (the held "nein" no longer invites, the next one does); `raumbitte_mit_neuem_code_in_anderem_kanal_korrigiert_den_ungueltigen_code_nicht` is now `raumbitte_in_anderem_kanal_nach_ungueltigem_code_ist_eine_neue_bitte`; `raumbitte_nach_abgeschlossener_bitte_aendert_den_code_nicht` is now `raumbitte_nach_abgeschlossener_bitte_ist_eine_neue_bitte`.
+
+New tests: `neue_bitte_ohne_code_nach_abgeschlossener_bitte_bekommt_den_hinweis`, `neue_bitte_ohne_code_nach_geloeschter_bitte_bekommt_den_hinweis`, `ja_waehrend_die_bitte_auf_den_code_wartet_beendet_sie_still`, `neue_bitte_verwirft_meldungen_der_alten_bitte`, `abgelehnte_oder_aufgegebene_nachfrage_gilt_nicht_als_gefragt`, `antwort_nach_dem_abschluss_waehrend_eine_antwort_wartet_wird_angenommen`, `hinweis_entfaellt_wenn_der_code_schon_da_ist`, `zustellpruefung_findet_die_antwort_an_der_frueheren_bitte`, `hilfe_zwischen_frueherer_bitte_und_anker_zaehlt`, `zweiter_dispatcher_verliert_den_anspruch_ohne_zweiten_versuch`, `gehaltene_antwort_hat_keine_versuchsgrenze`, `hilfe_kurz_vor_der_nachfrage_schliesst_die_bitte`. Mutation check: reverting each of the hint reset, the `forget_request` reset, `follows_closed` in the replace rule, the outbox purge, the visible-check-in rule, the `Skip` close and the `WaitingForCode` answers makes its test fail; removing only the first `hint_owed` check keeps `hinweis_entfaellt_wenn_der_code_schon_da_ist` green because the second check before the post still holds.
+
+Checks of fix pass 8: dl-community 383 passed, the same 4 DB-harness tests fail without `CENTRAL_TEST_DSN`; invite lounge 157 tests passed; dl-discord 74 passed; fmt clean; clippy reports nothing in the changed files. Postgres tests (including the extended privacy erase test) were not run: they need `CENTRAL_TEST_DSN`.

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use dl_central_db::kv;
@@ -32,6 +32,7 @@ const DISCORD_ANSWER_CHARS: usize = 2000;
 const ACTIVE_DISPATCH_MILLIS: i64 =
     2 * dl_bridges::steam::INVITE_FORWARD_TIMEOUT_SECS as i64 * 1000;
 const REQUEST_COPY_LIMIT: usize = 5;
+const REREAD_SECONDS: i64 = 5 * 60;
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{6,12}\b").ok());
 static STEAM_LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -539,6 +540,7 @@ pub struct InviteLoungeWatcher {
     lease_millis: i64,
     cutoff: Duration,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
+    actions_since: OnceLock<i64>,
 }
 
 impl InviteLoungeWatcher {
@@ -560,6 +562,7 @@ impl InviteLoungeWatcher {
             lease_millis: claim_lease_millis(cutoff),
             cutoff,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            actions_since: OnceLock::new(),
         }
     }
 
@@ -726,11 +729,13 @@ impl InviteLoungeWatcher {
     }
 
     async fn allows_actions(&self, created_at: i64) -> Result<bool, String> {
-        Ok(self
-            .store
-            .actions_since()
-            .await?
-            .is_some_and(|since| created_at >= since))
+        if let Some(since) = self.actions_since.get() {
+            return Ok(created_at >= *since);
+        }
+        let Some(since) = self.store.actions_since().await? else {
+            return Ok(false);
+        };
+        Ok(created_at >= *self.actions_since.get_or_init(|| since))
     }
 
     async fn record_answer(
@@ -745,7 +750,10 @@ impl InviteLoungeWatcher {
             let Some(previous) = self.store.load(event.author_id).await? else {
                 return Ok(None);
             };
-            let asked = previous.status.asked();
+            if waits_for_code(&previous) && (kind.is_some() || code.is_some()) {
+                return Ok(None);
+            }
+            let asked = asked(&previous);
             let new_code = code
                 .as_deref()
                 .filter(|code| previous.friend_code.as_deref() != Some(code));
@@ -753,8 +761,8 @@ impl InviteLoungeWatcher {
             if repost && !asked {
                 return Ok(None);
             }
-            if !answer_open(&previous, event.channel_id, event.message_id, now) {
-                note_ignored_answer(&previous, event, now, "Bitte zu oder anderer Kanal");
+            if !intake_open(&previous, event.channel_id, event.message_id, now) {
+                note_ignored_answer(&previous, event, now, "anderer Kanal");
                 return Ok(None);
             }
             if new_code.is_some() && !takes_answer_code(&previous, event.message_id) {
@@ -995,15 +1003,14 @@ impl InviteLoungeWatcher {
         let Some(state) = self.store.load(user_id).await? else {
             return Ok(None);
         };
-        let (Some(request), Some(channel_id)) = (state.request.as_ref(), state.status.channel_id)
+        let Some(channel_id) = state.status.channel_id else {
+            return Ok(None);
+        };
+        let Some(request) = open_request(&state, channel_id, now)
+            .filter(|request| request.phase == Phase::WaitingForCode)
         else {
             return Ok(None);
         };
-        if request.phase != Phase::WaitingForCode
-            || !is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
-        {
-            return Ok(None);
-        }
         let Some(content) = self
             .port
             .message_content(channel_id, request.message_id)
@@ -1152,7 +1159,7 @@ impl InviteLoungeWatcher {
         if let (true, Some(channel_id)) = (retrying, entry.channel_id) {
             let since = entry.first_attempt_at_millis.unwrap_or(0);
             match self
-                .bot_replied_since(channel_id, entry.request_message_id, user_id, since)
+                .bot_replied_since(channel_id, &entry.targets(), user_id, since)
                 .await
             {
                 Ok(Some(_)) => return NoticeResult::Delivered,
@@ -1219,10 +1226,11 @@ impl InviteLoungeWatcher {
     async fn bot_replied_since(
         &self,
         channel_id: u64,
-        request_id: u64,
+        targets: &[u64],
         user_id: u64,
         since_millis: i64,
     ) -> Result<Option<u64>, String> {
+        let oldest_target = targets.iter().copied().min().unwrap_or(0);
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
@@ -1234,7 +1242,9 @@ impl InviteLoungeWatcher {
             }
             if let Some(reply) = page.iter().find(|message| {
                 message.author_id == bot_id
-                    && message.reply_message_id == Some(request_id)
+                    && message
+                        .reply_message_id
+                        .is_some_and(|id| targets.contains(&id))
                     && mentions_user(&message.content, user_id)
                     && message.created_at_millis >= since_millis
             }) {
@@ -1245,7 +1255,7 @@ impl InviteLoungeWatcher {
                 .map(|message| message.message_id)
                 .min()
                 .ok_or("Leere Verlaufsseite")?;
-            if oldest <= request_id {
+            if oldest <= oldest_target {
                 return Ok(None);
             }
             if before.is_some_and(|id| oldest >= id) {
@@ -1265,7 +1275,13 @@ impl InviteLoungeWatcher {
             },
             images: dl_brain::AttachedImages::default(),
         };
-        match self.brain.converse(&request).await {
+        let reply = self.brain.converse(&request).await;
+        if matches!(reply, Ok(dl_brain::ConversationReply::Answered { .. }))
+            && !self.hint_owed(event).await?
+        {
+            return Ok(true);
+        }
+        match reply {
             Ok(dl_brain::ConversationReply::Answered { text, .. }) => {
                 match crate::answer_support::discord_content(&text, "invite_lounge") {
                     Some(content) => self
@@ -1286,6 +1302,9 @@ impl InviteLoungeWatcher {
 
     async fn send_hint(&self, job: HintJob) -> Result<(), String> {
         let user_id = job.event.author_id;
+        if !self.hint_owed(&job.event).await? {
+            return Ok(());
+        }
         if job.check_history && self.hint_in_history(&job.event).await {
             return Ok(());
         }
@@ -1302,6 +1321,26 @@ impl InviteLoungeWatcher {
             }
         }
         self.release_hint(user_id, job.claimed, job.before).await
+    }
+
+    async fn hint_owed(&self, event: &LoungeMessage) -> Result<bool, String> {
+        let owed = self
+            .store
+            .load(event.author_id)
+            .await?
+            .is_some_and(|state| {
+                state.request.as_ref().is_some_and(|request| {
+                    request.message_id == event.message_id && request.phase == Phase::WaitingForCode
+                })
+            });
+        if !owed {
+            tracing::info!(
+                user_id = event.author_id,
+                message_id = event.message_id,
+                "Invite-Lounge sendet keinen Hinweis, die Bitte wartet nicht mehr auf den Code"
+            );
+        }
+        Ok(owed)
     }
 
     async fn hint_in_history(&self, event: &LoungeMessage) -> bool {
@@ -1574,7 +1613,12 @@ impl InviteLoungeWatcher {
             CheckIn::AlreadyInvited => {
                 apply_step(&mut next, Step::Finish(Some(Notice::AlreadyInvited)))
             }
-            CheckIn::Skip => None,
+            CheckIn::Skip => {
+                next.outbox
+                    .retain(|entry| entry.request_message_id != request.message_id);
+                next.last_result = Some("Schon von Hand erledigt; keine Meldung".into());
+                apply_step(&mut next, Step::Finish(None))
+            }
             CheckIn::Ask => next.status.claim(Some(Notice::CheckIn)),
         };
         queue_notice(&mut next, notice, invited);
@@ -1902,7 +1946,7 @@ pub fn spawn(
                     }
                     if history_ready
                         && reread.is_empty()
-                        && last_reread.is_none_or(|at| now.saturating_sub(at) >= RETRY_SECONDS)
+                        && last_reread.is_none_or(|at| now.saturating_sub(at) >= REREAD_SECONDS)
                     {
                         last_reread = Some(now);
                         let reader = watcher.clone();
@@ -1989,13 +2033,14 @@ fn update_state(
     }
     let code = friend_code(&event.content);
     let request_before = state.request.as_ref().map(|request| request.message_id);
+    let ids_before = state.request.as_ref().map(Request::ids).unwrap_or_default();
     let code_changed = code
         .as_ref()
         .is_some_and(|code| state.friend_code.as_ref() != Some(code));
     if kind == Some(RequestKind::Room)
         && code.is_some()
         && !code_changed
-        && !state.status.asked()
+        && !asked(state)
         && note_repost(state, event, now)
     {
         return false;
@@ -2010,10 +2055,14 @@ fn update_state(
                 .last_dispatch_finished_at_millis
                 .is_some_and(|finished| event.created_at_millis <= finished);
         let active_dispatch = dispatch_active(state, now_millis);
+        let follows_closed = state
+            .request
+            .as_ref()
+            .is_some_and(|request| is_closed(request, now));
         let replace = state.request.as_ref().is_none_or(|request| {
             !active_dispatch
                 && !arrived_during_dispatch
-                && (direct || request.phase == Phase::WaitingForCode)
+                && (direct || follows_closed || request.phase == Phase::WaitingForCode)
         });
         if replace {
             let open = open_request(state, event.channel_id, now);
@@ -2034,7 +2083,7 @@ fn update_state(
                 direct || continuing_direct,
                 phase,
             ));
-            if !continuing_direct && state.friend_code.is_some() {
+            if follows_closed || (!continuing_direct && state.friend_code.is_some()) {
                 state.hint_sent = false;
             }
             restart = false;
@@ -2056,6 +2105,9 @@ fn update_state(
         restart_for_new_code(state, event, code, kind == Some(RequestKind::Direct), now);
     }
     if state.request.as_ref().map(|request| request.message_id) != request_before {
+        state
+            .outbox
+            .retain(|entry| !ids_before.contains(&entry.request_message_id));
         note_dropped_answers(
             event.author_id,
             &state.status.held_answers,
@@ -2071,9 +2123,10 @@ fn update_state(
         .as_ref()
         .is_some_and(|request| request.phase == Phase::WaitingForCode)
         && !state.hint_sent
-        && state
-            .last_hint_at
-            .is_none_or(|sent| now.saturating_sub(sent) >= COOLDOWN_SECONDS);
+        && (request_before.is_some()
+            || state
+                .last_hint_at
+                .is_none_or(|sent| now.saturating_sub(sent) >= COOLDOWN_SECONDS));
     if needs_hint {
         state.hint_sent = true;
         state.last_hint_at = Some(now);
@@ -2090,6 +2143,10 @@ fn fresh_request(state: &LoungeState, now: i64) -> Option<&Request> {
 
 fn request_in(state: &LoungeState, channel_id: u64, now: i64) -> Option<&Request> {
     fresh_request(state, now).filter(|_| state.status.channel_id == Some(channel_id))
+}
+
+fn is_closed(request: &Request, now: i64) -> bool {
+    !is_open(request.phase) || !is_fresh(request.created_at, now, REQUEST_WINDOW_SECONDS)
 }
 
 fn is_open(phase: Phase) -> bool {
@@ -2121,9 +2178,11 @@ fn restart_for_new_code(
     now: i64,
 ) {
     let correcting = awaits_corrected_code(state, event.channel_id, now);
-    let Some(request) = state.request.as_mut().filter(|request| {
-        (correcting || takes_answers(request.phase)) && request.message_id != event.message_id
-    }) else {
+    let Some(request) = state
+        .request
+        .as_mut()
+        .filter(|request| correcting || takes_answers(request.phase))
+    else {
         return;
     };
     let old = request.message_id;
@@ -2183,7 +2242,7 @@ fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
 }
 
 fn takes_answers(phase: Phase) -> bool {
-    matches!(phase, Phase::Pending | Phase::Dispatching)
+    is_open(phase)
 }
 
 fn is_held(state: &LoungeState, message_id: u64) -> bool {
@@ -2202,11 +2261,40 @@ fn answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) 
     })
 }
 
+fn closed_while_held(state: &LoungeState, channel_id: u64, now: i64) -> bool {
+    answer_pending(state)
+        && request_in(state, channel_id, now)
+            .is_some_and(|request| request.phase == Phase::Attempted)
+}
+
 fn held_answer_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
     answer_open(state, channel_id, message_id, now)
-        || is_held(state, message_id)
-            && request_in(state, channel_id, now)
-                .is_some_and(|request| request.phase == Phase::Attempted)
+        || is_held(state, message_id) && closed_while_held(state, channel_id, now)
+}
+
+fn intake_open(state: &LoungeState, channel_id: u64, message_id: u64, now: i64) -> bool {
+    answer_open(state, channel_id, message_id, now)
+        || closed_while_held(state, channel_id, now)
+            && message_id > state.last_seen
+            && state
+                .request
+                .as_ref()
+                .is_some_and(|request| message_id > request.message_id)
+}
+
+fn waits_for_code(state: &LoungeState) -> bool {
+    state
+        .request
+        .as_ref()
+        .is_some_and(|request| request.phase == Phase::WaitingForCode)
+}
+
+fn asked(state: &LoungeState) -> bool {
+    state.status.asked() && !check_in_queued(state)
+}
+
+fn check_in_queued(state: &LoungeState) -> bool {
+    state.outbox.iter().any(OutboxEntry::is_check_in)
 }
 
 fn note_ignored_answer(state: &LoungeState, event: &LoungeMessage, now: i64, reason: &str) {
@@ -2273,6 +2361,8 @@ fn forget_request(state: &mut LoungeState) {
     }
     state.status = RequestStatus::default();
     state.friend_code = None;
+    state.hint_sent = false;
+    state.last_hint_at = None;
     state.last_result = Some("Bitte gelöscht; still beendet".into());
 }
 
@@ -2306,7 +2396,7 @@ fn queue_has_room(queue: &[HeldAnswer], message_id: u64) -> bool {
 }
 
 fn takes_answer_code(state: &LoungeState, message_id: u64) -> bool {
-    state.status.asked()
+    asked(state)
         && invite_untouched(state)
         && queue_has_room(&state.status.held_answers, message_id)
 }
@@ -2423,6 +2513,7 @@ fn settle_notice(
         }
         NoticeResult::Dropped => {
             let removed = state.outbox.remove(position);
+            unclaim_check_in(state, &removed);
             tracing::warn!(key = %removed.key, "Invite-Lounge: Meldung vom Broker abgelehnt");
         }
         NoticeResult::Gone => drop_gone_notices(state, claimed),
@@ -2433,11 +2524,21 @@ fn settle_notice(
                 .is_some_and(|entry| entry.reschedule(now_millis));
             if !keep {
                 let removed = state.outbox.remove(position);
+                unclaim_check_in(state, &removed);
                 tracing::warn!(key = %removed.key, attempts = removed.attempts, "Invite-Lounge: Meldung nach sieben Tagen ohne Zustellung aufgegeben");
             }
         }
     }
     gone
+}
+
+fn unclaim_check_in(state: &mut LoungeState, removed: &OutboxEntry) {
+    if removed.is_check_in() {
+        state
+            .status
+            .notices
+            .retain(|notice| *notice != Notice::CheckIn);
+    }
 }
 
 fn drop_gone_notices(state: &mut LoungeState, claimed: &OutboxEntry) {
@@ -2476,7 +2577,7 @@ fn on_gone(state: &mut LoungeState, checked_message_id: u64) -> GoneOutcome {
         .iter_mut()
         .filter(|entry| entry.request_message_id == old)
     {
-        entry.request_message_id = new;
+        entry.follow(new);
     }
     GoneOutcome::Followed { old, new }
 }
@@ -2514,7 +2615,7 @@ fn apply_answer(
         .status
         .held_answers
         .retain(|queued| queued.message_id != held.message_id);
-    let asked = state.status.asked();
+    let asked = asked(state);
     let Some(request) = state.request.as_mut() else {
         return;
     };
@@ -2725,6 +2826,12 @@ fn fold_german_umlauts(value: &str) -> String {
         .replace('ß', "ss")
 }
 fn cooldown_key(user_id: u64) -> String {
+    format!("user:{user_id}")
+}
+
+pub(crate) const PRIVACY_KV_NAMESPACES: [&str; 2] = [STATE_KV_NS, COOLDOWN_KV_NS];
+
+pub(crate) fn privacy_kv_key(user_id: i64) -> String {
     format!("user:{user_id}")
 }
 #[cfg(test)]

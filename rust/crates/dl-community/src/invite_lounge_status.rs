@@ -69,6 +69,8 @@ pub(super) struct OutboxEntry {
     pub(super) claimed_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) first_attempt_at_millis: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) earlier_targets: Vec<u64>,
 }
 
 impl OutboxEntry {
@@ -124,7 +126,25 @@ impl OutboxEntry {
             next_at_millis: 0,
             claimed_at_millis: None,
             first_attempt_at_millis: None,
+            earlier_targets: Vec::new(),
         }
+    }
+
+    pub(super) fn follow(&mut self, new: u64) {
+        if !self.earlier_targets.contains(&self.request_message_id) {
+            self.earlier_targets.push(self.request_message_id);
+        }
+        self.request_message_id = new;
+    }
+
+    pub(super) fn targets(&self) -> Vec<u64> {
+        let mut targets = vec![self.request_message_id];
+        targets.extend(&self.earlier_targets);
+        targets
+    }
+
+    pub(super) fn is_check_in(&self) -> bool {
+        self.update == InviteLoungeUpdate::CheckIn
     }
 
     pub(super) fn ready(&self, now_millis: i64, lease_millis: i64) -> bool {

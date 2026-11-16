@@ -309,6 +309,7 @@ fn setup() -> (
         lease_millis: test_lease_millis(),
         cutoff: test_cutoff(),
         clock_millis: Arc::new(|| NOW * 1000),
+        actions_since: std::sync::OnceLock::new(),
     };
     (watcher, store, port, invite)
 }
@@ -1326,6 +1327,7 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
         lease_millis: test_lease_millis(),
         cutoff: test_cutoff(),
         clock_millis: Arc::new(|| NOW * 1000),
+        actions_since: std::sync::OnceLock::new(),
     };
     restarted
         .poll_due(NOW + 60)
@@ -1595,6 +1597,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         lease_millis: test_lease_millis(),
         cutoff: test_cutoff(),
         clock_millis: Arc::new(|| NOW * 1000),
+        actions_since: std::sync::OnceLock::new(),
     };
     let pending = LoungeState {
         friend_code: Some("123456789".into()),
@@ -2832,6 +2835,10 @@ async fn spaetes_ja_schliesst_die_bitte_in_jedem_offenen_zustand() {
         let (watcher, store, _, invite, brain) =
             setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
         let mut state = open_request_state(phase, wait);
+        if phase == Phase::Pending && wait.is_none() {
+            state.status.notices = vec![Notice::CheckIn];
+            state.dispatch_started_at_millis = None;
+        }
         state.outbox.push(OutboxEntry::notice(
             1,
             Some(CHECK_IN_CHANNEL_ID),
@@ -3627,9 +3634,10 @@ async fn doppelte_bitte_behaelt_den_anker_und_hilfe_von_hand_zaehlt() {
 }
 
 #[tokio::test]
-async fn gehaltenes_nein_folgt_der_neu_geposteten_bitte() {
+async fn nein_vor_der_sichtbaren_nachfrage_laedt_nicht_ein_und_folgt_der_neu_geposteten_bitte() {
     let (mut watcher, store, port, invite, brain) = setup_check_ins(vec![
         Err(BrainError::Backend("scripted".into())),
+        check_in_reply(InviteCheckInOutcome::NotArrived),
         check_in_reply(InviteCheckInOutcome::NotArrived),
     ]);
     let clock = moving_clock(&mut watcher);
@@ -3678,8 +3686,10 @@ async fn gehaltenes_nein_folgt_der_neu_geposteten_bitte() {
         .poll_due(judged)
         .await
         .expect("Antwort wird gewertet");
-    assert_eq!(check_in_texts(&brain), ["nein", "nein", repost]);
-    let request = stored(&store).await.request.expect("Bitte bleibt");
+    assert_eq!(check_in_texts(&brain), ["nein", "nein"]);
+    let state = stored(&store).await;
+    assert!(!state.status.invite_now);
+    let request = state.request.expect("Bitte bleibt");
     assert_eq!(request.message_id, 3);
     assert_eq!(
         notices(&brain).last().map(|(_, notice)| notice.target),
@@ -3690,7 +3700,17 @@ async fn gehaltenes_nein_folgt_der_neu_geposteten_bitte() {
     );
     let next_tick = judged + 15;
     clock.store(next_tick * 1000, Ordering::SeqCst);
-    watcher.poll_due(next_tick).await.expect("Einladung läuft");
+    watcher
+        .poll_due(next_tick)
+        .await
+        .expect("Keine Einladung ohne Antwort");
+    assert!(invite.calls.lock().await.is_empty());
+    let again = next_tick + 5;
+    clock.store(again * 1000, Ordering::SeqCst);
+    watcher
+        .handle_message(message(4, again, "nein"), again, Some(false))
+        .await
+        .expect("Antwort auf die sichtbare Nachfrage");
     let calls = invite.calls.lock().await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].2, "123456789");
@@ -4530,10 +4550,10 @@ async fn korrigierter_code_nach_ungueltigem_code_gehoert_zur_bitte() {
 }
 
 #[tokio::test]
-async fn raumbitte_mit_neuem_code_in_anderem_kanal_korrigiert_den_ungueltigen_code_nicht() {
+async fn raumbitte_in_anderem_kanal_nach_ungueltigem_code_ist_eine_neue_bitte() {
     let (watcher, store, _, invite) = setup();
     let closed = closed_request_state(vec![Notice::CheckIn, Notice::InvalidCode]);
-    store.states.lock().await.insert(USER, closed.clone());
+    store.states.lock().await.insert(USER, closed);
     let at = NOW + 2 * ONE_HOUR;
     let mut elsewhere = message(5, at, "Kann mich jemand einladen? 987654321");
     elsewhere.channel_id = 555;
@@ -4542,9 +4562,12 @@ async fn raumbitte_mit_neuem_code_in_anderem_kanal_korrigiert_den_ungueltigen_co
         .await
         .expect("Nachricht wird gelesen");
     let state = stored(&store).await;
-    assert_eq!(state.friend_code, closed.friend_code);
-    assert_eq!(state.request, closed.request);
-    assert_eq!(state.status.channel_id, Some(CHECK_IN_CHANNEL_ID));
+    assert_eq!(state.friend_code.as_deref(), Some("987654321"));
+    let request = state.request.expect("Neue Bitte vorhanden");
+    assert_eq!((request.message_id, request.phase), (5, Phase::Pending));
+    assert!(!request.direct);
+    assert_eq!(state.status.channel_id, Some(555));
+    assert!(state.status.notices.is_empty());
     assert!(invite.calls.lock().await.is_empty());
 }
 
@@ -4667,21 +4690,359 @@ async fn alte_direkte_wartebitte_macht_eine_neue_raumbitte_nicht_direkt() {
 }
 
 #[tokio::test]
-async fn raumbitte_nach_abgeschlossener_bitte_aendert_den_code_nicht() {
-    let (watcher, store, _, invite) = setup();
-    let closed = closed_request_state(vec![Notice::Invite]);
-    store.states.lock().await.insert(USER, closed.clone());
-    let at = NOW + 2 * ONE_HOUR;
+async fn raumbitte_nach_abgeschlossener_bitte_ist_eine_neue_bitte() {
+    for phase in [Phase::Attempted, Phase::Expired] {
+        let (watcher, store, _, invite) = setup();
+        let mut closed = closed_request_state(vec![Notice::Invite]);
+        if let Some(request) = closed.request.as_mut() {
+            request.phase = phase;
+        }
+        store.states.lock().await.insert(USER, closed);
+        let at = NOW + 2 * ONE_HOUR;
+        watcher
+            .handle_message(
+                message(5, at, "Kann mich jemand einladen? 987654321"),
+                at,
+                Some(false),
+            )
+            .await
+            .expect("Nachricht wird gelesen");
+        let state = stored(&store).await;
+        assert_eq!(state.friend_code.as_deref(), Some("987654321"));
+        let request = state.request.expect("Neue Bitte vorhanden");
+        assert_eq!((request.message_id, request.phase), (5, Phase::Pending));
+        assert!(state.status.notices.is_empty());
+        assert!(invite.calls.lock().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn neue_bitte_ohne_code_nach_abgeschlossener_bitte_bekommt_den_hinweis() {
+    let (watcher, store, port, invite) = setup();
+    let mut closed = closed_request_state(vec![Notice::Invite]);
+    closed.hint_sent = true;
+    closed.last_hint_at = Some(NOW - 60);
+    store.states.lock().await.insert(USER, closed);
+    let at = NOW + ONE_HOUR;
     watcher
         .handle_message(
-            message(5, at, "Kann mich jemand einladen? 987654321"),
+            message(5, at, "Kannst du mich nochmal einladen?"),
             at,
             Some(false),
         )
         .await
-        .expect("Nachricht wird gelesen");
+        .expect("Bitte wird angelegt");
     let state = stored(&store).await;
-    assert_eq!(state.friend_code, closed.friend_code);
-    assert_eq!(state.request, closed.request);
+    assert_eq!(state.friend_code, None);
+    let request = state.request.expect("Neue Bitte vorhanden");
+    assert_eq!(
+        (request.message_id, request.phase),
+        (5, Phase::WaitingForCode)
+    );
+    assert_eq!(
+        port.replies.lock().await.as_slice(),
+        &[(5, INVITE_LOUNGE_HINT_TEXT.into())]
+    );
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn neue_bitte_ohne_code_nach_geloeschter_bitte_bekommt_den_hinweis() {
+    let (watcher, store, port, _) = setup();
+    watcher
+        .handle_message(
+            message(1, NOW, "Kannst du mich einladen?"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    assert_eq!(port.replies.lock().await.len(), 1);
+    let mut state = stored(&store).await;
+    forget_request(&mut state);
+    store.states.lock().await.insert(USER, state);
+    watcher
+        .handle_message(
+            message(2, NOW + 60, "Kannst du mich einladen?"),
+            NOW + 60,
+            Some(false),
+        )
+        .await
+        .expect("Neue Bitte wird angelegt");
+    assert_eq!(
+        port.replies.lock().await.as_slice(),
+        &[
+            (1, INVITE_LOUNGE_HINT_TEXT.into()),
+            (2, INVITE_LOUNGE_HINT_TEXT.into())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn ja_waehrend_die_bitte_auf_den_code_wartet_beendet_sie_still() {
+    let (watcher, store, port, invite, brain) =
+        setup_check_ins(vec![check_in_reply(InviteCheckInOutcome::Arrived)]);
+    watcher
+        .handle_message(message(1, NOW, IMPERSONAL_REQUEST), NOW, Some(false))
+        .await
+        .expect("Bitte wird angelegt");
+    assert_eq!(
+        stored(&store).await.request.expect("Bitte vorhanden").phase,
+        Phase::WaitingForCode
+    );
+    let replies = port.replies.lock().await.len();
+    watcher
+        .handle_message(
+            message(2, NOW + 60, "hab schon eine"),
+            NOW + 60,
+            Some(false),
+        )
+        .await
+        .expect("Antwort wird gelesen");
+    assert_eq!(check_in_texts(&brain), ["hab schon eine"]);
+    assert_eq!(
+        stored(&store).await.request.expect("Bitte bleibt").phase,
+        Phase::Attempted
+    );
+    watcher
+        .handle_message(message(3, NOW + 120, "123456789"), NOW + 120, Some(false))
+        .await
+        .expect("Zahl wird gelesen");
+    watcher
+        .poll_due(NOW + 2 * ONE_HOUR)
+        .await
+        .expect("Abfrage läuft");
+    assert_eq!(port.replies.lock().await.len(), replies);
+    assert!(status_updates(&brain).is_empty());
+    assert!(invite.calls.lock().await.is_empty());
+}
+
+#[test]
+fn neue_bitte_verwirft_meldungen_der_alten_bitte() {
+    let mut state = open_request_state(Phase::Pending, None);
+    state.status.notices = vec![Notice::CheckIn];
+    state.dispatch_started_at_millis = None;
+    state.outbox.push(OutboxEntry::notice(
+        1,
+        Some(CHECK_IN_CHANNEL_ID),
+        Notice::CheckIn,
+        false,
+    ));
+    let at = NOW + 60;
+    let event = message(5, at, "Kannst du mich einladen? 987654321");
+    update_state(
+        &mut state,
+        &event,
+        Some(RequestKind::Direct),
+        None,
+        false,
+        at,
+        at * 1000,
+    );
+    let request = state.request.as_ref().expect("Neue Bitte vorhanden");
+    assert_eq!(request.message_id, 5);
+    assert!(state.outbox.is_empty());
+    let mut restarted = open_request_state(Phase::Pending, None);
+    restarted.dispatch_started_at_millis = None;
+    restarted.outbox.push(OutboxEntry::notice(
+        1,
+        Some(CHECK_IN_CHANNEL_ID),
+        Notice::InvalidCode,
+        false,
+    ));
+    update_state(
+        &mut restarted,
+        &message(6, at, "987654321"),
+        None,
+        None,
+        false,
+        at,
+        at * 1000,
+    );
+    assert_eq!(restarted.request.expect("Bitte bleibt").message_id, 6);
+    assert!(restarted.outbox.is_empty());
+}
+
+#[test]
+fn abgelehnte_oder_aufgegebene_nachfrage_gilt_nicht_als_gefragt() {
+    for result in [NoticeResult::Dropped, NoticeResult::Retry] {
+        let mut state = open_request_state(Phase::Pending, None);
+        state.status.notices = vec![Notice::CheckIn];
+        let mut entry = OutboxEntry::notice(1, Some(CHECK_IN_CHANNEL_ID), Notice::CheckIn, false);
+        entry.first_attempt_at_millis = Some(0);
+        state.outbox.push(entry.clone());
+        assert!(!asked(&state));
+        settle_notice(&mut state, &entry, result, NOW * 1000);
+        assert!(state.outbox.is_empty());
+        assert!(!state.status.asked());
+        assert!(!asked(&state));
+    }
+}
+
+#[test]
+fn antwort_nach_dem_abschluss_waehrend_eine_antwort_wartet_wird_angenommen() {
+    let mut state = closed_request_state(vec![Notice::CheckIn, Notice::Invite]);
+    assert!(!intake_open(&state, CHECK_IN_CHANNEL_ID, 7, NOW + 60));
+    state
+        .status
+        .held_answers
+        .push(HeldAnswer::fresh(5, "nein".into()));
+    state.last_seen = 5;
+    assert!(intake_open(&state, CHECK_IN_CHANNEL_ID, 7, NOW + 60));
+    assert!(!intake_open(&state, CHECK_IN_CHANNEL_ID, 5, NOW + 60));
+    assert!(!intake_open(&state, 555, 7, NOW + 60));
+}
+
+#[tokio::test]
+async fn hinweis_entfaellt_wenn_der_code_schon_da_ist() {
+    let (watcher, store, port, _) = setup();
+    let mut state = open_request_state(Phase::Pending, None);
+    state.status.notices.clear();
+    state.dispatch_started_at_millis = None;
+    store.states.lock().await.insert(USER, state);
+    watcher
+        .send_hint(HintJob {
+            event: message(1, NOW, "Kannst du mich einladen?"),
+            claimed: (true, Some(NOW)),
+            before: (false, None),
+            check_history: false,
+        })
+        .await
+        .expect("Hinweis wird geprüft");
+    assert!(port.replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn zustellpruefung_findet_die_antwort_an_der_frueheren_bitte() {
+    let (watcher, _, port, _) = setup();
+    let mut earlier = message(2, NOW, &format!("<@{USER}> Status"));
+    earlier.author_id = BOT;
+    earlier.is_bot = true;
+    earlier.reply_message_id = Some(1);
+    port.history.lock().await.extend([
+        message(1, NOW - 60, "Bitte"),
+        earlier,
+        message(3, NOW + 10, "Bitte"),
+    ]);
+    let mut entry = OutboxEntry::notice(1, Some(CHECK_IN_CHANNEL_ID), Notice::CheckIn, false);
+    entry.follow(3);
+    let found = watcher
+        .bot_replied_since(CHECK_IN_CHANNEL_ID, &entry.targets(), USER, 0)
+        .await
+        .expect("Verlauf lesbar");
+    assert_eq!(found, Some(2));
+    let only_new = watcher
+        .bot_replied_since(CHECK_IN_CHANNEL_ID, &[3], USER, 0)
+        .await
+        .expect("Verlauf lesbar");
+    assert_eq!(only_new, None);
+}
+
+#[tokio::test]
+async fn hilfe_zwischen_frueherer_bitte_und_anker_zaehlt() {
+    let (watcher, _, port, _) = setup();
+    let mut request = Request::new(5, NOW, false, Phase::Pending);
+    request.earlier = vec![1];
+    let mut help = message(3, NOW - 30, "Schick ich dir gleich");
+    help.author_id = 8;
+    help.reply_message_id = Some(1);
+    port.history.lock().await.extend([
+        message(1, NOW - 60, "Bitte"),
+        help,
+        message(5, NOW, "Bitte"),
+    ]);
+    assert!(watcher
+        .request_answered(CHECK_IN_CHANNEL_ID, &request, USER)
+        .await
+        .expect("Verlauf lesbar"));
+}
+
+#[tokio::test]
+async fn zweiter_dispatcher_verliert_den_anspruch_ohne_zweiten_versuch() {
+    let (watcher, store, _, invite) = setup();
+    let mut state = open_request_state(Phase::Pending, None);
+    state.status.notices.clear();
+    state.status.invite_now = true;
+    state.dispatch_started_at_millis = None;
+    store.states.lock().await.insert(USER, state.clone());
+    watcher
+        .send_invite(USER, &state, NOW + 60)
+        .await
+        .expect("Erster Versuch läuft");
+    watcher
+        .send_invite(USER, &state, NOW + 60)
+        .await
+        .expect("Zweiter Versuch endet still");
+    assert_eq!(invite.calls.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn gehaltene_antwort_hat_keine_versuchsgrenze() {
+    let failures = 12;
+    let mut script: Vec<ScriptedReply> = (0..failures)
+        .map(|_| Err(BrainError::Backend("scripted".into())))
+        .collect();
+    script.push(check_in_reply(InviteCheckInOutcome::Arrived));
+    let (mut watcher, store, _, _, brain) = setup_check_ins(script);
+    let clock = moving_clock(&mut watcher);
+    watcher
+        .handle_message(
+            message(1, NOW, "Kann mich jemand einladen? 123456789"),
+            NOW,
+            Some(false),
+        )
+        .await
+        .expect("Bitte wird angelegt");
+    watcher
+        .poll_due(NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Nachfrage läuft");
+    let mut at = NOW + CHECK_IN_SECONDS + 10;
+    clock.store(at * 1000, Ordering::SeqCst);
+    watcher
+        .handle_message(message(2, at, "ja, ist da"), at, Some(false))
+        .await
+        .expect("Antwort wird gehalten");
+    for attempt in 1..=failures {
+        at += brain_backoff(attempt) / 1000;
+        clock.store(at * 1000, Ordering::SeqCst);
+        watcher
+            .poll_due(at)
+            .await
+            .expect("Antwort wird erneut gewertet");
+    }
+    assert_eq!(check_in_texts(&brain).len(), failures as usize + 1);
+    let state = stored(&store).await;
+    assert!(state.status.held_answers.is_empty());
+    assert_eq!(state.request.expect("Bitte bleibt").phase, Phase::Attempted);
+}
+
+#[tokio::test]
+async fn hilfe_kurz_vor_der_nachfrage_schliesst_die_bitte() {
+    let (watcher, store, port, invite, brain) = setup_scripted();
+    let mut state = open_request_state(Phase::Pending, None);
+    state.status.notices.clear();
+    state.status.check_in_at = None;
+    state.dispatch_started_at_millis = None;
+    store.states.lock().await.insert(USER, state.clone());
+    let mut help = message(2, NOW + 60, "Schick ich dir gleich");
+    help.author_id = 8;
+    help.reply_message_id = Some(1);
+    port.history
+        .lock()
+        .await
+        .extend([message(1, NOW, "Bitte"), help]);
+    watcher
+        .check_in(USER, &state, NOW + CHECK_IN_SECONDS)
+        .await
+        .expect("Nachfrage wird geprüft");
+    let state = stored(&store).await;
+    assert_eq!(state.request.expect("Bitte bleibt").phase, Phase::Attempted);
+    assert!(state.outbox.is_empty());
+    watcher
+        .poll_due(NOW + ONE_HOUR)
+        .await
+        .expect("Abfrage läuft");
+    assert!(notices(&brain).is_empty());
     assert!(invite.calls.lock().await.is_empty());
 }
