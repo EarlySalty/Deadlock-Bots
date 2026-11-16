@@ -268,7 +268,11 @@ impl FundingSource for HttpSupporterLinks {
         let (status, body) = read_reply(FUNDING_PATH, response).await?;
         if !status.is_success() {
             let code = error_code(&body);
-            log_token_rejection(FUNDING_PATH, status, code);
+            if token_rejected(status, code) {
+                return Err(format!(
+                    "{FUNDING_PATH} nimmt den internen Token nicht an: {status} {code}"
+                ));
+            }
             return Err(format!("{FUNDING_PATH} antwortet {status} {code}"));
         }
         parse_funding(&body, self.goal_cents)
@@ -360,10 +364,13 @@ fn link_outcome(
         .ok_or_else(|| LinkError::Failed(format!("{path} liefert keinen gültigen Link")))
 }
 
-fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
-    if status == StatusCode::UNAUTHORIZED
+fn token_rejected(status: StatusCode, code: &str) -> bool {
+    status == StatusCode::UNAUTHORIZED
         || (status == StatusCode::SERVICE_UNAVAILABLE && code == "auth_not_configured")
-    {
+}
+
+fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
+    if token_rejected(status, code) {
         tracing::error!(
             path,
             %status,
