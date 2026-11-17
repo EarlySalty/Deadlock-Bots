@@ -946,6 +946,12 @@ label = "Nope"
     }
 
     #[test]
+    fn faq_nennt_den_freundescode_den_die_lounge_als_bot_code_verwirft() {
+        let code = format!("**{}**", dl_bridges::steam::STEAM_BOT_FRIEND_CODE);
+        assert!(FAQ_ANSWER_F2.contains(&code), "{FAQ_ANSWER_F2}");
+    }
+
+    #[test]
     fn faq_texts_seed_toml_parst_zu_compile_defaults() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let mut warnings = Vec::new();

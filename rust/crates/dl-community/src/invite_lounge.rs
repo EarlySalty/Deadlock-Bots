@@ -7,6 +7,7 @@ use dl_brain::{
     ConversationReply, InviteChatLine, InviteMemberState, InviteRequestPhase, InviteSpeaker,
     InviteTurn, InviteTurnAction, InviteTurnDecision, MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS,
 };
+use dl_bridges::steam::STEAM_BOT_FRIEND_CODE;
 use dl_central_db::kv;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,8 @@ use sqlx::PgPool;
 mod status;
 use status::{
     after_invite, after_progress, check_in_age, check_in_step, classify_invite_reply,
-    steam_outcome, CheckIn, Notice, OutboxEntry, RequestStatus, SteamProgress, SteamWait, Step,
+    steam_outcome, CheckIn, Claim, Notice, OutboxEntry, RequestStatus, SteamProgress, SteamWait,
+    Step,
 };
 
 pub const CHECK_IN_CHANNEL_ID: u64 = 1_464_736_918_951_432_222;
@@ -163,6 +165,15 @@ enum Phase {
     Expired,
 }
 
+impl Phase {
+    fn open(self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForCode | Self::Pending | Self::Dispatching
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Request {
     message_id: u64,
@@ -176,8 +187,6 @@ struct LoungeState {
     last_seen: u64,
     friend_code: Option<String>,
     request: Option<Request>,
-    hint_sent: bool,
-    last_hint_at: Option<i64>,
     last_result: Option<String>,
     dispatch_started_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "RequestStatus::is_empty")]
@@ -233,7 +242,12 @@ trait LoungeStore: Send + Sync {
     async fn mark_actions_since(&self, now: i64) -> Result<(), String>;
     async fn catch_up_mark(&self) -> Result<Option<u64>, String>;
     async fn set_catch_up_mark(&self, message_id: u64) -> Result<(), String>;
-    async fn steam_progress(&self, code: &str, since: i64) -> Result<SteamProgress, String>;
+    async fn steam_progress(
+        &self,
+        code: &str,
+        since: i64,
+        requested_at: i64,
+    ) -> Result<SteamProgress, String>;
     async fn invited(&self, code: &str) -> Result<bool, String>;
     async fn handled_since(&self, code: &str, since: i64) -> Result<bool, String>;
 }
@@ -308,7 +322,7 @@ impl LoungeStore for PgLoungeStore {
     }
 
     async fn pending_users(&self) -> Result<Vec<u64>, String> {
-        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND v::jsonb #>> '{request,phase}' IN ('Pending', 'Dispatching')")
+        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND v::jsonb #>> '{request,phase}' IN ('WaitingForCode', 'Pending', 'Dispatching')")
             .bind(STATE_KV_NS).fetch_all(&self.pool).await.map_err(|err| err.to_string())?;
         user_ids(keys)
     }
@@ -320,7 +334,7 @@ impl LoungeStore for PgLoungeStore {
     }
 
     async fn known_code(&self, user_id: u64) -> Result<Option<String>, String> {
-        let steam_id: Option<String> = sqlx::query_scalar("SELECT steam_id FROM core.steam_links WHERE discord_id = $1 ORDER BY primary_account DESC, verified DESC, steam_id LIMIT 1")
+        let steam_id: Option<String> = sqlx::query_scalar("SELECT steam_id FROM core.steam_links WHERE discord_id = $1 AND verified ORDER BY primary_account DESC, steam_id LIMIT 1")
             .bind(user_id as i64).fetch_optional(&self.pool).await.map_err(|err| err.to_string())?;
         Ok(steam_id
             .and_then(|id| id.parse::<u64>().ok())
@@ -413,7 +427,12 @@ impl LoungeStore for PgLoungeStore {
         .map_err(|err| err.to_string())
     }
 
-    async fn steam_progress(&self, code: &str, since: i64) -> Result<SteamProgress, String> {
+    async fn steam_progress(
+        &self,
+        code: &str,
+        since: i64,
+        requested_at: i64,
+    ) -> Result<SteamProgress, String> {
         let Some(steam_id) = steam_id64(code) else {
             return Ok(SteamProgress::default());
         };
@@ -430,10 +449,12 @@ impl LoungeStore for PgLoungeStore {
         .await
         .map_err(|err| err.to_string())?;
         let (invited, open): (bool, bool) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM steam.beta_invite_audit WHERE steam_id64 = $1),
+            "SELECT EXISTS(SELECT 1 FROM steam.beta_invite_audit
+                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2)),
                     EXISTS(SELECT 1 FROM steam.invite_requests WHERE steam_id64 = $1)",
         )
         .bind(steam_id)
+        .bind(requested_at as f64)
         .fetch_one(&self.pool)
         .await
         .map_err(|err| err.to_string())?;
@@ -479,9 +500,21 @@ fn friend_code_id(code: &str) -> Option<u64> {
     if code.is_empty() || !code.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    code.parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0 && *id <= u64::from(u32::MAX))
+    code.parse::<u64>().ok().filter(|id| {
+        *id > 0 && *id <= u64::from(u32::MAX) && *id != u64::from(STEAM_BOT_FRIEND_CODE)
+    })
+}
+
+fn invite_code(
+    message: Option<&str>,
+    stored: Option<&str>,
+    linked: Option<&str>,
+) -> Option<String> {
+    [message, stored, linked]
+        .into_iter()
+        .flatten()
+        .find_map(friend_code_id)
+        .map(|id| id.to_string())
 }
 
 fn steam_id64(code: &str) -> Option<i64> {
@@ -503,16 +536,26 @@ pub struct InviteLoungeWatcher {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MemberFacts {
     message_code: Option<String>,
-    known_code: Option<String>,
+    linked_code: Option<String>,
     invited: bool,
 }
 
 impl MemberFacts {
-    fn code(&self) -> Option<String> {
-        self.message_code
-            .clone()
-            .or_else(|| self.known_code.clone())
+    fn code(&self, state: Option<&LoungeState>) -> Option<String> {
+        invite_code(
+            self.message_code.as_deref(),
+            stored_code(state),
+            self.linked_code.as_deref(),
+        )
     }
+
+    fn known_code(&self, state: Option<&LoungeState>) -> Option<String> {
+        invite_code(None, stored_code(state), self.linked_code.as_deref())
+    }
+}
+
+fn stored_code(state: Option<&LoungeState>) -> Option<&str> {
+    state.and_then(|state| state.friend_code.as_deref())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,7 +712,7 @@ impl InviteLoungeWatcher {
             );
             return Ok(Turn::Skipped);
         };
-        let decision = match self.decide(event, turn).await {
+        let decision = match self.decide(event, &turn).await {
             TurnOutcome::Failed => return Ok(Turn::Failed),
             TurnOutcome::Silent => None,
             TurnOutcome::Decided(decision) => Some(decision),
@@ -685,7 +728,7 @@ impl InviteLoungeWatcher {
                 .map_or("silent", |decision| decision.action.as_str()),
             "Invite-Lounge-Entscheidung"
         );
-        self.store_turn(event, decision.as_ref(), &facts, now)
+        self.store_turn(event, &turn, decision.as_ref(), &facts, now)
             .await
             .map(|stored| {
                 if stored {
@@ -699,6 +742,7 @@ impl InviteLoungeWatcher {
     async fn store_turn(
         &self,
         event: &LoungeMessage,
+        turn: &InviteTurn,
         decision: Option<&InviteTurnDecision>,
         facts: &MemberFacts,
         now: i64,
@@ -711,8 +755,10 @@ impl InviteLoungeWatcher {
             {
                 return Ok(false);
             }
+            let current = member_state(previous.as_ref(), facts);
+            let fitting = decision.filter(|decision| still_fits(decision, turn, &current));
             let mut next = previous.clone().unwrap_or_default();
-            let applied = apply_turn(&mut next, event, decision, facts, now);
+            apply_turn(&mut next, event, fitting, facts, now);
             match self
                 .store
                 .compare_exchange(event.author_id, previous.as_ref(), &next)
@@ -728,12 +774,12 @@ impl InviteLoungeWatcher {
                     return Ok(false);
                 }
             }
-            if let (Some(decision), false) = (decision, applied) {
+            if let (Some(decision), None) = (decision, fitting) {
                 tracing::info!(
                     user_id = event.author_id,
                     message_id = event.message_id,
                     action = decision.action.as_str(),
-                    "Invite-Lounge: Entscheidung passt nicht mehr zum Zustand, bleibt still"
+                    "Invite-Lounge: Stand hat sich während der Entscheidung geändert, Entscheidung verworfen"
                 );
             }
             return Ok(true);
@@ -784,9 +830,9 @@ impl InviteLoungeWatcher {
         last_seen: u64,
         state: Option<&LoungeState>,
     ) -> MemberFacts {
-        let stored = state.and_then(|state| state.friend_code.clone());
-        let known_code = match stored {
-            Some(code) => Some(code),
+        let message_code = unseen_code(event, context, last_seen);
+        let linked_code = match message_code {
+            Some(_) => None,
             None => self
                 .store
                 .known_code(event.author_id)
@@ -797,11 +843,11 @@ impl InviteLoungeWatcher {
                 }),
         };
         let mut facts = MemberFacts {
-            message_code: unseen_code(event, context, last_seen),
-            known_code,
+            message_code,
+            linked_code,
             invited: false,
         };
-        facts.invited = self.invited(facts.code().as_deref()).await;
+        facts.invited = self.invited(facts.code(state).as_deref()).await;
         facts
     }
 
@@ -818,10 +864,10 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn decide(&self, event: &LoungeMessage, turn: InviteTurn) -> TurnOutcome {
+    async fn decide(&self, event: &LoungeMessage, turn: &InviteTurn) -> TurnOutcome {
         let task = dl_brain::DiscordConversation::InviteTurn { turn: turn.clone() };
         match self.converse(event.author_id, event.channel_id, task).await {
-            Some(ConversationReply::Decided { decision }) if decision.fits(&turn) => {
+            Some(ConversationReply::Decided { decision }) if decision.fits(turn) => {
                 TurnOutcome::Decided(decision)
             }
             Some(ConversationReply::Decided { decision }) => {
@@ -1118,11 +1164,7 @@ impl InviteLoungeWatcher {
         let Some(previous) = self.store.load(user_id).await? else {
             return Ok(());
         };
-        let Some(request) = previous
-            .request
-            .as_ref()
-            .filter(|request| matches!(request.phase, Phase::Pending | Phase::Dispatching))
-        else {
+        let Some(request) = open_request(&previous) else {
             return Ok(());
         };
         let now_millis = (self.clock_millis)();
@@ -1144,6 +1186,23 @@ impl InviteLoungeWatcher {
                 )
                 .await;
         }
+        if request.phase == Phase::WaitingForCode {
+            return Ok(());
+        }
+        let Some(code) = previous
+            .friend_code
+            .as_deref()
+            .and_then(friend_code_id)
+            .map(|id| id.to_string())
+        else {
+            return self
+                .expire(
+                    user_id,
+                    &previous,
+                    "Bitte ohne gültigen Freundescode beendet",
+                )
+                .await;
+        };
         if !self.allows_actions(request.created_at).await? {
             return Ok(());
         }
@@ -1151,19 +1210,21 @@ impl InviteLoungeWatcher {
             if previous.status.check_at.is_some_and(|at| now < at) {
                 return Ok(());
             }
-            return self.follow_steam(user_id, &previous, wait, now).await;
+            return self
+                .follow_steam(user_id, &previous, &code, wait, now)
+                .await;
         }
         let check_in_now = check_in_due(request, &previous.status, now);
         if !check_in_now && !is_due(request, &previous.status) {
             return Ok(());
         }
-        if self.someone_on_it(user_id, &previous, request).await? {
+        if self.someone_on_it(user_id, &previous, request, &code).await {
             return self.close_handled(user_id, &previous).await;
         }
         if check_in_now {
-            return self.check_in(user_id, &previous, now).await;
+            return self.check_in(user_id, &previous, &code, now).await;
         }
-        self.send_invite(user_id, &previous, now).await
+        self.send_invite(user_id, &previous, &code, now).await
     }
 
     async fn someone_on_it(
@@ -1171,21 +1232,19 @@ impl InviteLoungeWatcher {
         user_id: u64,
         state: &LoungeState,
         request: &Request,
-    ) -> Result<bool, String> {
+        code: &str,
+    ) -> bool {
         let dispatched_here = state
             .dispatch_started_at_millis
             .is_some_and(|started| started / 1000 >= request.created_at);
         if request.direct || state.status.invite_now || dispatched_here {
-            return Ok(false);
+            return false;
         }
-        let Some(code) = state.friend_code.as_deref() else {
-            return Ok(false);
-        };
         match self.store.handled_since(code, request.created_at).await {
-            Ok(handled) => Ok(handled),
+            Ok(handled) => handled,
             Err(err) => {
                 tracing::warn!(user_id, error = %err, "Invite-Lounge: Einladungsprüfung fehlgeschlagen, Bitte läuft weiter");
-                Ok(false)
+                false
             }
         }
     }
@@ -1230,7 +1289,7 @@ impl InviteLoungeWatcher {
         let mut next = previous.clone();
         if let Some(request) = previous.request.as_ref() {
             next.outbox
-                .retain(|entry| entry.request_message_id != request.message_id);
+                .retain(|entry| !entry.belongs_to(request.message_id));
         }
         apply_step(&mut next, Step::Finish(None));
         next.last_result = Some("Schon von Hand erledigt; keine Meldung".into());
@@ -1281,20 +1340,20 @@ impl InviteLoungeWatcher {
         &self,
         user_id: u64,
         previous: &LoungeState,
+        code: &str,
         wait: SteamWait,
         now: i64,
     ) -> Result<(), String> {
-        let Some(code) = previous.friend_code.as_deref() else {
-            tracing::warn!(
-                user_id,
-                "Invite-Lounge: Steam-Stand ohne Freundescode nicht prüfbar"
-            );
-            return self.settle(user_id, previous, Step::Finish(None)).await;
+        let Some(request) = previous.request.as_ref() else {
+            return Ok(());
         };
-        let since = previous.dispatch_started_at_millis.unwrap_or(0) / 1000;
-        let progress = self.store.steam_progress(code, since).await?;
+        let since = steam_since(previous, request);
+        let progress = self
+            .store
+            .steam_progress(code, since, request.created_at)
+            .await?;
         match after_progress(wait, progress, now) {
-            Step::Dispatch => self.send_invite(user_id, previous, now).await,
+            Step::Dispatch => self.send_invite(user_id, previous, code, now).await,
             step => self.settle(user_id, previous, step).await,
         }
     }
@@ -1309,14 +1368,13 @@ impl InviteLoungeWatcher {
             .map(|_| ())
     }
 
-    async fn check_in(&self, user_id: u64, previous: &LoungeState, now: i64) -> Result<(), String> {
-        let Some(code) = previous.friend_code.as_deref() else {
-            tracing::warn!(
-                user_id,
-                "Invite-Lounge: Nachfrage ohne Freundescode übersprungen"
-            );
-            return Ok(());
-        };
+    async fn check_in(
+        &self,
+        user_id: u64,
+        previous: &LoungeState,
+        code: &str,
+        now: i64,
+    ) -> Result<(), String> {
         let invited = self.store.invited(code).await?;
         let mut next = previous.clone();
         next.status.check_in_at = Some(now);
@@ -1337,12 +1395,10 @@ impl InviteLoungeWatcher {
         &self,
         user_id: u64,
         previous: &LoungeState,
+        code: &str,
         now: i64,
     ) -> Result<(), String> {
         let Some(request) = previous.request.as_ref() else {
-            return Ok(());
-        };
-        let Some(code) = previous.friend_code.as_deref() else {
             return Ok(());
         };
         let Some(bot_id) = self.port.bot_id() else {
@@ -1415,6 +1471,12 @@ impl InviteLoungeWatcher {
             if !current.request.as_ref().is_some_and(|request| {
                 request.message_id == message_id && request.phase == Phase::Dispatching
             }) {
+                tracing::info!(
+                    user_id,
+                    message_id,
+                    result = outcome,
+                    "Invite-Lounge: Bitte wurde während des Versands geschlossen, das Ergebnis bleibt ohne Meldung"
+                );
                 return Ok(());
             }
             let mut finished = current.clone();
@@ -1660,7 +1722,7 @@ fn mention_label(kind: &str, id: &str, member_id: u64, bot_id: u64) -> &'static 
 fn member_state(state: Option<&LoungeState>, facts: &MemberFacts) -> InviteMemberState {
     InviteMemberState {
         phase: state.map_or(InviteRequestPhase::None, request_phase),
-        has_friend_code: facts.known_code.is_some(),
+        has_friend_code: facts.known_code(state).is_some(),
         code_in_message: facts.message_code.is_some(),
         already_invited: facts.invited,
         last_update: state
@@ -1687,49 +1749,57 @@ fn request_phase(state: &LoungeState) -> InviteRequestPhase {
     }
 }
 
+fn still_fits(
+    decision: &InviteTurnDecision,
+    judged: &InviteTurn,
+    current: &InviteMemberState,
+) -> bool {
+    let acts = matches!(
+        decision.action,
+        InviteTurnAction::WaitForCommunity
+            | InviteTurnAction::AskAlreadyInvited
+            | InviteTurnAction::Invite
+    );
+    (!acts || current.phase == judged.member.phase)
+        && decision.fits(&InviteTurn {
+            member: current.clone(),
+            ..judged.clone()
+        })
+}
+
 fn apply_turn(
     state: &mut LoungeState,
     event: &LoungeMessage,
     decision: Option<&InviteTurnDecision>,
     facts: &MemberFacts,
     now: i64,
-) -> bool {
+) {
     state.last_seen = event.message_id;
     let Some(decision) = decision else {
-        return false;
+        return;
     };
-    let code = facts.code();
-    let ready = !busy(state);
+    let code = facts.code(Some(state));
     let invited = member_state(Some(state), facts).invited();
-    let applied = match decision.action {
-        InviteTurnAction::Silent => false,
-        InviteTurnAction::AskFriendCode => ask_friend_code(state, event, code.is_none()),
-        InviteTurnAction::WaitForCommunity => {
-            ready && !invited && wait_for_community(state, event, code)
-        }
+    let mut claim = None;
+    match decision.action {
+        InviteTurnAction::Silent | InviteTurnAction::Help => {}
+        InviteTurnAction::AskFriendCode => ask_friend_code(state, event),
+        InviteTurnAction::WaitForCommunity => wait_for_community(state, event, code),
         InviteTurnAction::AskAlreadyInvited => {
-            ready && ask_already_invited(state, event, code.filter(|_| !invited), now)
+            claim = ask_already_invited(state, event, code.filter(|_| !invited), now);
         }
-        InviteTurnAction::Invite => ready && !invited && invite_now(state, event, code),
-        InviteTurnAction::Close => ready && close_request(state, decision.text.is_none(), invited),
-        InviteTurnAction::Help => true,
-    };
-    if let (true, Some(text)) = (applied, decision.text.clone()) {
+        InviteTurnAction::Invite => invite_now(state, event, code),
+        InviteTurnAction::Close => close_request(state, event, decision.text.is_none(), invited),
+    }
+    if let Some(text) = decision.text.clone() {
         state.outbox.push(OutboxEntry::reply(
             event.message_id,
             event.channel_id,
             text,
             facts.invited,
+            claim,
         ));
     }
-    applied
-}
-
-fn busy(state: &LoungeState) -> bool {
-    state.request.as_ref().is_some_and(|request| {
-        request.phase == Phase::Dispatching
-            || (request.phase == Phase::Pending && state.status.wait.is_some())
-    })
 }
 
 fn pending(state: &LoungeState) -> bool {
@@ -1737,6 +1807,13 @@ fn pending(state: &LoungeState) -> bool {
         .request
         .as_ref()
         .is_some_and(|request| request.phase == Phase::Pending)
+}
+
+fn open_request(state: &LoungeState) -> Option<&Request> {
+    state
+        .request
+        .as_ref()
+        .filter(|request| request.phase.open())
 }
 
 fn start_request(state: &mut LoungeState, event: &LoungeMessage, phase: Phase, direct: bool) {
@@ -1749,33 +1826,20 @@ fn start_request(state: &mut LoungeState, event: &LoungeMessage, phase: Phase, d
     state.status = RequestStatus::for_channel(event.channel_id);
 }
 
-fn ask_friend_code(state: &mut LoungeState, event: &LoungeMessage, without_code: bool) -> bool {
-    if !without_code {
-        return false;
-    }
-    let closed = state
-        .request
-        .as_ref()
-        .is_none_or(|request| matches!(request.phase, Phase::Attempted | Phase::Expired));
-    if closed {
+fn ask_friend_code(state: &mut LoungeState, event: &LoungeMessage) {
+    if open_request(state).is_none() {
         start_request(state, event, Phase::WaitingForCode, false);
     }
-    true
 }
 
-fn wait_for_community(
-    state: &mut LoungeState,
-    event: &LoungeMessage,
-    code: Option<String>,
-) -> bool {
+fn wait_for_community(state: &mut LoungeState, event: &LoungeMessage, code: Option<String>) {
     let Some(code) = code else {
-        return false;
+        return;
     };
     state.friend_code = Some(code);
     if !pending(state) {
         start_request(state, event, Phase::Pending, false);
     }
-    true
 }
 
 fn ask_already_invited(
@@ -1783,22 +1847,23 @@ fn ask_already_invited(
     event: &LoungeMessage,
     code: Option<String>,
     now: i64,
-) -> bool {
+) -> Option<Claim> {
     if !pending(state) {
-        let Some(code) = code else {
-            return true;
-        };
-        state.friend_code = Some(code);
+        state.friend_code = Some(code?);
         start_request(state, event, Phase::Pending, false);
     }
+    let request_message_id = state.request.as_ref()?.message_id;
+    let notice = state.status.claim(Some(Notice::CheckIn))?;
     state.status.check_in_at = Some(now);
-    state.status.claim(Some(Notice::CheckIn));
-    true
+    Some(Claim {
+        notice,
+        request_message_id,
+    })
 }
 
-fn invite_now(state: &mut LoungeState, event: &LoungeMessage, code: Option<String>) -> bool {
+fn invite_now(state: &mut LoungeState, event: &LoungeMessage, code: Option<String>) {
     let Some(code) = code else {
-        return false;
+        return;
     };
     state.friend_code = Some(code);
     if pending(state) {
@@ -1806,30 +1871,24 @@ fn invite_now(state: &mut LoungeState, event: &LoungeMessage, code: Option<Strin
     } else {
         start_request(state, event, Phase::Pending, true);
     }
-    true
 }
 
-fn close_request(state: &mut LoungeState, notify: bool, invited: bool) -> bool {
-    let open = state
-        .request
-        .as_ref()
-        .is_some_and(|request| matches!(request.phase, Phase::Pending | Phase::WaitingForCode));
-    let Some(message_id) = state
-        .request
-        .as_ref()
-        .filter(|_| open)
-        .map(|request| request.message_id)
-    else {
-        return true;
+fn close_request(state: &mut LoungeState, event: &LoungeMessage, notify: bool, invited: bool) {
+    let Some(message_id) = open_request(state).map(|request| request.message_id) else {
+        if notify {
+            tracing::info!(
+                user_id = event.author_id,
+                message_id = event.message_id,
+                "Invite-Lounge: Bestätigung ohne offene Bitte und ohne Text bleibt still"
+            );
+        }
+        return;
     };
-    state
-        .outbox
-        .retain(|entry| entry.request_message_id != message_id);
+    state.outbox.retain(|entry| !entry.belongs_to(message_id));
     let notice = apply_step(state, Step::Finish(Some(Notice::Confirmed)));
     if notify {
         queue_notice(state, notice, invited);
     }
-    true
 }
 
 fn unseen_code(event: &LoungeMessage, context: &[LoungeMessage], last_seen: u64) -> Option<String> {
@@ -1879,6 +1938,9 @@ fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
 }
 
 fn apply_step(state: &mut LoungeState, step: Step) -> Option<Notice> {
+    if step == Step::Finish(Some(Notice::InvalidCode)) {
+        state.friend_code = None;
+    }
     let (phase, wait, check_at, notice) = match step {
         Step::Finish(notice) => (Phase::Attempted, None, None, notice),
         Step::Wait { wait, at, notice } => (Phase::Pending, Some(wait), Some(at), notice),
@@ -1911,12 +1973,8 @@ fn settle_notice(state: &mut LoungeState, position: usize, result: NoticeResult,
         return;
     }
     let removed = state.outbox.remove(position);
-    let current_request = state
-        .request
-        .as_ref()
-        .is_some_and(|request| request.message_id == removed.request_message_id);
-    if result != NoticeResult::Delivered && removed.asks_check_in() && current_request {
-        state.status.forget(Notice::CheckIn);
+    if result != NoticeResult::Delivered {
+        release_claim(state, &removed);
     }
     match result {
         NoticeResult::Delivered => {}
@@ -1932,6 +1990,31 @@ fn settle_notice(state: &mut LoungeState, position: usize, result: NoticeResult,
     }
 }
 
+fn release_claim(state: &mut LoungeState, entry: &OutboxEntry) {
+    let Some(claim) = entry.held_claim() else {
+        return;
+    };
+    if !state
+        .request
+        .as_ref()
+        .is_some_and(|request| request.message_id == claim.request_message_id)
+    {
+        return;
+    }
+    state.status.forget(claim.notice);
+    if entry.rearms_check_in() {
+        state.status.check_in_at = None;
+    }
+}
+
+fn steam_since(state: &LoungeState, request: &Request) -> i64 {
+    state
+        .dispatch_started_at_millis
+        .map_or(request.created_at, |started| {
+            (started / 1000).max(request.created_at)
+        })
+}
+
 fn mentions_user(content: &str, user_id: u64) -> bool {
     content.contains(&format!("<@{user_id}>")) || content.contains(&format!("<@!{user_id}>"))
 }
@@ -1943,8 +2026,9 @@ fn friend_code(content: &str) -> Option<String> {
     };
     FRIEND_CODE_RE
         .as_ref()?
-        .find(&without_urls)
-        .map(|found| found.as_str().to_string())
+        .find_iter(&without_urls)
+        .find_map(|found| friend_code_id(found.as_str()))
+        .map(|id| id.to_string())
 }
 
 #[cfg(test)]

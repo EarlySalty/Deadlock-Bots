@@ -1,4 +1,4 @@
-use super::status::{SteamOutcome, CHECK_IN_SECONDS, RETRY_SECONDS};
+use super::status::{SteamOutcome, CHECK_IN_SECONDS, NOTICE_MAX_AGE_MILLIS, RETRY_SECONDS};
 use super::*;
 use crate::answer_support::test_brain::{decided, ScriptedBrain, ScriptedReply};
 use dl_brain::{
@@ -36,6 +36,7 @@ struct MemoryStore {
     advance: Mutex<Option<ClockAdvance>>,
     actions_since: AtomicI64,
     progress: Mutex<SteamProgress>,
+    progress_queries: Mutex<Vec<(i64, i64)>>,
     handled: AtomicBool,
     opted_out: AtomicBool,
     opt_out_on_write: AtomicBool,
@@ -108,9 +109,10 @@ impl LoungeStore for MemoryStore {
             .await
             .iter()
             .filter(|(_, state)| {
-                state.request.as_ref().is_some_and(|request| {
-                    matches!(request.phase, Phase::Pending | Phase::Dispatching)
-                })
+                state
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.phase.open())
             })
             .map(|(id, _)| *id)
             .collect())
@@ -161,7 +163,16 @@ impl LoungeStore for MemoryStore {
             .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
         Ok(())
     }
-    async fn steam_progress(&self, _code: &str, _since: i64) -> Result<SteamProgress, String> {
+    async fn steam_progress(
+        &self,
+        _code: &str,
+        since: i64,
+        requested_at: i64,
+    ) -> Result<SteamProgress, String> {
+        self.progress_queries
+            .lock()
+            .await
+            .extend([(since, requested_at)]);
         Ok(*self.progress.lock().await)
     }
     async fn handled_since(&self, _code: &str, _since: i64) -> Result<bool, String> {
@@ -1132,6 +1143,12 @@ fn gespeicherter_zustand_wird_inhaltlich_verglichen() {
     assert!(!stored_matches(Some(&legacy), None));
     assert!(!stored_matches(None, Some(&parsed)));
     assert!(!stored_matches(Some("kaputt"), Some(&parsed)));
+    let hinted = legacy.replace(
+        r#""hint_sent":false,"last_hint_at":null"#,
+        r#""hint_sent":true,"last_hint_at":1789999000"#,
+    );
+    assert_ne!(hinted, legacy);
+    assert!(stored_matches(Some(&hinted), Some(&parsed)));
 }
 
 #[tokio::test]
@@ -1370,6 +1387,10 @@ async fn haengender_versand_nach_neustart_prueft_steam_statt_neu_zu_senden() {
                 .request
                 .map(|request| request.phase),
             Some(Phase::Attempted)
+        );
+        assert_eq!(
+            lounge.store.progress_queries.lock().await.clone(),
+            vec![(NOW, NOW)]
         );
         assert_eq!(lounge.calls().await, 0);
         assert!(notices(&lounge.brain).is_empty());
@@ -1711,16 +1732,29 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
             .expect("Zustand schreibbar"),
         Cas::Written
     );
-    watcher.poll_due(NOW).await.expect("Warteaufträge geprüft");
+    let waiting = waiting_for_code(NOW - REQUEST_WINDOW_SECONDS - 1, Some(CHECK_IN_CHANNEL_ID));
     assert_eq!(
         store
-            .load(USER)
+            .compare_exchange(OTHER, None, &waiting)
             .await
-            .expect("Zustand lesbar")
-            .and_then(|state| state.request)
-            .map(|request| request.phase),
-        Some(Phase::Expired)
+            .expect("Zustand schreibbar"),
+        Cas::Written
     );
+    let mut open = store.pending_users().await.expect("offene Bitten lesbar");
+    open.sort_unstable();
+    assert_eq!(open, vec![USER, OTHER]);
+    watcher.poll_due(NOW).await.expect("Warteaufträge geprüft");
+    for user_id in [USER, OTHER] {
+        assert_eq!(
+            store
+                .load(user_id)
+                .await
+                .expect("Zustand lesbar")
+                .and_then(|state| state.request)
+                .map(|request| request.phase),
+            Some(Phase::Expired)
+        );
+    }
     assert!(store
         .pending_users()
         .await
@@ -1821,11 +1855,17 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
         .execute(db.pool())
         .await
         .expect("Testnutzer");
-    sqlx::query("INSERT INTO core.steam_links (discord_id, steam_id, primary_account) VALUES ($1, '76561198083722517', true)")
+    sqlx::query("INSERT INTO core.steam_links (discord_id, steam_id, primary_account, verified) VALUES ($1, '76561198083722517', true, false)")
         .bind(USER as i64)
         .execute(db.pool())
         .await
         .expect("Testverknüpfung");
+    assert_eq!(store.known_code(USER).await.expect("Code lesbar"), None);
+    sqlx::query("UPDATE core.steam_links SET verified = TRUE WHERE discord_id = $1")
+        .bind(USER as i64)
+        .execute(db.pool())
+        .await
+        .expect("Verknüpfung bestätigt");
     assert_eq!(
         store.known_code(USER).await.expect("Code lesbar"),
         Some(CODE.into())
@@ -1854,5 +1894,380 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
             .await
             .expect("Datenschutz lesbar"),
         HashSet::from([USER, u64::MAX])
+    );
+}
+
+fn waiting_for_code(created_at: i64, channel_id: Option<u64>) -> LoungeState {
+    LoungeState {
+        last_seen: 2,
+        request: Some(Request {
+            message_id: 2,
+            created_at,
+            direct: false,
+            phase: Phase::WaitingForCode,
+        }),
+        status: RequestStatus {
+            channel_id,
+            ..RequestStatus::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn phase(state: &LoungeState) -> Option<Phase> {
+    state.request.as_ref().map(|request| request.phase)
+}
+
+fn has_access(text: Option<&str>) -> ScriptedReply {
+    decided(InviteIntent::HasAccess, InviteTurnAction::Close, text)
+}
+
+#[tokio::test]
+async fn abgelehnte_brain_nachfrage_gibt_den_claim_frei_und_der_timer_fragt_spaeter() {
+    let lounge = setup();
+    lounge.store.put(pending(false)).await;
+    lounge
+        .brain
+        .script_notices(vec![Ok(ConversationReply::Rejected)]);
+    lounge.decide(vec![wants(
+        InviteTurnAction::AskAlreadyInvited,
+        Some("Hast du schon eine Einladung bekommen?"),
+    )]);
+    lounge
+        .post(message(2, NOW + 60, "kommt da noch was?"), NOW + 60)
+        .await;
+    let state = lounge.store.state().await;
+    assert!(!state.status.asked());
+    assert_eq!(state.status.check_in_at, None);
+    assert!(state.outbox.is_empty());
+    lounge.poll(NOW + CHECK_IN_SECONDS).await;
+    lounge.poll(NOW + 2 * CHECK_IN_SECONDS).await;
+    lounge.poll(NOW + 3 * CHECK_IN_SECONDS).await;
+    assert_eq!(
+        updates(&lounge.brain),
+        vec![InviteLoungeUpdate::Reply, InviteLoungeUpdate::CheckIn]
+    );
+    assert!(lounge.store.state().await.status.asked());
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[test]
+fn nicht_zugestellte_eintraege_geben_ihren_claim_frei() {
+    let claim = Some(Claim {
+        notice: Notice::CheckIn,
+        request_message_id: 1,
+    });
+    let given_up = |result| {
+        let mut state = pending(false);
+        state.status.claim(Some(Notice::CheckIn));
+        state.status.check_in_at = Some(NOW);
+        let mut entry =
+            OutboxEntry::reply(2, CHECK_IN_CHANNEL_ID, "Schon da?".into(), false, claim);
+        entry.first_attempt_at_millis = Some(0);
+        state.outbox = vec![entry];
+        settle_notice(&mut state, 0, result, NOTICE_MAX_AGE_MILLIS + 1);
+        state
+    };
+    for result in [NoticeResult::Dropped, NoticeResult::Retry] {
+        let state = given_up(result);
+        assert!(state.outbox.is_empty());
+        assert!(!state.status.asked());
+        assert_eq!(state.status.check_in_at, None);
+    }
+    let delivered = given_up(NoticeResult::Delivered);
+    assert!(delivered.status.asked());
+    assert_eq!(delivered.status.check_in_at, Some(NOW));
+    let mut state = pending(false);
+    state.status.claim(Some(Notice::FriendRequest));
+    state.outbox = vec![OutboxEntry::notice(
+        1,
+        Some(CHECK_IN_CHANNEL_ID),
+        Notice::FriendRequest,
+        false,
+    )];
+    settle_notice(&mut state, 0, NoticeResult::Dropped, NOW * 1000);
+    assert!(state.status.notices.is_empty());
+}
+
+#[tokio::test]
+async fn bestaetigung_schliesst_auch_waehrend_steam_wartet_oder_versendet() {
+    let lounge = setup();
+    let mut waiting = pending(true);
+    waiting.status.wait = Some(SteamWait::Delivery);
+    waiting.status.check_at = Some(NOW + 60);
+    lounge.store.put(waiting).await;
+    *lounge.store.progress.lock().await = SteamProgress {
+        outcome: Some(SteamOutcome::Sent),
+        invited: true,
+        open: false,
+    };
+    lounge.decide(vec![has_access(Some("Super, viel Spaß!"))]);
+    lounge
+        .post(message(2, NOW + 10, "passt, ist angekommen"), NOW + 10)
+        .await;
+    lounge.poll(NOW + 600).await;
+    let state = lounge.store.state().await;
+    assert_eq!(phase(&state), Some(Phase::Attempted));
+    assert_eq!(state.status.wait, None);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply]);
+    assert!(lounge.store.progress_queries.lock().await.is_empty());
+    assert_eq!(lounge.calls().await, 0);
+
+    let lounge = setup();
+    lounge.store.put(dispatching(Some(NOW * 1000))).await;
+    lounge.decide(vec![has_access(None)]);
+    lounge
+        .post(message(2, NOW + 5, "hab sie schon, danke"), NOW + 5)
+        .await;
+    lounge
+        .watcher
+        .finish_dispatch(
+            USER,
+            1,
+            Step::Finish(Some(Notice::Invite)),
+            "🎮 Einladung angestoßen",
+        )
+        .await
+        .expect("Versandabschluss läuft");
+    lounge.poll(NOW + 600).await;
+    let state = lounge.store.state().await;
+    assert_eq!(phase(&state), Some(Phase::Attempted));
+    assert_eq!(updates(&lounge.brain), vec![Notice::Confirmed.update()]);
+    assert_eq!(lounge.calls().await, 0);
+}
+
+async fn decide_while_timer_runs(
+    state: LoungeState,
+    reply: ScriptedReply,
+    handled: bool,
+) -> Arc<Lounge> {
+    let lounge = Arc::new(setup());
+    lounge.store.put(state).await;
+    lounge.store.handled.store(handled, Ordering::SeqCst);
+    lounge.decide(vec![reply]);
+    let (started, release) = lounge.brain.gate_first_call();
+    let runner = lounge.clone();
+    let turn = tokio::spawn(async move {
+        runner
+            .post(
+                message(2, NOW + CHECK_IN_SECONDS, "kommt da noch was? 123456789"),
+                NOW + CHECK_IN_SECONDS,
+            )
+            .await
+    });
+    started.notified().await;
+    lounge.poll(NOW + CHECK_IN_SECONDS).await;
+    release.notify_one();
+    turn.await.expect("Nachricht verarbeitet");
+    lounge
+}
+
+#[tokio::test]
+async fn veraltete_entscheidung_wird_gegen_den_neuen_stand_verworfen() {
+    let lounge = decide_while_timer_runs(
+        pending(false),
+        wants(
+            InviteTurnAction::AskAlreadyInvited,
+            Some("Hast du schon eine Einladung bekommen?"),
+        ),
+        false,
+    )
+    .await;
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    let state = lounge.store.state().await;
+    assert_eq!(state.last_seen, 2);
+    assert!(state.outbox.is_empty());
+
+    let lounge =
+        decide_while_timer_runs(pending(false), wants(InviteTurnAction::Invite, None), true).await;
+    let state = lounge.store.state().await;
+    assert_eq!(phase(&state), Some(Phase::Attempted));
+    assert_eq!(state.last_seen, 2);
+    assert_eq!(lounge.calls().await, 0);
+    assert!(notices(&lounge.brain).is_empty());
+
+    let lounge = decide_while_timer_runs(pending(false), has_access(Some("Super!")), false).await;
+    let state = lounge.store.state().await;
+    assert_eq!(phase(&state), Some(Phase::Attempted));
+    assert_eq!(
+        updates(&lounge.brain),
+        vec![InviteLoungeUpdate::CheckIn, InviteLoungeUpdate::Reply]
+    );
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[tokio::test]
+async fn wartende_codebitte_laeuft_ab_auch_aus_altem_kanal() {
+    for (created_at, channel_id, reason) in [
+        (
+            NOW - REQUEST_WINDOW_SECONDS - 1,
+            Some(CHECK_IN_CHANNEL_ID),
+            "Verspätete Bitte ohne Versand beendet",
+        ),
+        (
+            NOW,
+            Some(1_289_721_245_281_292_291),
+            "Bitte aus nicht mehr beobachtetem Kanal beendet",
+        ),
+        (NOW, None, "Bitte aus nicht mehr beobachtetem Kanal beendet"),
+    ] {
+        let lounge = setup();
+        lounge
+            .store
+            .put(waiting_for_code(created_at, channel_id))
+            .await;
+        lounge.poll(NOW).await;
+        let state = lounge.store.state().await;
+        assert_eq!(phase(&state), Some(Phase::Expired));
+        assert_eq!(state.last_result.as_deref(), Some(reason));
+        assert!(notices(&lounge.brain).is_empty());
+    }
+    let lounge = setup();
+    let fresh = waiting_for_code(NOW, Some(CHECK_IN_CHANNEL_ID));
+    lounge.store.put(fresh.clone()).await;
+    lounge.poll(NOW + 60).await;
+    assert_eq!(lounge.store.state().await, fresh);
+}
+
+#[tokio::test]
+async fn bitte_ohne_gueltigen_code_endet_einmal_ohne_versand() {
+    for code in [None, Some(STEAM_BOT_FRIEND_CODE.to_string())] {
+        let lounge = setup();
+        let mut state = pending(true);
+        state.friend_code = code;
+        lounge.store.put(state).await;
+        lounge.poll(NOW + 10).await;
+        let expired = lounge.store.state().await;
+        assert_eq!(phase(&expired), Some(Phase::Expired));
+        assert_eq!(
+            expired.last_result.as_deref(),
+            Some("Bitte ohne gültigen Freundescode beendet")
+        );
+        lounge.poll(NOW + 30).await;
+        assert_eq!(lounge.store.state().await, expired);
+        assert!(lounge
+            .store
+            .pending_users()
+            .await
+            .expect("lesbar")
+            .is_empty());
+        assert_eq!(lounge.calls().await, 0);
+    }
+}
+
+#[tokio::test]
+async fn ungueltiger_code_laut_steam_wird_vergessen() {
+    let lounge = setup();
+    *lounge.invite.reply.lock().await =
+        Some("❌ Mit diesem Freundescode finde ich niemanden.".into());
+    lounge.direct_request().await;
+    let state = lounge.store.state().await;
+    assert_eq!(state.friend_code, None);
+    assert_eq!(phase(&state), Some(Phase::Attempted));
+    assert_eq!(updates(&lounge.brain), vec![Notice::InvalidCode.update()]);
+    lounge.decide(vec![Ok(ConversationReply::Silent)]);
+    lounge
+        .post(message(2, NOW + 60, "und jetzt?"), NOW + 60)
+        .await;
+    assert!(!turns(&lounge.brain)[1].member.has_friend_code);
+}
+
+#[tokio::test]
+async fn ja_ohne_offene_bitte_antwortet_nur_mit_text() {
+    let lounge = setup();
+    lounge.decide(vec![has_access(Some("Schön, dann viel Spaß!"))]);
+    lounge
+        .post(message(1, NOW, "hab Deadlock schon, danke"), NOW)
+        .await;
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply]);
+    assert_eq!(lounge.store.state().await.request, None);
+
+    let lounge = setup();
+    lounge.decide(vec![has_access(None)]);
+    lounge
+        .post(message(1, NOW, "hab Deadlock schon, danke"), NOW)
+        .await;
+    assert!(notices(&lounge.brain).is_empty());
+    assert_eq!(
+        lounge.store.state().await,
+        LoungeState {
+            last_seen: 1,
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
+fn freundescode_prueft_bereich_und_bot_code() {
+    assert_eq!(friend_code("4294967296"), None);
+    assert_eq!(friend_code("4294967295"), Some("4294967295".into()));
+    assert_eq!(friend_code(&STEAM_BOT_FRIEND_CODE.to_string()), None);
+    assert_eq!(
+        friend_code(&format!("Bot {STEAM_BOT_FRIEND_CODE}, meiner 123456789")),
+        Some(CODE.into())
+    );
+    assert_eq!(friend_code("0000000000"), None);
+    let bot_code = STEAM_BOT_FRIEND_CODE.to_string();
+    let mut stored = pending(false);
+    stored.friend_code = Some(bot_code.clone());
+    let linked = MemberFacts {
+        linked_code: Some(CODE.into()),
+        ..MemberFacts::default()
+    };
+    assert_eq!(linked.code(Some(&stored)), Some(CODE.into()));
+    assert_eq!(linked.known_code(Some(&stored)), Some(CODE.into()));
+    let typed = MemberFacts {
+        message_code: Some("111222333".into()),
+        linked_code: Some("444555666".into()),
+        invited: false,
+    };
+    assert_eq!(typed.code(Some(&pending(false))), Some("111222333".into()));
+    assert_eq!(typed.known_code(Some(&pending(false))), Some(CODE.into()));
+    assert_eq!(typed.known_code(None), Some("444555666".into()));
+    assert_eq!(MemberFacts::default().code(Some(&stored)), None);
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn postgres_alte_einladung_zaehlt_nicht_fuer_die_neue_bitte() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("Testdatenbank");
+    let store = PgLoungeStore {
+        pool: db.pool().clone(),
+    };
+    let steam_id = steam_id64(CODE).expect("gültiger Freundescode");
+    let audit = |at: i64| {
+        sqlx::query(
+            "INSERT INTO steam.beta_invite_audit (discord_id, steam_id64, steam_profile, invited_at)
+             VALUES ($1, $2, 'profil', to_timestamp($3))",
+        )
+        .bind(USER as i64)
+        .bind(steam_id)
+        .bind(at as f64)
+    };
+    audit(NOW - 3600)
+        .execute(db.pool())
+        .await
+        .expect("alte Einladung");
+    let old = store
+        .steam_progress(CODE, NOW, NOW)
+        .await
+        .expect("Steam-Stand lesbar");
+    assert!(!old.invited);
+    assert!(store.invited(CODE).await.expect("Einladungsstand lesbar"));
+    assert_eq!(after_progress(SteamWait::Retry, old, NOW), Step::Dispatch);
+    audit(NOW + 5)
+        .execute(db.pool())
+        .await
+        .expect("neue Einladung");
+    let fresh = store
+        .steam_progress(CODE, NOW + 10, NOW)
+        .await
+        .expect("Steam-Stand lesbar");
+    assert!(fresh.invited);
+    assert_eq!(
+        after_progress(SteamWait::Retry, fresh, NOW),
+        Step::Finish(Some(Notice::Invite))
     );
 }

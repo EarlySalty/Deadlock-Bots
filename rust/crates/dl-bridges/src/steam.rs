@@ -28,6 +28,7 @@ const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 /// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
 /// und der Poller schickte sie später ein zweites Mal.
 pub const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
+pub const STEAM_BOT_FRIEND_CODE: u32 = 820_142_646;
 /// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
 /// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
 /// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
@@ -386,7 +387,7 @@ fn friend_code_modal() -> ModalSpec {
         fields: vec![ModalField {
             custom_id: "friend_code".to_string(),
             label: "Freundescode".to_string(),
-            placeholder: "z. B. 820142646".to_string(),
+            placeholder: format!("z. B. {STEAM_BOT_FRIEND_CODE}"),
             value: None,
             required: true,
             min_length: 1,

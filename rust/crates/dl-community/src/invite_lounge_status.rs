@@ -22,6 +22,23 @@ pub(super) enum Notice {
 }
 
 impl Notice {
+    const ALL: [Self; 8] = [
+        Self::FriendRequest,
+        Self::Invite,
+        Self::AlreadyInvited,
+        Self::InvalidCode,
+        Self::Rejected,
+        Self::NotAccepted,
+        Self::CheckIn,
+        Self::Confirmed,
+    ];
+
+    fn of(update: InviteLoungeUpdate) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|notice| notice.update() == update)
+    }
+
     pub(super) fn update(self) -> InviteLoungeUpdate {
         match self {
             Self::FriendRequest => status(InviteStatus::FriendshipMissing),
@@ -65,6 +82,12 @@ impl StoredUpdate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Claim {
+    pub(super) notice: Notice,
+    pub(super) request_message_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct OutboxEntry {
     pub(super) key: String,
@@ -83,6 +106,8 @@ pub(super) struct OutboxEntry {
     pub(super) claimed_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) first_attempt_at_millis: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) claim: Option<Claim>,
 }
 
 impl OutboxEntry {
@@ -106,6 +131,7 @@ impl OutboxEntry {
         channel_id: u64,
         text: String,
         already_invited: bool,
+        claim: Option<Claim>,
     ) -> Self {
         let mut entry = Self::new(
             format!("invite-lounge:{message_id}:reply"),
@@ -115,6 +141,7 @@ impl OutboxEntry {
             already_invited,
         );
         entry.answer = Some(text);
+        entry.claim = claim;
         entry
     }
 
@@ -136,6 +163,7 @@ impl OutboxEntry {
             next_at_millis: 0,
             claimed_at_millis: None,
             first_attempt_at_millis: None,
+            claim: None,
         }
     }
 
@@ -159,8 +187,27 @@ impl OutboxEntry {
         now_millis.saturating_sub(first) < NOTICE_MAX_AGE_MILLIS
     }
 
-    pub(super) fn asks_check_in(&self) -> bool {
-        self.update.current() == Some(InviteLoungeUpdate::CheckIn)
+    pub(super) fn held_claim(&self) -> Option<Claim> {
+        self.claim.or_else(|| {
+            self.update
+                .current()
+                .and_then(Notice::of)
+                .map(|notice| Claim {
+                    notice,
+                    request_message_id: self.request_message_id,
+                })
+        })
+    }
+
+    pub(super) fn rearms_check_in(&self) -> bool {
+        self.claim
+            .is_some_and(|claim| claim.notice == Notice::CheckIn)
+    }
+
+    pub(super) fn belongs_to(&self, request_message_id: u64) -> bool {
+        self.held_claim()
+            .map_or(self.request_message_id, |claim| claim.request_message_id)
+            == request_message_id
     }
 }
 
@@ -575,8 +622,22 @@ mod tests {
         let stored = r#"{"key":"invite-lounge:5:answer:6","request_message_id":5,"channel_id":7,"update":{"kind":"check_in_answer","outcome":"arrived"},"answer":"ja","already_invited":false,"attempts":0,"next_at_millis":0}"#;
         let entry: OutboxEntry = serde_json::from_str(stored).expect("alter Eintrag");
         assert_eq!(entry.update.current(), None);
-        assert!(!entry.asks_check_in());
+        assert_eq!(entry.held_claim(), None);
         assert_eq!(serde_json::to_string(&entry).expect("json"), stored);
+        let legacy_check_in = r#"{"key":"invite-lounge:5:check_in","request_message_id":5,"channel_id":7,"update":{"kind":"check_in"},"already_invited":false,"attempts":0,"next_at_millis":0}"#;
+        let entry: OutboxEntry = serde_json::from_str(legacy_check_in).expect("alter Eintrag");
+        assert_eq!(
+            entry.held_claim(),
+            Some(Claim {
+                notice: Notice::CheckIn,
+                request_message_id: 5
+            })
+        );
+        assert!(!entry.rearms_check_in());
+        assert_eq!(
+            serde_json::to_string(&entry).expect("json"),
+            legacy_check_in
+        );
         let current = OutboxEntry::notice(5, Some(7), Notice::Confirmed, false);
         let json = serde_json::to_string(&current).expect("json");
         assert!(json.contains(r#""update":{"kind":"confirmed"}"#), "{json}");
@@ -588,7 +649,7 @@ mod tests {
     fn ausgang_hat_stabile_schluessel_und_begrenzte_wiederholungen() {
         let entry = OutboxEntry::notice(55, Some(1), Notice::Invite, true);
         assert_eq!(entry.key, "invite-lounge:55:invite");
-        let reply = OutboxEntry::reply(60, 1, "Pack noch deinen Code dazu :)".into(), false);
+        let reply = OutboxEntry::reply(60, 1, "Pack noch deinen Code dazu :)".into(), false, None);
         assert_eq!(reply.key, "invite-lounge:60:reply");
         assert_eq!(reply.request_message_id, 60);
         assert_eq!(reply.update.current(), Some(InviteLoungeUpdate::Reply));
@@ -596,9 +657,24 @@ mod tests {
             reply.answer.as_deref(),
             Some("Pack noch deinen Code dazu :)")
         );
-        assert!(!reply.asks_check_in());
-        assert!(OutboxEntry::notice(55, Some(1), Notice::CheckIn, false).asks_check_in());
-        assert!(!entry.asks_check_in());
+        assert_eq!(reply.held_claim(), None);
+        assert!(!reply.belongs_to(55));
+        let ask = Claim {
+            notice: Notice::CheckIn,
+            request_message_id: 55,
+        };
+        let asking = OutboxEntry::reply(60, 1, "Schon eingeladen?".into(), false, Some(ask));
+        assert_eq!(asking.held_claim(), Some(ask));
+        assert!(asking.rearms_check_in());
+        assert!(asking.belongs_to(55));
+        let check_in = OutboxEntry::notice(55, Some(1), Notice::CheckIn, false);
+        assert_eq!(check_in.held_claim(), Some(ask));
+        assert!(!check_in.rearms_check_in());
+        assert_eq!(
+            entry.held_claim().map(|claim| claim.notice),
+            Some(Notice::Invite)
+        );
+        assert!(entry.belongs_to(55));
         let mut entry = entry;
         assert!(entry.ready(0));
         entry.claim(1_000);
