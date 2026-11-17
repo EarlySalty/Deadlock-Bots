@@ -33,7 +33,7 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - FALSE findings on `steam.rs` and `dl-discord`: both are restored to origin/main.
 - FALSE #6 #9 #11 #13 Lagebild token literals: `TURNIER_TOKEN_NAME` is gone from the branch.
 
-### Round 4 findings whose code is still at HEAD (26 REAL classes, 3 FALSE classes)
+### Round 4 findings whose code is still at HEAD (26 REAL classes, 4 FALSE classes)
 
 | Class | Findings | Fix |
 |---|---|---|
@@ -67,6 +67,7 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - FALSE #271 #276 #283 #288-291 #296 #305 #310 #314-319 #361 #394 (0-byte banner attached): `read_banner_file` in `serversync.rs` returns an error for an empty file, its test asserts "ist leer", and the welcome banner and divider readers go through it.
 - FALSE #346 #347: `steam.rs` is restored to origin/main.
 - FALSE #368: the runtime_config test asserts through `TWITCH_TOKEN_NAME`.
+- FALSE #358 #365 #370 #371 #375 (`presence_status` text row, Brain image rows): `git diff origin/main...HEAD` has no hunk with these rows; they are origin/main lines outside this feature.
 
 ### Corrections to earlier commit messages
 
@@ -77,7 +78,13 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - 22a0cc1f claimed that each catalog bound comes from the loader range; the two port keys had none. Fixed in 6a5b3283.
 - 2f6ed231 introduced the placeholder name cap that hid long names; removed in 752ec18c.
 
+### Twin checks of this pass
+
+- B10: `VoiceUxPublishOutput.banners` keeps the loaded Voice UX banners behind `serde(skip)` because `relink_voice_ux_forum_thread` rebuilds the messages after the forum post exists; it is the loaded source, and the attachments copy from it.
+- B1: `discord_pages::fetch_all_guild_members` uses serenity with its rate limiter off and a per-page timeout; it parses no Retry-After value.
+- B21: the trigger `supporter_sources_privacy_gate` waits on `pg_advisory_xact_lock` inside the same transaction, so the transaction-local `lock_timeout` from `lock_gated_table` bounds that wait as well.
+- B2: `DISCORD_REQUEST_TIMEOUT_MS` (15 s) and `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS` (30 s) both sit below `DISCORD_CALL_TIMEOUT_MS` (their sum), so the retry and budget branches stay reachable under the outer bound.
+
 ### Open
 
-- Round 4 #358 #365 #370 #371 #375: the `presence_status` text row and the Brain image rows are origin/main lines. A fix needs a text-length contract in the settings catalog or a dl-brain change, both outside this feature.
 - Hook findings 1-3 of round 5: the Ursache blocks of 27af3349, b6553184 and 5ddd3aa8 lack the twins layer. A reword needs a history rewrite, which this pass does not do.
