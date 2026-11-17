@@ -1672,7 +1672,6 @@ dependencies = [
  "dl-broker",
  "dl-central-db",
  "dl-changelog",
- "dl-core",
  "serde",
  "serde_json",
  "serenity",

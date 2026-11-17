@@ -13,7 +13,6 @@ chrono.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-central-db.workspace = true
-dl-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serenity.workspace = true

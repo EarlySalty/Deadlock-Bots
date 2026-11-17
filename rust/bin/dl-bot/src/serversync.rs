@@ -1164,7 +1164,7 @@ impl ServerSyncService {
     }
 
     async fn fetch_live_guild_model_bounded(&self) -> ServerSyncResult<GuildModel> {
-        let timeout = dl_discord::adapter::discord_call_timeout();
+        let timeout = crate::discord_pages::discord_call_timeout();
         tokio::time::timeout(
             timeout,
             dl_server_as_code::import::fetch_live_guild_model(
@@ -1183,10 +1183,10 @@ impl ServerSyncService {
     }
 
     async fn fetch_guild_members(&self) -> ServerSyncResult<Vec<serenity::all::Member>> {
-        dl_discord::adapter::fetch_all_guild_members(
+        crate::discord_pages::fetch_all_guild_members(
             &self.adapter.http,
             GuildId::new(self.guild_id),
-            dl_discord::adapter::discord_call_timeout(),
+            crate::discord_pages::discord_call_timeout(),
         )
         .await
         .map_err(ServerSyncError::internal)
@@ -5671,7 +5671,7 @@ fn archive_before_cursor(
             })
         })
         .transpose()?;
-    dl_discord::adapter::advance_before(before.as_ref(), oldest).map_err(|_| {
+    crate::discord_pages::advance_before(before.as_ref(), oldest).map_err(|_| {
         ServerSyncError::internal("Discord-Thread-Archiv blättert nicht weiter".to_string())
     })
 }
@@ -5686,7 +5686,7 @@ fn history_before_cursor(
         .collect::<ServerSyncResult<Vec<_>>>()?
         .into_iter()
         .min();
-    dl_discord::adapter::advance_before(before.as_ref(), oldest).map_err(|_| {
+    crate::discord_pages::advance_before(before.as_ref(), oldest).map_err(|_| {
         ServerSyncError::internal("Discord-Nachrichtenverlauf blättert nicht weiter".to_string())
     })
 }

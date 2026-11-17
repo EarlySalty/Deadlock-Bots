@@ -91,7 +91,7 @@ impl SupporterConfig {
                     .supporter_request_timeout_ms
                     .unwrap_or(SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS),
             ),
-            discord_timeout: dl_discord::adapter::discord_call_timeout(),
+            discord_timeout: crate::discord_pages::discord_call_timeout(),
         }
     }
 

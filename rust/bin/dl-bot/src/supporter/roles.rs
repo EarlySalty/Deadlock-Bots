@@ -54,7 +54,8 @@ pub async fn fetch_members(
     let supporter_role = RoleId::new(SUPPORTER_ROLE_ID);
     let booster_role = RoleId::new(BOOSTER_ROLE_ID);
     let members =
-        dl_discord::adapter::fetch_all_guild_members(http, GuildId::new(guild_id), timeout).await?;
+        crate::discord_pages::fetch_all_guild_members(http, GuildId::new(guild_id), timeout)
+            .await?;
     Ok(members
         .into_iter()
         .filter(|member| !member.user.bot)
@@ -123,6 +124,7 @@ pub async fn apply_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discord_pages::member_fixture;
 
     async fn discord(app: axum::Router) -> (serenity::http::Http, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -137,13 +139,6 @@ mod tests {
             .ratelimiter_disabled(true)
             .build();
         (http, server)
-    }
-
-    fn member_fixture(id: &str) -> serde_json::Value {
-        serde_json::json!({
-            "user": {"id": id, "username": "member", "discriminator": "0001", "avatar": null},
-            "roles": [], "joined_at": null, "deaf": false, "mute": false, "flags": 0
-        })
     }
 
     fn limits() -> Duration {
@@ -172,7 +167,7 @@ mod tests {
                         if seen.fetch_add(1, Ordering::SeqCst) < 2 {
                             std::future::pending::<()>().await;
                         }
-                        axum::Json(serde_json::json!([member_fixture("7")]))
+                        axum::Json(serde_json::json!([member_fixture(7, &[])]))
                     }
                 },
             ),
@@ -226,7 +221,7 @@ mod tests {
                             0 => std::future::pending::<axum::Json<serde_json::Value>>().await,
                             1 => axum::Json(serde_json::json!([])),
                             _ if query.contains_key("after") => axum::Json(serde_json::json!([])),
-                            _ => axum::Json(serde_json::json!([member_fixture("2")])),
+                            _ => axum::Json(serde_json::json!([member_fixture(2, &[])])),
                         }
                     }
                 },
