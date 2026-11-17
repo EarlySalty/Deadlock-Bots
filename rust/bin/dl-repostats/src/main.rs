@@ -271,6 +271,10 @@ fn main() -> anyhow::Result<()> {
         repos.push(parse_log(&log).into_out(name, &repo_path));
     }
 
+    if repos.is_empty() {
+        anyhow::bail!("keine Git-Repos unter {base}; Artefakt nicht überschrieben");
+    }
+
     let now = chrono::Utc::now();
     let artifact = Artifact {
         generated_at: now.to_rfc3339(),

@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 
 use crate::web::{err_text, ok_json, DashboardApp};
 
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Antwort, wenn der Collector noch nie lief (Datei fehlt) — wie das Original.
 fn unavailable() -> Value {
     json!({
@@ -55,24 +57,25 @@ pub async fn repo_activity_refresh(
     if let Err(resp) = app.guard_mutate(&headers, true).await {
         return resp;
     }
-    // Binary unter repo/rust/target/release/, Repo-Wurzel = Data-Parent.
-    let (bin, repo_root, base) = {
-        let Ok(data) = std::path::absolute(app.data_dir()) else {
-            return err_text(500, "Repo-Pfad nicht auflösbar");
-        };
-        let Some(rr) = data.parent() else {
-            return err_text(500, "Repo-Pfad nicht auflösbar");
-        };
-        let Some(base) = rr.parent() else {
-            return err_text(500, "Repo-Basis nicht auflösbar");
-        };
-        (
-            rr.join("rust/target/release/dl-repostats"),
-            rr.to_path_buf(),
-            base.to_path_buf(),
-        )
+    let Ok(data) = std::path::absolute(app.data_dir()) else {
+        tracing::error!("repo_activity: data dir nicht absolut auflösbar");
+        return err_text(500, "Repo-Pfad nicht auflösbar");
     };
+    let Some(repo_root) = data.parent() else {
+        tracing::error!(data = %data.display(), "repo_activity: data dir ohne Elternverzeichnis");
+        return err_text(500, "Repo-Pfad nicht auflösbar");
+    };
+    let Some(base) = repo_root.parent() else {
+        tracing::error!(root = %repo_root.display(), "repo_activity: Repo-Wurzel ohne Basis");
+        return err_text(500, "Repo-Basis nicht auflösbar");
+    };
+    if data.to_str().is_none() {
+        tracing::error!("repo_activity: data dir ist kein UTF-8");
+        return err_text(500, "Repo-Pfad nicht auflösbar");
+    }
+    let bin = repo_root.join("rust/target/release/dl-repostats");
     if !bin.exists() {
+        tracing::error!(bin = %bin.display(), "repo_activity: dl-repostats fehlt");
         return err_text(
             503,
             "dl-repostats-Binary nicht gebaut (cargo build --release -p dl-repostats).",
@@ -80,13 +83,15 @@ pub async fn repo_activity_refresh(
     }
     tracing::info!("AUDIT master-dashboard repo-activity refresh");
 
-    let out = app.data_dir().join("repo_activity.json");
+    let _run = REFRESH_LOCK.lock().await;
+    let artifact = data.join("repo_activity.json");
     let mut cmd = tokio::process::Command::new(&bin);
-    cmd.current_dir(&repo_root)
-        .env("REPOSTATS_BASE", &base)
-        .env("REPOSTATS_OUT", &out)
+    cmd.current_dir(repo_root)
+        .env("REPOSTATS_BASE", base)
+        .env("REPOSTATS_OUT", &artifact)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(err) => {
@@ -94,16 +99,19 @@ pub async fn repo_activity_refresh(
             return err_text(500, "Collector-Start fehlgeschlagen");
         }
     };
-    let out = match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
+    let run = match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(err)) => {
             tracing::error!(%err, "dl-repostats Lauf fehlgeschlagen");
             return err_text(500, "Collector-Lauf fehlgeschlagen");
         }
-        Err(_) => return err_text(504, "Collector-Lauf hat zu lange gedauert (>60s)."),
+        Err(_) => {
+            tracing::error!("dl-repostats Lauf über 60s, Prozess wird beendet");
+            return err_text(504, "Collector-Lauf hat zu lange gedauert (>60s).");
+        }
     };
-    if !out.status.success() {
-        let detail: String = String::from_utf8_lossy(&out.stderr)
+    if !run.status.success() {
+        let detail: String = String::from_utf8_lossy(&run.stderr)
             .chars()
             .take(500)
             .collect();
