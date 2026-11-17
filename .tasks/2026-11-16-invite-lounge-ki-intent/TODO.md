@@ -13,3 +13,14 @@
 3. README rollout note: CAS is semantic now. Commit `fix(invite-lounge): ...` with Ursache block (layers 1-4, twins: reply gates, brain_api twin), then publish branch to origin.
 4. Wait for Brain round 4 verdict, re-pin Brain SHA if it changed, then `gate-review --repo /home/nathanael/.worktrees/bots-invite-lounge-ki-intent-20261116 --base origin/main` (round 2).
 5. Deploy still blocked: /opt/deadlock/bots/current points at 59a0ac5f (supporter commit not on main), user decision needed.
+
+## State 2026-11-17
+
+- Bots: dcdeabb5 on origin (round-1 classes A-L fixed, tests green except 4 DB baseline reds, clippy no new warnings in lounge files). Still pins Brain 182bfa76.
+- Brain: round 4 BLOCK (105 blocking, ~15 distinct defects). GATE-RETRO.md committed (659ae087) with triage, Fable second opinion and binding fix list. A fresh fixer runs the one clean pass; then ONE final Brain gate round. BLOCK there = stop and report to the user.
+- A read-only pre-gate review of the Bots diff runs in parallel.
+
+Next:
+1. When the Brain fixer reports: check its commit, rerun Brain tests, run the final Brain gate round.
+2. Bots: apply pre-gate review findings, rename MAX_TURN_RECENT_LINES -> MAX_CHAT_LINES (Brain removes it), re-pin the Brain SHA, tests, commit, then Bots gate round 2.
+3. Merge both after ALLOW (Brain first), deploy only after the user decides on /opt/deadlock/bots/current -> 59a0ac5f (supporter commit not on main).
