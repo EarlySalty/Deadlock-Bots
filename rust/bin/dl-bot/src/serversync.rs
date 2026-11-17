@@ -1595,9 +1595,9 @@ impl ServerSyncService {
                     );
                 }
                 let page: DiscordThreadPage = self.discord_get_json(url).await?;
-                let next_before = archive_before_cursor(before, &page.threads)?;
+                let next_before = archive_next_cursor(before, &page)?;
                 ids.extend(thread_ids(page.threads)?);
-                if !page.has_more || next_before.is_none() {
+                if next_before.is_none() {
                     break;
                 }
                 before = next_before;
@@ -5682,6 +5682,23 @@ pub(crate) fn discord_http_client() -> Result<reqwest::Client, reqwest::Error> {
             dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS,
         ))
         .build()
+}
+
+fn archive_next_cursor(
+    before: Option<DateTime<chrono::FixedOffset>>,
+    page: &DiscordThreadPage,
+) -> ServerSyncResult<Option<DateTime<chrono::FixedOffset>>> {
+    if !page.has_more {
+        return Ok(None);
+    }
+    archive_before_cursor(before, &page.threads)?
+        .map(Some)
+        .ok_or_else(|| {
+            ServerSyncError::internal(
+                "Discord-Thread-Archiv meldet weitere Seiten, liefert aber keine Threads"
+                    .to_string(),
+            )
+        })
 }
 
 fn archive_before_cursor(
@@ -10611,6 +10628,25 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             serde_json::from_value(json!({"id": "2"})).expect("thread without metadata");
         assert!(archive_before_cursor(first, &[without_metadata]).is_err());
         assert_eq!(archive_before_cursor(first, &[]).expect("empty page"), None);
+
+        let archive_page = |has_more: bool, threads: Value| -> DiscordThreadPage {
+            serde_json::from_value(json!({"threads": threads, "has_more": has_more}))
+                .expect("thread page")
+        };
+        let last_page = archive_page(false, json!([{"id": "3"}]));
+        assert_eq!(
+            archive_next_cursor(first, &last_page).expect("last page needs no cursor"),
+            None
+        );
+        let more = archive_page(
+            true,
+            json!([{"id": "4", "thread_metadata": {"archive_timestamp": "2026-11-01T10:00:00+00:00"}}]),
+        );
+        assert!(archive_next_cursor(first, &more)
+            .expect("older page")
+            .is_some());
+        assert!(archive_next_cursor(first, &archive_page(true, json!([]))).is_err());
+        assert!(archive_next_cursor(first, &archive_page(true, json!([{"id": "5"}]))).is_err());
     }
 
     #[test]
