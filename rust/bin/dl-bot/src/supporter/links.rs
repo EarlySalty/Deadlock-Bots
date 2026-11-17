@@ -18,14 +18,29 @@ use crate::serversync::support_publish::{
     SUPPORT_TIER_BUTTON_PREFIX,
 };
 
-const INTERNAL_TOKEN_HEADER: &str = crate::serversync::TOKEN_HEADER;
 const ACTION_ROW_MAX_BUTTONS: usize = 5;
 const _: () = assert!(SUPPORTER_MAX_TIERS <= ACTION_ROW_MAX_BUTTONS);
 const PUBLIC_ORIGIN: &str = "https://deutsche-deadlock-community.de/";
 const STRIPE_HOST_SUFFIX: &str = ".stripe.com";
 const LINK_URL_MAX_LEN: usize = 512;
-const MISSING_STEAM_TOKEN: &str = "interner Token für den Steam Bot fehlt";
-const MISSING_TWITCH_TOKEN: &str = "interner Token für das Twitch-Dashboard fehlt";
+
+#[derive(Clone, Copy)]
+struct LinkService {
+    name: &'static str,
+    missing_token: &'static str,
+    accept: fn(&str) -> bool,
+}
+
+const STEAM_BOT: LinkService = LinkService {
+    name: "Steam Bot",
+    missing_token: "interner Token für den Steam Bot fehlt",
+    accept: is_stripe_url,
+};
+const TWITCH_DASHBOARD: LinkService = LinkService {
+    name: "Twitch-Dashboard",
+    missing_token: "interner Token für das Twitch-Dashboard fehlt",
+    accept: is_public_url,
+};
 
 pub const REPLY_FAILED: &str =
     "Das hat gerade nicht geklappt. Versuch es bitte in ein paar Minuten noch einmal.";
@@ -174,7 +189,7 @@ impl HttpSupporterLinks {
         }
         if self.twitch_base.is_some() && self.twitch_token.is_none() {
             tracing::warn!(
-                missing = MISSING_TWITCH_TOKEN,
+                missing = TWITCH_DASHBOARD.missing_token,
                 "Server-Unterstützer: Twitch-Knopf bleibt im Panel ausgeblendet"
             );
         }
@@ -190,7 +205,7 @@ impl HttpSupporterLinks {
         let response = self
             .http
             .post(format!("{base}{path}"))
-            .header(INTERNAL_TOKEN_HEADER, token)
+            .header(wire::TOKEN_HEADER, token)
             .json(&body)
             .send()
             .await
@@ -199,9 +214,9 @@ impl HttpSupporterLinks {
     }
 
     async fn steam_link(&self, path: &str, body: Value) -> LinkResult {
-        let token = required(self.steam_token.as_deref(), MISSING_STEAM_TOKEN)?;
+        let token = required(self.steam_token.as_deref(), STEAM_BOT.missing_token)?;
         let (status, body) = self.post(&self.steam_base, token, path, body).await?;
-        link_outcome(path, status, &body, is_stripe_url)
+        link_outcome(STEAM_BOT, path, status, &body)
     }
 }
 
@@ -233,7 +248,7 @@ impl SupporterLinks for HttpSupporterLinks {
         let Some(base) = self.twitch_base.as_deref() else {
             return Ok(LinkOutcome::Unavailable);
         };
-        let token = required(self.twitch_token.as_deref(), MISSING_TWITCH_TOKEN)?;
+        let token = required(self.twitch_token.as_deref(), TWITCH_DASHBOARD.missing_token)?;
         let (status, body) = self
             .post(
                 base,
@@ -242,19 +257,19 @@ impl SupporterLinks for HttpSupporterLinks {
                 json!({ DISCORD_ID_FIELD: discord_id }),
             )
             .await?;
-        link_outcome(TWITCH_CONNECT_PATH, status, &body, is_public_url)
+        link_outcome(TWITCH_DASHBOARD, TWITCH_CONNECT_PATH, status, &body)
     }
 }
 
 #[async_trait::async_trait]
 impl FundingSource for HttpSupporterLinks {
     async fn funding(&self) -> Result<SupportFunding, String> {
-        let token = required(self.steam_token.as_deref(), MISSING_STEAM_TOKEN)
+        let token = required(self.steam_token.as_deref(), STEAM_BOT.missing_token)
             .map_err(|error| error.to_string())?;
         let response = self
             .http
             .get(format!("{}{FUNDING_PATH}", self.steam_base))
-            .header(INTERNAL_TOKEN_HEADER, token)
+            .header(wire::TOKEN_HEADER, token)
             .send()
             .await
             .map_err(|error| format!("{FUNDING_PATH} nicht erreichbar: {error}"))?;
@@ -272,7 +287,9 @@ impl FundingSource for HttpSupporterLinks {
     }
 
     fn missing_config(&self) -> Option<&'static str> {
-        self.steam_token.is_none().then_some(MISSING_STEAM_TOKEN)
+        self.steam_token
+            .is_none()
+            .then_some(STEAM_BOT.missing_token)
     }
 
     fn goal_cents(&self) -> i64 {
@@ -316,12 +333,7 @@ fn error_code(body: &Value) -> &str {
         .unwrap_or("")
 }
 
-fn link_outcome(
-    path: &str,
-    status: StatusCode,
-    body: &Value,
-    accept: fn(&str) -> bool,
-) -> LinkResult {
+fn link_outcome(service: LinkService, path: &str, status: StatusCode, body: &Value) -> LinkResult {
     let code = error_code(body);
     match (status, code) {
         (StatusCode::NOT_FOUND, wire::NO_SUBSCRIPTION) => return Ok(LinkOutcome::NoSubscription),
@@ -329,7 +341,7 @@ fn link_outcome(
             return Ok(LinkOutcome::AlreadySubscribed)
         }
         (StatusCode::BAD_REQUEST, wire::UNKNOWN_TIER) => {
-            let service = link_service(path);
+            let service = service.name;
             tracing::error!(
                 path,
                 service,
@@ -341,7 +353,7 @@ fn link_outcome(
             StatusCode::SERVICE_UNAVAILABLE,
             wire::SUPPORTER_NOT_CONFIGURED | wire::TIP_NOT_CONFIGURED | wire::PRICES_UNVERIFIED,
         ) => {
-            let service = link_service(path);
+            let service = service.name;
             tracing::warn!(
                 path,
                 service,
@@ -360,7 +372,7 @@ fn link_outcome(
     body.get(wire::URL_FIELD)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|url| accept(url))
+        .filter(|url| (service.accept)(url))
         .map(|url| LinkOutcome::Url(url.to_string()))
         .ok_or_else(|| LinkError::Failed(format!("{path} liefert keinen gültigen Link")))
 }
@@ -368,14 +380,6 @@ fn link_outcome(
 fn token_rejected(status: StatusCode, code: &str) -> bool {
     status == StatusCode::UNAUTHORIZED
         || (status == StatusCode::SERVICE_UNAVAILABLE && code == wire::AUTH_NOT_CONFIGURED)
-}
-
-fn link_service(path: &str) -> &'static str {
-    if path == TWITCH_CONNECT_PATH {
-        "Twitch Bot"
-    } else {
-        "Steam Bot"
-    }
 }
 
 fn log_token_rejection(path: &str, status: StatusCode, code: &str) {
@@ -398,12 +402,14 @@ fn url_host(url: &str) -> Option<&str> {
         return None;
     }
     let rest = url.strip_prefix("https://")?;
-    let host = rest.split(['/', '?', '#']).next()?;
-    (!host.is_empty() && !host.contains('@') && !host.contains(':')).then_some(host)
+    let host = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    (!host.contains('@') && !host.contains(':')).then_some(host)
 }
 
 fn is_stripe_url(url: &str) -> bool {
-    url_host(url).is_some_and(|host| host.ends_with(STRIPE_HOST_SUFFIX))
+    url_host(url)
+        .and_then(|host| host.strip_suffix(STRIPE_HOST_SUFFIX))
+        .is_some_and(|label| !label.is_empty() && !label.ends_with('.'))
 }
 
 fn is_public_url(url: &str) -> bool {
@@ -838,7 +844,7 @@ mod tests {
     async fn stufenklick_beantwortet_jede_antwort_des_steam_bots() {
         type Checkout = fn(u64) -> LinkResult;
         fn answer(status: StatusCode, body: Value) -> LinkResult {
-            link_outcome(CHECKOUT_PATH, status, &body, is_stripe_url)
+            link_outcome(STEAM_BOT, CHECKOUT_PATH, status, &body)
         }
         let cases: [(Checkout, &str); 9] = [
             (
@@ -880,7 +886,7 @@ mod tests {
                 REPLY_FAILED,
             ),
             (
-                |_| Err(LinkError::NotConfigured(MISSING_STEAM_TOKEN)),
+                |_| Err(LinkError::NotConfigured(STEAM_BOT.missing_token)),
                 REPLY_UNAVAILABLE,
             ),
             (|_| Err(LinkError::Failed("down".to_string())), REPLY_FAILED),
@@ -917,27 +923,46 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn jede_methode_ruft_ihren_pfad_mit_token_und_feldern_auf() {
-        type Seen = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
-        let seen: Seen = Arc::default();
-        let record = seen.clone();
+    type Seen = Arc<Mutex<Vec<(&'static str, String, String, Option<String>, Value)>>>;
+
+    async fn recording_service(
+        service: &'static str,
+        seen: Seen,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new().fallback(
-            move |uri: axum::http::Uri,
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
                   headers: axum::http::HeaderMap,
-                  axum::Json(body): axum::Json<Value>| {
-                let record = record.clone();
+                  body: axum::body::Bytes| {
+                let seen = seen.clone();
                 async move {
                     let path = uri.path().to_string();
                     let token = headers
-                        .get(INTERNAL_TOKEN_HEADER)
+                        .get(wire::TOKEN_HEADER)
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_string);
-                    record
-                        .lock()
-                        .expect("seen")
-                        .extend([(path.clone(), token, body)]);
+                    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    let accepted = token.as_deref() == Some("test-token");
+                    seen.lock().expect("seen").extend([(
+                        service,
+                        method.to_string(),
+                        path.clone(),
+                        token,
+                        body,
+                    )]);
+                    if !accepted {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(json!({ wire::ERROR_FIELD: "unauthorized" })),
+                        );
+                    }
                     let url = match path.as_str() {
+                        FUNDING_PATH => {
+                            return (
+                                axum::http::StatusCode::OK,
+                                axum::Json(json!({ wire::FUNDING_CENTS_FIELD: 1234 })),
+                            )
+                        }
                         CHECKOUT_PATH => "https://checkout.stripe.com/c/pay/abo",
                         TIP_PATH => "https://checkout.stripe.com/c/pay/tip",
                         PORTAL_PATH => "https://billing.stripe.com/p/session/portal",
@@ -958,14 +983,26 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve");
         });
+        (base, server)
+    }
+
+    fn links_for(steam: &str, twitch: &str, token: &'static str) -> Arc<HttpSupporterLinks> {
         let community = dl_core::runtime_config::CommunityOptions {
-            supporter_twitch_api_base: Some(base.clone()),
+            supporter_twitch_api_base: Some(twitch.to_string()),
             ..Default::default()
         };
-        let config = SupporterConfig::new(&community, &base, |name| {
-            (name == wire::TWITCH_TOKEN_NAME).then(|| "test-token".to_string())
+        let config = SupporterConfig::new(&community, steam, |name| {
+            (name == dl_core::runtime_config::TWITCH_TOKEN_NAME).then(|| token.to_string())
         });
-        let links = test_links(&config);
+        test_links(&config)
+    }
+
+    #[tokio::test]
+    async fn jede_methode_ruft_ihren_dienst_und_pfad_mit_token_und_feldern_auf() {
+        let seen: Seen = Arc::default();
+        let (steam, steam_server) = recording_service(STEAM_BOT.name, seen.clone()).await;
+        let (twitch, twitch_server) = recording_service(TWITCH_DASHBOARD.name, seen.clone()).await;
+        let links = links_for(&steam, &twitch, "test-token");
         let url = |text: &str| Ok(LinkOutcome::Url(text.to_string()));
         assert_eq!(
             links.checkout(CLICKER, 20).await,
@@ -983,33 +1020,63 @@ mod tests {
             links.twitch_connect(CLICKER).await,
             url("https://deutsche-deadlock-community.de/twitch/abo")
         );
+        let funding = links.funding().await.expect("funding");
+        assert_eq!(
+            (funding.raised_cents, funding.goal_cents),
+            (1234, links.goal_cents())
+        );
         let token = Some("test-token".to_string());
+        let call = |service, method: &str, path: &str, body: Value| {
+            (
+                service,
+                method.to_string(),
+                path.to_string(),
+                token.clone(),
+                body,
+            )
+        };
         assert_eq!(
             seen.lock().expect("seen").clone(),
             vec![
-                (
-                    CHECKOUT_PATH.to_string(),
-                    token.clone(),
+                call(
+                    STEAM_BOT.name,
+                    "POST",
+                    CHECKOUT_PATH,
                     json!({ "discord_id": CLICKER, "tier": 20 })
                 ),
-                (
-                    TIP_PATH.to_string(),
-                    token.clone(),
+                call(
+                    STEAM_BOT.name,
+                    "POST",
+                    TIP_PATH,
                     json!({ "discord_id": CLICKER })
                 ),
-                (
-                    PORTAL_PATH.to_string(),
-                    token.clone(),
+                call(
+                    STEAM_BOT.name,
+                    "POST",
+                    PORTAL_PATH,
                     json!({ "discord_id": CLICKER })
                 ),
-                (
-                    TWITCH_CONNECT_PATH.to_string(),
-                    token,
+                call(
+                    TWITCH_DASHBOARD.name,
+                    "POST",
+                    TWITCH_CONNECT_PATH,
                     json!({ "discord_id": CLICKER })
                 ),
+                call(STEAM_BOT.name, "GET", FUNDING_PATH, Value::Null),
             ]
         );
-        server.abort();
+
+        let rejected = links_for(&steam, &twitch, "falscher-token");
+        let funding = rejected.funding().await;
+        assert!(
+            funding
+                .as_ref()
+                .is_err_and(|error| error.contains("nimmt den internen Token nicht an")),
+            "{:?}",
+            funding.err()
+        );
+        steam_server.abort();
+        twitch_server.abort();
     }
 
     fn config_from(
@@ -1035,13 +1102,16 @@ mod tests {
             links.tip(42).await,
             links.portal(42).await,
         ] {
-            assert_eq!(outcome, Err(LinkError::NotConfigured(MISSING_STEAM_TOKEN)));
+            assert_eq!(
+                outcome,
+                Err(LinkError::NotConfigured(STEAM_BOT.missing_token))
+            );
         }
-        assert_eq!(links.missing_config(), Some(MISSING_STEAM_TOKEN));
+        assert_eq!(links.missing_config(), Some(STEAM_BOT.missing_token));
         assert!(links
             .funding()
             .await
-            .is_err_and(|error| error.contains(MISSING_STEAM_TOKEN)));
+            .is_err_and(|error| error.contains(STEAM_BOT.missing_token)));
         assert_eq!(links.twitch_connect(42).await, Ok(LinkOutcome::Unavailable));
         for custom_id in [
             "support:tier:5",
@@ -1079,7 +1149,9 @@ mod tests {
                 supporter_role_grant_apply: Some(true),
                 ..Default::default()
             },
-            |key| (key == wire::TWITCH_TOKEN_NAME).then(|| "internal".to_string()),
+            |key| {
+                (key == dl_core::runtime_config::TWITCH_TOKEN_NAME).then(|| "internal".to_string())
+            },
         );
         assert_eq!(
             set.panel_options(),
@@ -1100,7 +1172,7 @@ mod tests {
         );
         assert!(!base_without_token.panel_options().twitch);
         let token_without_base = config_from(Default::default(), |key| {
-            (key == wire::TWITCH_TOKEN_NAME).then(|| "internal".to_string())
+            (key == dl_core::runtime_config::TWITCH_TOKEN_NAME).then(|| "internal".to_string())
         });
         assert!(!token_without_base.panel_options().twitch);
         assert_eq!(
@@ -1123,24 +1195,21 @@ mod tests {
             (key == wire::SUPPORTER_TOKEN_NAMES[1]).then(|| "broker-wert-7d1".to_string())
         });
         assert_eq!(config.twitch_token, None);
-        assert_eq!(
-            config.steam_token,
-            dl_bridges::steam::token_from_lookup(|key| {
-                (key == wire::SUPPORTER_TOKEN_NAMES[1]).then(|| "broker-wert-7d1".to_string())
-            })
-        );
+        assert_eq!(config.steam_token.as_deref(), Some("broker-wert-7d1"));
         let debug = format!("{config:?}");
         assert!(!debug.contains("broker-wert-7d1"), "{debug}");
         let config = config_from(Default::default(), |key| match key {
             key if key == wire::SUPPORTER_TOKEN_NAMES[1] => Some("broker".to_string()),
-            key if key == wire::TWITCH_TOKEN_NAME => Some(" twitch-wert-4c9 ".to_string()),
+            key if key == dl_core::runtime_config::TWITCH_TOKEN_NAME => {
+                Some(" twitch-wert-4c9 ".to_string())
+            }
             _ => None,
         });
         assert_eq!(config.twitch_token.as_deref(), Some("twitch-wert-4c9"));
         assert_eq!(config.steam_token.as_deref(), Some("twitch-wert-4c9"));
         let blank = config_from(Default::default(), |key| match key {
             key if key == wire::SUPPORTER_TOKEN_NAMES[1] => Some("broker".to_string()),
-            key if key == wire::TWITCH_TOKEN_NAME => Some("   ".to_string()),
+            key if key == dl_core::runtime_config::TWITCH_TOKEN_NAME => Some("   ".to_string()),
             _ => None,
         });
         assert_eq!(blank.twitch_token, None);
@@ -1263,13 +1332,13 @@ mod tests {
     fn antworten_der_dienste_werden_streng_gelesen() {
         let ok = json!({ "url": "https://checkout.stripe.com/c/pay/x" });
         assert_eq!(
-            link_outcome("p", StatusCode::OK, &ok, is_stripe_url),
+            link_outcome(STEAM_BOT, "p", StatusCode::OK, &ok),
             Ok(LinkOutcome::Url(
                 "https://checkout.stripe.com/c/pay/x".to_string()
             ))
         );
         let foreign = json!({ "url": "https://evil.example/stripe.com" });
-        assert!(link_outcome("p", StatusCode::OK, &foreign, is_stripe_url).is_err());
+        assert!(link_outcome(STEAM_BOT, "p", StatusCode::OK, &foreign).is_err());
         for bypass in [
             "https://evil.example\\.stripe.com/c",
             "https://evil.example\\@checkout.stripe.com/c",
@@ -1278,6 +1347,10 @@ mod tests {
             "https://checkout.stripe.com:8443/c",
             "https://evil.example:1.stripe.com/c",
             "https://evil.example:443@checkout.stripe.com/c",
+            "https://.stripe.com/c",
+            "https://checkout..stripe.com/c",
+            "https://stripe.com/c",
+            "https:///c",
         ] {
             assert!(!is_stripe_url(bypass), "{bypass}");
         }
@@ -1308,8 +1381,14 @@ mod tests {
             format!("{PUBLIC_ORIGIN}twitch/x y"),
             format!("{PUBLIC_ORIGIN}twitch/x\\y"),
             format!("{PUBLIC_ORIGIN}twitch/x\ny"),
+            format!("{PUBLIC_ORIGIN}twitch/x\u{7f}y"),
+            format!("{PUBLIC_ORIGIN}twitch/x\0y"),
         ] {
             assert!(!is_public_url(&unusable), "{unusable}");
+        }
+        for control in ["\u{7f}", "\0", "\u{1b}"] {
+            let url = format!("https://checkout.stripe.com/c/pay/x{control}");
+            assert!(!is_stripe_url(&url), "{url:?}");
         }
         let long = format!(
             "https://checkout.stripe.com/{}",
@@ -1326,9 +1405,9 @@ mod tests {
         let over_limit = format!("{at_limit}a");
         assert!(!is_stripe_url(&over_limit));
         let admin = json!({ "url": "https://admin.deutsche-deadlock-community.de/twitch/x" });
-        assert!(link_outcome("p", StatusCode::OK, &admin, is_public_url).is_err());
+        assert!(link_outcome(TWITCH_DASHBOARD, "p", StatusCode::OK, &admin).is_err());
         let coded = |status: StatusCode, code: &str| {
-            link_outcome("p", status, &json!({ "error": code }), is_stripe_url)
+            link_outcome(STEAM_BOT, "p", status, &json!({ "error": code }))
         };
         assert_eq!(
             coded(StatusCode::NOT_FOUND, "no_subscription"),
