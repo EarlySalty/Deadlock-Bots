@@ -20,7 +20,7 @@ Placeholders are filled per block:
 - `pay`: `{stufen}`
 - `twitch`: `{kanaele}`
 
-For every shown block the check warns about a placeholder of that block that the text leaves out and about every other `{name}` made of letters, digits and underscores and no longer than `PLACEHOLDER_NAME_MAX_CHARS`, which would appear literally in the panel.
+For every shown block the check warns about a placeholder of that block that the text leaves out and about every other `{name}` made of letters, digits and underscores, once per name, which would appear literally in the panel.
 
 ## Banner
 
@@ -43,9 +43,12 @@ dl-bot calls the Steam Bot supporter routes with the first non-empty token of `s
 
 ## Roles
 
-Grant and revoke live in `rust/bin/dl-bot/src/supporter/roles.rs`, driven from `rust/bin/dl-bot/src/supporter.rs` and gated by `supporter_role_grant_apply` and `supporter_role_sync_apply`. The sync interval `supporter_sync_interval_seconds` is validated against `SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE` when the configuration loads; a value outside the range stops the start. The sync pauses without writing while `core.supporter_sources` or its trigger `supporter_sources_privacy_gate` is missing or the trigger does not fire for normal sessions.
+Grant and revoke live in `rust/bin/dl-bot/src/supporter/roles.rs`, driven from `rust/bin/dl-bot/src/supporter.rs` and gated by `supporter_role_grant_apply` and `supporter_role_sync_apply`. The sync interval `supporter_sync_interval_seconds` is validated against `SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE` when the configuration loads; a value outside the range stops the start. The sync pauses without writing while `core.supporter_sources` or its trigger `supporter_sources_privacy_gate` is missing or the trigger does not fire for normal sessions, until the table and trigger exist and fire again. A tick that fails after some role changes keeps those changes and logs the error.
 
 ## Known limits
 
-- The live guild model that the Regelwerk publish and the Welcome apply load while they hold `panel_apply_lock` is bounded by `dl_discord::adapter::discord_call_timeout()`.
-- The role sync reads members through `dl_discord::adapter::fetch_all_guild_members` with `discord_call_timeout()` per page.
+- A single serversync Discord request is bounded by `DISCORD_REQUEST_TIMEOUT_MS` in `discord_http_client()`. A call through `discord_regelwerk_send_with_retry`, retries and rate-limit waits included, is bounded by `discord_pages::discord_call_timeout()` (`DISCORD_CALL_TIMEOUT_MS`); the waits alone stop at `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS`.
+- The live guild model that the Regelwerk publish and the Welcome apply load while they hold `panel_apply_lock` is bounded by `discord_call_timeout()` times `LIVE_GUILD_MODEL_DISCORD_CALLS`.
+- The Regelwerk, Welcome and panel history scans read at most `HISTORY_SCAN_MAX_PAGES` pages of `DISCORD_HISTORY_PAGE_LIMIT` messages.
+- The role sync reads members through `discord_pages::fetch_all_guild_members` in `rust/bin/dl-bot/src/discord_pages.rs` with `discord_call_timeout()` per page.
+- The role sync waits at most `TABLE_LOCK_TIMEOUT_MS` in `rust/bin/dl-bot/src/supporter/store.rs` for the table lock on `core.supporter_sources`.
