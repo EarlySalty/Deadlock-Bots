@@ -164,7 +164,7 @@ pub const FAQ_DEFAULT_ENTRIES: &[FaqDefaultEntry] = &[
     },
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqPublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -183,7 +183,7 @@ pub struct FaqPublishOutput {
     pub deleted_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -199,16 +199,14 @@ pub struct FaqBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqMessagePayload {
     pub flags: u64,
     pub allowed_mentions: FaqAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FaqPayloadAttachment>,
 }
 
@@ -217,7 +215,7 @@ pub struct FaqAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqPayloadAttachment {
     pub id: u8,
     pub filename: String,
@@ -610,15 +608,19 @@ fn faq_messages(
     config: &ResolvedFaqConfig,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<FaqBuiltMessage>, String> {
-    let banner = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings)?;
+    let loaded = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings)?;
+    let banner = loaded.as_ref().map(|loaded| loaded.output.clone());
     let mut components = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = &banner {
-        components.push(media_gallery(FAQ_COMPONENT_ID_HERO_MEDIA, &banner.filename));
+    if let Some(loaded) = loaded {
+        components.push(media_gallery(
+            FAQ_COMPONENT_ID_HERO_MEDIA,
+            &loaded.output.filename,
+        ));
         attachments.push(FaqPayloadAttachment {
             id: 0,
-            filename: banner.filename.clone(),
-            bytes: banner.bytes.clone(),
+            filename: loaded.output.filename,
+            bytes: loaded.bytes,
         });
     }
 
@@ -664,7 +666,7 @@ fn optional_faq_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<FaqBannerOutput>, String> {
+) -> Result<Option<crate::serversync::LoadedBanner<FaqBannerOutput>>, String> {
     let relative_path = format!("{FAQ_BANNER_DIR}/{filename}");
     let Some(bytes) = crate::serversync::read_optional_banner(
         repo_root,
@@ -676,10 +678,12 @@ fn optional_faq_banner(
     else {
         return Ok(None);
     };
-    Ok(Some(FaqBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: FaqBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
         bytes,
     }))
 }

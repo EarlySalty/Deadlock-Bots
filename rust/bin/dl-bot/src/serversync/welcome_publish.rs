@@ -575,8 +575,6 @@ pub struct WelcomeBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -584,7 +582,7 @@ pub struct WelcomeMessagePayload {
     pub flags: u64,
     pub allowed_mentions: WelcomeAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<WelcomePayloadAttachment>,
 }
 
@@ -1129,10 +1127,15 @@ fn hero_message(
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBuiltMessage, String> {
-    let banner = section_banner(repo_root, definition, warnings)?;
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.hero, texts.hero_intro
@@ -1151,10 +1154,15 @@ fn team_message(
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBuiltMessage, String> {
-    let banner = section_banner(repo_root, definition, warnings)?;
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
 
     let mut role_blocks = team_roles
         .iter()
@@ -1207,10 +1215,15 @@ fn paten_message(
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBuiltMessage, String> {
-    let banner = section_banner(repo_root, definition, warnings)?;
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.paten, texts.paten_intro
@@ -1229,10 +1242,15 @@ fn socials_message(
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBuiltMessage, String> {
-    let banner = section_banner(repo_root, definition, warnings)?;
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(texts.socials_intro.clone()));
     components.push(button_row(vec![
         link_button(&texts.buttons.website, &urls.website),
@@ -1255,10 +1273,15 @@ fn quickstart_message(
     hero_jump_url: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Result<WelcomeBuiltMessage, String> {
-    let banner = section_banner(repo_root, definition, warnings)?;
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.quickstart, texts.quickstart_intro
@@ -1305,9 +1328,20 @@ impl NavigationChunk {
                 <= NAVIGATION_ATTACHMENT_BUDGET
     }
 
-    fn push_header(&mut self, banner: Option<&WelcomeBannerOutput>, title: &str, intro: &str) {
+    fn push_header(
+        &mut self,
+        banner: &WelcomeBannerOutput,
+        bytes: Option<Vec<u8>>,
+        title: &str,
+        intro: &str,
+    ) {
         let mut container_components = Vec::new();
-        push_media_gallery_for_banner(&mut container_components, &mut self.attachments, banner);
+        push_media_gallery_for_banner(
+            &mut container_components,
+            &mut self.attachments,
+            Some(banner),
+            bytes,
+        );
         if container_components.is_empty() {
             let content = format!("## {title}");
             self.text_chars += content.chars().count();
@@ -1336,7 +1370,7 @@ impl NavigationChunk {
                 &mut container_components,
                 &mut self.attachments,
                 &divider.filename,
-                &divider.bytes,
+                divider.bytes.clone(),
             );
         } else {
             container_components.push(text_display(format!("### {}", category.category_name)));
@@ -1381,11 +1415,12 @@ fn navigation_messages(
     texts: &ResolvedWelcomeTextTable,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<WelcomeBuiltMessage>, String> {
-    let header_banner = Some(welcome_banner(repo_root, "navigation.png", warnings)?);
+    let (header, header_bytes) = welcome_banner(repo_root, "navigation.png", warnings)?;
     let categories = navigation_category_messages(model, repo_root, texts, warnings)?;
     let mut first = NavigationChunk::new();
     first.push_header(
-        header_banner.as_ref(),
+        &header,
+        header_bytes,
         &texts.section_titles.navigation,
         &texts.navigation_intro,
     );
@@ -1394,7 +1429,7 @@ fn navigation_messages(
         warnings.push("Welcome-Navigation enthaelt keine oeffentlichen Kanaele".to_string());
         first.push_empty_navigation(&texts.empty_navigation);
         return Ok(vec![WelcomeBuiltMessage {
-            banner: header_banner,
+            banner: Some(header),
             payload: welcome_payload(first.components, first.attachments),
         }]);
     }
@@ -1428,7 +1463,7 @@ fn navigation_messages(
         .map(|(index, chunk)| {
             let mut message = chunk.into_message();
             if index == 0 {
-                message.banner = header_banner.clone();
+                message.banner = Some(header.clone());
             }
             message
         })
@@ -1486,18 +1521,19 @@ fn section_banner(
     repo_root: &Path,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> Result<Option<WelcomeBannerOutput>, String> {
-    definition
-        .banner_filename
-        .map(|filename| welcome_banner(repo_root, filename, warnings))
-        .transpose()
+) -> Result<(Option<WelcomeBannerOutput>, Option<Vec<u8>>), String> {
+    let Some(filename) = definition.banner_filename else {
+        return Ok((None, None));
+    };
+    let (banner, bytes) = welcome_banner(repo_root, filename, warnings)?;
+    Ok((Some(banner), bytes))
 }
 
 fn welcome_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<WelcomeBannerOutput, String> {
+) -> Result<(WelcomeBannerOutput, Option<Vec<u8>>), String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
     let bytes = crate::serversync::read_banner_file(&repo_root.join(&relative_path))
         .map_err(|reason| format!("Welcome-Banner `{relative_path}` {reason}"))?;
@@ -1506,12 +1542,14 @@ fn welcome_banner(
             "Welcome-Banner `{relative_path}` fehlt; Sektion wird ohne Bild gebaut"
         ));
     }
-    Ok(WelcomeBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: bytes.is_some(),
-        bytes: bytes.unwrap_or_default(),
-    })
+    Ok((
+        WelcomeBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: bytes.is_some(),
+        },
+        bytes,
+    ))
 }
 
 fn divider_attachment_for_category(
@@ -1600,24 +1638,25 @@ fn push_media_gallery_for_banner(
     components: &mut Vec<Value>,
     attachments: &mut Vec<WelcomePayloadAttachment>,
     banner: Option<&WelcomeBannerOutput>,
+    bytes: Option<Vec<u8>>,
 ) {
-    let Some(banner) = banner.filter(|banner| banner.present) else {
+    let (Some(banner), Some(bytes)) = (banner, bytes) else {
         return;
     };
-    push_media_gallery_for_attachment(components, attachments, &banner.filename, &banner.bytes);
+    push_media_gallery_for_attachment(components, attachments, &banner.filename, bytes);
 }
 
 fn push_media_gallery_for_attachment(
     components: &mut Vec<Value>,
     attachments: &mut Vec<WelcomePayloadAttachment>,
     filename: &str,
-    bytes: &[u8],
+    bytes: Vec<u8>,
 ) {
     let id = u8::try_from(attachments.len()).unwrap_or(u8::MAX);
     attachments.push(WelcomePayloadAttachment {
         id,
         filename: filename.to_string(),
-        bytes: bytes.to_vec(),
+        bytes,
     });
     components.push(media_gallery(filename));
 }

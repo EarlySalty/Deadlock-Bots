@@ -1010,6 +1010,12 @@ pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> St
     format!("{prefix}{message_index}")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedBanner<B> {
+    pub output: B,
+    pub bytes: Vec<u8>,
+}
+
 pub(crate) fn read_banner_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
     match dl_core::optional_file::read(path)? {
         Some(bytes) if bytes.is_empty() => Err("ist leer".to_string()),
@@ -1929,11 +1935,11 @@ impl ServerSyncService {
         method: &'static str,
         url: String,
         payload_value: Value,
-        attachments: Vec<(u8, String, Vec<u8>)>,
+        attachments: Vec<UploadFile<'_>>,
     ) -> ServerSyncResult<DiscordRestResponse> {
         if !attachments.is_empty() {
             let payload_text = serde_json::to_string(&payload_value)?;
-            let files = attachments;
+            let files = attachments.as_slice();
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -1944,15 +1950,14 @@ impl ServerSyncService {
                     .header("Authorization", format!("Bot {}", self.discord_token))
                     .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
                     let payload_text = payload_text.clone();
-                    let files = files.clone();
                     async move {
                         let mut form =
                             reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
+                        for file in files {
+                            let part = reqwest::multipart::Part::bytes(file.bytes.to_vec())
+                                .file_name(file.filename.to_string())
                                 .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
+                            form = form.part(format!("files[{}]", file.id), part);
                         }
                         let response = request.multipart(form).send().await?;
                         DiscordRestResponse::from_response(response).await
@@ -5516,15 +5521,25 @@ impl ServerSyncOps for ServerSyncService {
     }
 }
 
+struct UploadFile<'a> {
+    id: u8,
+    filename: &'a str,
+    bytes: &'a [u8],
+}
+
 trait UploadAttachment {
-    fn upload_file(&self) -> (u8, String, Vec<u8>);
+    fn upload_file(&self) -> UploadFile<'_>;
 }
 
 macro_rules! upload_attachment {
     ($($attachment:ty),+ $(,)?) => {
         $(impl UploadAttachment for $attachment {
-            fn upload_file(&self) -> (u8, String, Vec<u8>) {
-                (self.id, self.filename.clone(), self.bytes.clone())
+            fn upload_file(&self) -> UploadFile<'_> {
+                UploadFile {
+                    id: self.id,
+                    filename: &self.filename,
+                    bytes: &self.bytes,
+                }
             }
         })+
     };
@@ -5539,7 +5554,7 @@ upload_attachment!(
     welcome_publish::WelcomePayloadAttachment,
 );
 
-fn upload_files<A: UploadAttachment>(attachments: &[A]) -> Vec<(u8, String, Vec<u8>)> {
+fn upload_files<A: UploadAttachment>(attachments: &[A]) -> Vec<UploadFile<'_>> {
     attachments
         .iter()
         .map(UploadAttachment::upload_file)
@@ -5548,7 +5563,7 @@ fn upload_files<A: UploadAttachment>(attachments: &[A]) -> Vec<(u8, String, Vec<
 
 trait StaticV2Message {
     fn payload_value(&self) -> serde_json::Result<Value>;
-    fn upload_files(&self) -> Vec<(u8, String, Vec<u8>)>;
+    fn upload_files(&self) -> Vec<UploadFile<'_>>;
     fn stored_message_id(&self) -> Option<u64>;
     fn settle(&mut self, action: &str, message_id: u64);
 }
@@ -5559,7 +5574,7 @@ macro_rules! static_v2_message {
             fn payload_value(&self) -> serde_json::Result<Value> {
                 serde_json::to_value(&self.payload)
             }
-            fn upload_files(&self) -> Vec<(u8, String, Vec<u8>)> {
+            fn upload_files(&self) -> Vec<UploadFile<'_>> {
                 upload_files(&self.payload.attachments)
             }
             fn stored_message_id(&self) -> Option<u64> {
@@ -9575,7 +9590,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     filename: "hero.png".to_string(),
                     relative_path: "assets/welcome-banners/hero.png".to_string(),
                     present: false,
-                    bytes: Vec::new(),
                 }),
                 payload: welcome_publish::WelcomeMessagePayload {
                     flags: welcome_publish::WELCOME_COMPONENTS_V2_FLAG,
@@ -9667,7 +9681,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         rang_guide_publish::RANG_GUIDE_BANNER_DIR,
                         rang_guide_publish::RANG_GUIDE_HERO_FILENAME
                     ),
-                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,
@@ -9749,7 +9762,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         regelwerk_publish::REGELWERK_BANNER_DIR,
                         regelwerk_publish::REGELWERK_HERO_FILENAME
                     ),
-                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,
@@ -9871,7 +9883,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         faq_publish::FAQ_BANNER_DIR,
                         faq_publish::FAQ_HERO_FILENAME
                     ),
-                    bytes: Vec::new(),
                     present: true,
                 }),
                 payload,

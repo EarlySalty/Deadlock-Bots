@@ -65,7 +65,7 @@ pub const REGELWERK_SECTION_MODERATION: &str = "**🛡️ Moderation & Konsequen
 pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1491953161747955853> — Fragen über Server, Bots und Concierge\n- <#1426220702054355077> — Community-Fragen und Deadlock-Invite\n- <#1522769149208821881> — Mitspieler finden";
 pub const REGELWERK_SECTION_DATENSCHUTZ: &str = "**🔒 Datenschutz & KI-Moderation**\n\n**Moderation & KI**\nNachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.\n\n**Speicherung**\nNormale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.\n\n**Rechte, Discord-ToS & Kontakt**\nAuskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner.\n\n**Unterlagen zum Nachlesen**\nDie Auftragsverarbeitung unseres KI-Dienstleisters kannst du direkt im Browser öffnen: [Fireworks AI (PDF)](https://deutsche-deadlock-community.de/dokus/datenschutz/fireworks-ai-auftragsverarbeitung.pdf).";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkPublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -86,7 +86,7 @@ pub struct RegelwerkPublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -102,16 +102,14 @@ pub struct RegelwerkBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkMessagePayload {
     pub flags: u64,
     pub allowed_mentions: RegelwerkAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<RegelwerkPayloadAttachment>,
 }
 
@@ -120,7 +118,7 @@ pub struct RegelwerkAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkPayloadAttachment {
     pub id: u8,
     pub filename: String,
@@ -540,18 +538,19 @@ fn regelwerk_messages(
     config: &ResolvedRegelwerkConfig,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<RegelwerkBuiltMessage>, String> {
-    let banner = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings)?;
+    let loaded = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings)?;
+    let banner = loaded.as_ref().map(|loaded| loaded.output.clone());
     let mut components = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = &banner {
+    if let Some(loaded) = loaded {
         components.push(media_gallery(
             REGELWERK_COMPONENT_ID_HERO_MEDIA,
-            &banner.filename,
+            &loaded.output.filename,
         ));
         attachments.push(RegelwerkPayloadAttachment {
             id: 0,
-            filename: banner.filename.clone(),
-            bytes: banner.bytes.clone(),
+            filename: loaded.output.filename,
+            bytes: loaded.bytes,
         });
     }
 
@@ -623,7 +622,7 @@ fn optional_regelwerk_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<RegelwerkBannerOutput>, String> {
+) -> Result<Option<crate::serversync::LoadedBanner<RegelwerkBannerOutput>>, String> {
     let relative_path = format!("{REGELWERK_BANNER_DIR}/{filename}");
     let Some(bytes) = crate::serversync::read_optional_banner(
         repo_root,
@@ -635,10 +634,12 @@ fn optional_regelwerk_banner(
     else {
         return Ok(None);
     };
-    Ok(Some(RegelwerkBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: RegelwerkBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
         bytes,
     }))
 }

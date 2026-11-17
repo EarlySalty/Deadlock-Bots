@@ -84,10 +84,10 @@ pub struct VoiceUxPublishOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceUxBanners {
-    guide: Option<VoiceUxBannerOutput>,
-    lfg: Option<VoiceUxBannerOutput>,
-    spawn: Option<VoiceUxBannerOutput>,
-    manage: Option<VoiceUxBannerOutput>,
+    guide: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    lfg: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    spawn: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    manage: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -121,8 +121,6 @@ pub struct VoiceUxBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -144,7 +142,7 @@ pub struct VoiceUxMessagePayload {
     pub flags: u64,
     pub allowed_mentions: VoiceUxAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<VoiceUxPayloadAttachment>,
 }
 
@@ -541,7 +539,7 @@ fn voice_ux_messages(
     vec![
         message(
             "guide_lfg",
-            banners.guide.clone(),
+            banners.guide.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
                 VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR,
@@ -561,7 +559,7 @@ fn voice_ux_messages(
         ),
         message(
             "spawn_manage",
-            banners.spawn.clone(),
+            banners.spawn.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
                 VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR,
@@ -797,7 +795,11 @@ fn manage_container() -> Value {
 fn payload_with_banner_sections(
     container_id: u64,
     separator_id: u64,
-    sections: Vec<(u64, Option<&VoiceUxBannerOutput>, Value)>,
+    sections: Vec<(
+        u64,
+        Option<&crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+        Value,
+    )>,
 ) -> VoiceUxMessagePayload {
     let mut children = Vec::new();
     let mut attachments = Vec::new();
@@ -806,10 +808,10 @@ fn payload_with_banner_sections(
         if let Some(banner) = banner {
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
-                filename: banner.filename.clone(),
+                filename: banner.output.filename.clone(),
                 bytes: banner.bytes.clone(),
             });
-            children.push(media_gallery(media_id, &banner.filename));
+            children.push(media_gallery(media_id, &banner.output.filename));
         }
         children.extend(container_children(section_container));
         if index + 1 < section_count {
@@ -920,7 +922,7 @@ fn optional_voice_ux_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<VoiceUxBannerOutput>, String> {
+) -> Result<Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>, String> {
     let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
     let Some(bytes) = crate::serversync::read_optional_banner(
         repo_root,
@@ -932,10 +934,12 @@ fn optional_voice_ux_banner(
     else {
         return Ok(None);
     };
-    Ok(Some(VoiceUxBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: VoiceUxBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
         bytes,
     }))
 }

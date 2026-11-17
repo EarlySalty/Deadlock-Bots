@@ -100,7 +100,7 @@ pub const RANG_GUIDE_UNLINK_BUTTON_LABEL: &str = "🔓 Verknüpfung entfernen";
 pub const RANG_GUIDE_TWITCH_HINT: &str = "-# Optional: Wenn du auf Twitch zuschaust, verknüpf dein Twitch-Konto, dann erkennt dich der Bot in Partner-Streams.";
 pub const RANG_GUIDE_TWITCH_LINK_BUTTON_LABEL: &str = "🟣 Twitch verknüpfen";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuidePublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -121,7 +121,7 @@ pub struct RangGuidePublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuideMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -137,16 +137,14 @@ pub struct RangGuideBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuideMessagePayload {
     pub flags: u64,
     pub allowed_mentions: RangGuideAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<RangGuidePayloadAttachment>,
 }
 
@@ -155,7 +153,7 @@ pub struct RangGuideAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuidePayloadAttachment {
     pub id: u8,
     pub filename: String,
@@ -557,27 +555,26 @@ fn rang_guide_messages(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<RangGuideBuiltMessage>, String> {
     let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings)?;
-    let step_banners: Vec<Option<RangGuideBannerOutput>> = RANG_GUIDE_STEP_BANNER_FILENAMES
-        .iter()
-        .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
-        .collect::<Result<_, _>>()?;
+    let step_banners: Vec<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>> =
+        RANG_GUIDE_STEP_BANNER_FILENAMES
+            .iter()
+            .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
+            .collect::<Result<_, _>>()?;
     let help_banner =
         optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings)?;
 
-    let mut banner_candidates: Vec<RangGuideBannerOutput> = Vec::new();
-    for banner in std::iter::once(&hero_banner)
-        .chain(step_banners.iter())
-        .chain(std::iter::once(&help_banner))
-        .flatten()
-    {
-        banner_candidates.push(banner.clone());
-    }
+    let banner_candidates: Vec<&crate::serversync::LoadedBanner<RangGuideBannerOutput>> =
+        std::iter::once(&hero_banner)
+            .chain(step_banners.iter())
+            .chain(std::iter::once(&help_banner))
+            .flatten()
+            .collect();
 
     let mut hero_components = Vec::new();
     if let Some(banner) = &hero_banner {
         hero_components.push(media_gallery(
             RANG_GUIDE_COMPONENT_ID_HERO_MEDIA,
-            &banner.filename,
+            &banner.output.filename,
         ));
     }
     hero_components.push(text_display(
@@ -588,7 +585,7 @@ fn rang_guide_messages(
     let step_media = |index: usize, component_id: u64| -> Option<Value> {
         step_banners[index]
             .as_ref()
-            .map(|banner| media_gallery(component_id, &banner.filename))
+            .map(|banner| media_gallery(component_id, &banner.output.filename))
     };
 
     let mut step1_children = Vec::new();
@@ -653,7 +650,7 @@ fn rang_guide_messages(
     ));
 
     let mut extras_children = Vec::new();
-    if let Some(banner) = &help_banner {
+    if let Some(banner) = help_banner.as_ref().map(|loaded| &loaded.output) {
         extras_children.push(media_gallery(
             RANG_GUIDE_COMPONENT_ID_EXTRAS_MEDIA,
             &banner.filename,
@@ -709,7 +706,7 @@ fn rang_guide_messages(
     Ok(chunk_rang_guide_components(
         components,
         &banner_candidates,
-        hero_banner,
+        hero_banner.as_ref().map(|loaded| loaded.output.clone()),
     ))
 }
 
@@ -726,7 +723,7 @@ fn section_text(title: &str, body: &str) -> String {
 
 fn chunk_rang_guide_components(
     components: Vec<Value>,
-    banner_candidates: &[RangGuideBannerOutput],
+    banner_candidates: &[&crate::serversync::LoadedBanner<RangGuideBannerOutput>],
     hero_banner: Option<RangGuideBannerOutput>,
 ) -> Vec<RangGuideBuiltMessage> {
     let mut chunks = Vec::<Vec<Value>>::new();
@@ -767,12 +764,12 @@ fn chunk_rang_guide_components(
                 .filter_map(|name| {
                     banner_candidates
                         .iter()
-                        .find(|banner| &banner.filename == name)
+                        .find(|banner| &banner.output.filename == name)
                 })
                 .enumerate()
                 .map(|(index, banner)| RangGuidePayloadAttachment {
                     id: index as u8,
-                    filename: banner.filename.clone(),
+                    filename: banner.output.filename.clone(),
                     bytes: banner.bytes.clone(),
                 })
                 .collect();
@@ -816,7 +813,7 @@ fn optional_rang_guide_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<RangGuideBannerOutput>, String> {
+) -> Result<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>, String> {
     let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
     let Some(bytes) = crate::serversync::read_optional_banner(
         repo_root,
@@ -828,10 +825,12 @@ fn optional_rang_guide_banner(
     else {
         return Ok(None);
     };
-    Ok(Some(RangGuideBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: RangGuideBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
         bytes,
     }))
 }

@@ -217,7 +217,7 @@ pub enum SupportHistoryPlan {
     Blocked { found: usize, expected: usize },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SupportPublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -237,7 +237,7 @@ pub struct SupportPublishOutput {
     pub deleted_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SupportMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -253,16 +253,14 @@ pub struct SupportBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
-    #[serde(skip)]
-    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SupportMessagePayload {
     pub flags: u64,
     pub allowed_mentions: SupportAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<SupportPayloadAttachment>,
 }
 
@@ -271,7 +269,7 @@ pub struct SupportAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SupportPayloadAttachment {
     pub id: u8,
     pub filename: String,
@@ -439,7 +437,7 @@ pub struct SupportStoredState<'a> {
 pub struct SupportSnapshot {
     config: ResolvedSupportConfig,
     config_warnings: Vec<String>,
-    banner: Option<SupportBannerOutput>,
+    banner: Option<crate::serversync::LoadedBanner<SupportBannerOutput>>,
     banner_warnings: Vec<String>,
 }
 
@@ -478,7 +476,7 @@ pub fn build_support_output_from(
     let blocks = SupportBlocks::new(&snapshot.config.texts, funding, options);
     placeholder_warnings(&blocks, &mut warnings);
     warnings.extend(snapshot.banner_warnings.iter().cloned());
-    let built_messages = support_messages(snapshot.banner.clone(), &snapshot.config, &blocks);
+    let built_messages = support_messages(snapshot.banner.as_ref(), &snapshot.config, &blocks);
     let positional_ids = stored.message_ids.len() == built_messages.len();
 
     let mut messages = Vec::new();
@@ -927,7 +925,7 @@ fn apply_optional(target: &mut String, value: Option<String>) {
 }
 
 fn support_messages(
-    banner: Option<SupportBannerOutput>,
+    banner: Option<&crate::serversync::LoadedBanner<SupportBannerOutput>>,
     config: &ResolvedSupportConfig,
     blocks: &SupportBlocks<'_>,
 ) -> Vec<SupportBuiltMessage> {
@@ -949,22 +947,23 @@ fn support_messages(
 }
 
 fn main_message(
-    banner: Option<SupportBannerOutput>,
+    loaded: Option<&crate::serversync::LoadedBanner<SupportBannerOutput>>,
     blocks: &SupportBlocks<'_>,
 ) -> SupportBuiltMessage {
     let mut children = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = &banner {
+    if let Some(loaded) = loaded {
         children.push(media_gallery(
             SUPPORT_COMPONENT_ID_HERO_MEDIA,
-            &banner.filename,
+            &loaded.output.filename,
         ));
         attachments.push(SupportPayloadAttachment {
             id: 0,
-            filename: banner.filename.clone(),
-            bytes: banner.bytes.clone(),
+            filename: loaded.output.filename.clone(),
+            bytes: loaded.bytes.clone(),
         });
     }
+    let banner = loaded.map(|loaded| loaded.output.clone());
     children.extend(section_children(&[
         (SUPPORT_COMPONENT_ID_MAIN_TEXT, &blocks.intro.rendered()),
         (SUPPORT_COMPONENT_ID_PERKS, &blocks.perks.rendered()),
@@ -1076,7 +1075,7 @@ fn optional_support_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Result<Option<SupportBannerOutput>, String> {
+) -> Result<Option<crate::serversync::LoadedBanner<SupportBannerOutput>>, String> {
     let relative_path = format!("{SUPPORT_BANNER_DIR}/{filename}");
     let Some(bytes) = crate::serversync::read_optional_banner(
         repo_root,
@@ -1088,10 +1087,12 @@ fn optional_support_banner(
     else {
         return Ok(None);
     };
-    Ok(Some(SupportBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: SupportBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
         bytes,
     }))
 }
