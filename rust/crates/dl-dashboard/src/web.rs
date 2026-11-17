@@ -175,7 +175,7 @@ impl DashboardApp {
         Self::build(cfg, pool, lookup, names, ai, lagebild_enabled).await
     }
 
-    fn cfg(&self) -> &DashboardConfig {
+    pub(crate) fn cfg(&self) -> &DashboardConfig {
         &self.inner.cfg
     }
 

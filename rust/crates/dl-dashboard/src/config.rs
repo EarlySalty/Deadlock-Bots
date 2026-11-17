@@ -22,6 +22,7 @@ pub const DEFAULT_AUDIT_BOT_USER_ID: u64 = 1_355_078_189_894_078_597;
 
 const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
 const DEFAULT_OAUTH_STATE_TTL_SECONDS: i64 = 21_600; // 6 Stunden
+const DEFAULT_REPO_REFRESH_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_DISCORD_REDIRECT_URI: &str =
     "https://deutsche-deadlock-community.de/callback/discord";
 const DEFAULT_PUBLIC_BASE_URL: &str = "https://admin.deutsche-deadlock-community.de";
@@ -63,6 +64,7 @@ pub struct DashboardConfig {
     pub session_ttl_secs: i64,
     /// TTL der DB-gestützten delegierten OAuth-States (initiate/consume).
     pub oauth_state_ttl_secs: i64,
+    pub repo_refresh_timeout_secs: u64,
     /// Erlaubte Request-Origins für CSRF-/Origin-Prüfung (leer = keine
     /// Einschränkung, plus die Basis-URLs unten).
     pub allowed_origins: Vec<String>,
@@ -144,6 +146,10 @@ impl DashboardConfig {
                 .and_then(|v| v.parse().ok())
                 .filter(|v: &i64| *v > 0)
                 .unwrap_or(DEFAULT_OAUTH_STATE_TTL_SECONDS),
+            repo_refresh_timeout_secs: get("MASTER_DASHBOARD_REPO_REFRESH_TIMEOUT_SEC")
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &u64| *v > 0)
+                .unwrap_or(DEFAULT_REPO_REFRESH_TIMEOUT_SECONDS),
             allowed_origins,
             public_base_url,
             listen_base_url,
