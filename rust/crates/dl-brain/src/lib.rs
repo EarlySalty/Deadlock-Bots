@@ -15,13 +15,11 @@ pub use brain_client::{
     AnswerAction, AnswerContext, AnswerInputKind, DiscordAnswerCapability, DiscordAnswerContext,
     DiscordAnswerTask,
 };
-pub use brain_contracts::bot_conversation::{
-    MAX_CHAT_LINES, MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS,
-};
+pub use brain_contracts::bot_conversation::{MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS};
 pub use brain_contracts::invite::{
     InviteChatLine, InviteIntent, InviteLoungeUpdate, InviteMemberState, InviteNotice,
     InviteProblem, InviteRequestPhase, InviteSpeaker, InviteStatus, InviteTurn, InviteTurnAction,
-    InviteTurnDecision, NoticeTarget, MAX_TURN_RECENT_LINES, MAX_TURN_REPLY_CHARS,
+    InviteTurnDecision, NoticeTarget, MAX_TURN_RECENT_LINES,
 };
 pub use images::{question_or_image_default, AttachedImages, ImageLimits, IMAGE_ONLY_QUESTION};
 

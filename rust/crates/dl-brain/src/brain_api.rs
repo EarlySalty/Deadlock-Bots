@@ -11,8 +11,9 @@ use brain_client::{
 use brain_contracts::bot_tasks::{
     BotReply, ChatLine, ConversationTask, DialogRole, DialogTurn, TaskFailure, MAX_CHAT_LINES,
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
-    MAX_READABLE_CHANNELS,
+    MAX_READABLE_CHANNELS, MAX_TASK_TEXT_CHARS,
 };
+use brain_contracts::invite::{InviteChatLine, InviteTurn, MAX_TURN_RECENT_LINES};
 use brain_contracts::image::QueryImage;
 use sha2::{Digest, Sha256};
 use std::{
@@ -245,6 +246,24 @@ fn bounded_chat(entries: &[ChatEntry]) -> Vec<ChatLine> {
     lines
 }
 
+fn bounded_turn(turn: &InviteTurn) -> InviteTurn {
+    let line = |line: &InviteChatLine| {
+        let text: String = line.text.chars().take(MAX_CHAT_LINE_CHARS).collect();
+        (!text.trim().is_empty()).then_some(InviteChatLine {
+            speaker: line.speaker,
+            text,
+        })
+    };
+    let mut recent: Vec<InviteChatLine> = turn.recent.iter().filter_map(line).collect();
+    recent.drain(..recent.len().saturating_sub(MAX_TURN_RECENT_LINES));
+    InviteTurn {
+        message: turn.message.chars().take(MAX_TASK_TEXT_CHARS).collect(),
+        reply_to: turn.reply_to.as_ref().and_then(line),
+        recent,
+        member: turn.member.clone(),
+    }
+}
+
 fn follows_up(task: &DiscordConversation) -> bool {
     match task {
         DiscordConversation::Concierge { history, .. }
@@ -313,9 +332,9 @@ fn conversation_task(
         DiscordConversation::InviteNotice { notice } => ConversationTask::DiscordInviteNotice {
             notice: notice.clone(),
         },
-        DiscordConversation::InviteTurn { turn } => {
-            ConversationTask::DiscordInviteTurn { turn: turn.clone() }
-        }
+        DiscordConversation::InviteTurn { turn } => ConversationTask::DiscordInviteTurn {
+            turn: bounded_turn(turn),
+        },
     })
 }
 
@@ -341,6 +360,17 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
             ..
         } if decision.valid() && decision.action != crate::InviteTurnAction::Silent => {
             Ok(ConversationReply::Decided { decision })
+        }
+        BotTaskResult::Conversation {
+            reply: BotReply::Decided { decision },
+            ..
+        } if !decision.valid() => {
+            tracing::warn!(
+                klasse = "vertrag",
+                action = decision.action.as_str(),
+                "Brain-Entscheidung verletzt den Vertrag und wird verworfen"
+            );
+            Ok(ConversationReply::Silent)
         }
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed {
@@ -1017,6 +1047,38 @@ mod tests {
     }
 
     #[test]
+    fn invite_turn_is_bounded_before_it_leaves_the_bot() {
+        let line = |text: &str| InviteChatLine {
+            speaker: crate::InviteSpeaker::Other,
+            text: text.into(),
+        };
+        let mut recent = vec![line("  ")];
+        recent.extend((0..MAX_TURN_RECENT_LINES + 3).map(|index| line(&index.to_string())));
+        let turn = InviteTurn {
+            message: "x".repeat(MAX_TASK_TEXT_CHARS + 5),
+            reply_to: Some(line(&"y".repeat(MAX_CHAT_LINE_CHARS + 5))),
+            recent,
+            member: crate::InviteMemberState {
+                phase: crate::InviteRequestPhase::None,
+                has_friend_code: false,
+                code_in_message: false,
+                already_invited: false,
+                last_update: None,
+            },
+        };
+        let bounded = bounded_turn(&turn);
+        assert!(bounded.valid());
+        assert_eq!(bounded.message.chars().count(), MAX_TASK_TEXT_CHARS);
+        assert_eq!(bounded.recent.len(), MAX_TURN_RECENT_LINES);
+        assert_eq!(bounded.recent[0].text, "3");
+        assert_eq!(
+            bounded.reply_to.as_ref().map(|line| line.text.chars().count()),
+            Some(MAX_CHAT_LINE_CHARS)
+        );
+        assert_eq!(bounded_turn(&bounded), bounded);
+    }
+
+    #[test]
     fn only_answered_conversation_results_reach_discord() {
         let capability = brain_client::BotCapability::DiscordFaq;
         let result = |reply| BotTaskResult::Conversation {
@@ -1046,6 +1108,17 @@ mod tests {
                 decision: crate::InviteTurnDecision {
                     intent: crate::InviteIntent::Unrelated,
                     action: crate::InviteTurnAction::Silent,
+                    text: None,
+                },
+            }))
+            .ok(),
+            Some(ConversationReply::Silent)
+        );
+        assert_eq!(
+            project_conversation(result(BotReply::Decided {
+                decision: crate::InviteTurnDecision {
+                    intent: crate::InviteIntent::WantsInvite,
+                    action: crate::InviteTurnAction::AskFriendCode,
                     text: None,
                 },
             }))

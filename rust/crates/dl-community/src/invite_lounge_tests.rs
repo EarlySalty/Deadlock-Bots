@@ -21,7 +21,6 @@ const RUNNING_REPLY: &str = "⏳ Für diesen Steam-Account läuft gerade schon e
 enum WaitPoint {
     Load,
     Claim,
-    Finish,
 }
 
 struct ClockAdvance {
@@ -39,6 +38,10 @@ struct MemoryStore {
     progress: Mutex<SteamProgress>,
     handled: AtomicBool,
     opted_out: AtomicBool,
+    opt_out_on_write: AtomicBool,
+    hidden: Mutex<HashSet<u64>>,
+    hidden_fails: AtomicBool,
+    mark: Mutex<Option<u64>>,
 }
 
 impl MemoryStore {
@@ -79,19 +82,24 @@ impl LoungeStore for MemoryStore {
         id: u64,
         previous: Option<&LoungeState>,
         next: &LoungeState,
-    ) -> Result<bool, String> {
+    ) -> Result<Cas, String> {
+        if self.opted_out.load(Ordering::SeqCst) || self.opt_out_on_write.load(Ordering::SeqCst) {
+            return Ok(Cas::OptedOut);
+        }
         let mut states = self.states.lock().await;
         if states.get(&id) != previous {
-            return Ok(false);
+            return Ok(Cas::Stale);
         }
         states.insert(id, next.clone());
         drop(states);
-        match next.request.as_ref().map(|request| request.phase) {
-            Some(Phase::Dispatching) => self.after_wait(WaitPoint::Claim).await,
-            Some(Phase::Attempted) => self.after_wait(WaitPoint::Finish).await,
-            _ => {}
+        if next
+            .request
+            .as_ref()
+            .is_some_and(|request| request.phase == Phase::Dispatching)
+        {
+            self.after_wait(WaitPoint::Claim).await;
         }
-        Ok(true)
+        Ok(Cas::Written)
     }
     async fn pending_users(&self) -> Result<Vec<u64>, String> {
         Ok(self
@@ -100,10 +108,9 @@ impl LoungeStore for MemoryStore {
             .await
             .iter()
             .filter(|(_, state)| {
-                state
-                    .request
-                    .as_ref()
-                    .is_some_and(|request| request.phase == Phase::Pending)
+                state.request.as_ref().is_some_and(|request| {
+                    matches!(request.phase, Phase::Pending | Phase::Dispatching)
+                })
             })
             .map(|(id, _)| *id)
             .collect())
@@ -123,6 +130,27 @@ impl LoungeStore for MemoryStore {
     }
     async fn opted_out(&self, _user_id: u64) -> bool {
         self.opted_out.load(Ordering::SeqCst)
+    }
+    async fn hidden_authors(&self, user_ids: &[u64]) -> Result<HashSet<u64>, String> {
+        if self.hidden_fails.load(Ordering::SeqCst) {
+            return Err("Datenschutzstand nicht lesbar".into());
+        }
+        let hidden = self.hidden.lock().await;
+        Ok(user_ids
+            .iter()
+            .copied()
+            .filter(|id| hidden.contains(id))
+            .collect())
+    }
+    async fn catch_up_mark(&self) -> Result<Option<u64>, String> {
+        Ok(*self.mark.lock().await)
+    }
+    async fn set_catch_up_mark(&self, message_id: u64) -> Result<(), String> {
+        *self.mark.lock().await = Some(message_id);
+        Ok(())
+    }
+    async fn invited(&self, _code: &str) -> Result<bool, String> {
+        Ok(self.progress.lock().await.invited)
     }
     async fn actions_since(&self) -> Result<Option<i64>, String> {
         Ok(Some(self.actions_since.load(Ordering::SeqCst)))
@@ -247,7 +275,7 @@ fn setup() -> Lounge {
     let store = Arc::new(MemoryStore::default());
     let port = Arc::new(RecordingPort::default());
     let invite = Arc::new(RecordingInvite::default());
-    let brain = ScriptedBrain::always_with_turns("Brain-Status", Vec::new());
+    let brain = Arc::new(ScriptedBrain::default());
     Lounge {
         watcher: watcher(store.clone(), port.clone(), invite.clone(), brain.clone()),
         store,
@@ -276,15 +304,16 @@ impl Lounge {
             .await
             .unwrap_or_default();
         self.port.history.lock().await.push(message.clone());
-        let user = self
+        let turn = self
             .watcher
-            .handle_turn(&message, &context, now)
+            .handle_turn(&message, Context::Given(&context), now)
             .await
             .expect("Nachricht verarbeitet");
-        if let Some(user_id) = user {
-            self.watcher.follow_up(user_id, now).await;
-        }
-        user
+        let Turn::Stored(user_id) = turn else {
+            return None;
+        };
+        self.watcher.follow_up(user_id, now).await;
+        Some(user_id)
     }
 
     async fn poll(&self, now: i64) {
@@ -329,6 +358,7 @@ fn message(id: u64, at: i64, content: &str) -> LoungeMessage {
         created_at: at,
         created_at_millis: at * 1000,
         is_bot: false,
+        system: false,
         reply_message_id: None,
     }
 }
@@ -555,7 +585,7 @@ async fn ja_auf_die_nachfrage_schliesst_ohne_einladung() {
 }
 
 #[tokio::test]
-async fn normaler_chat_bleibt_still_und_legt_nichts_an() {
+async fn normaler_chat_bleibt_still_und_merkt_sich_nur_die_gelesene_nachricht() {
     let lounge = setup();
     lounge
         .post(
@@ -767,7 +797,18 @@ async fn fremde_kanaele_bots_alte_und_leere_nachrichten_loesen_nichts_aus() {
         foreign_bot,
         message(5, NOW, "   "),
         message(6, NOW - 200, "vor dem Deploy, 123456789"),
+    ] {
+        lounge.post(event, NOW).await;
+    }
+    lounge
+        .store
+        .actions_since
+        .store(NOW - 2 * REQUEST_WINDOW_SECONDS, Ordering::SeqCst);
+    let mut system = message(8, NOW, "hat den Server betreten 123456789");
+    system.system = true;
+    for event in [
         message(7, NOW - REQUEST_WINDOW_SECONDS - 1, "uralt 123456789"),
+        system,
     ] {
         lounge.post(event, NOW).await;
     }
@@ -781,7 +822,11 @@ async fn fehlende_bot_id_bricht_ab_ohne_brain() {
     lounge.port.identity_missing.store(true, Ordering::SeqCst);
     let result = lounge
         .watcher
-        .handle_turn(&message(1, NOW, "Kannst du mich einladen?"), &[], NOW)
+        .handle_turn(
+            &message(1, NOW, "Kannst du mich einladen?"),
+            Context::Given(&[]),
+            NOW,
+        )
         .await;
     assert!(result.is_err());
     assert!(turns(&lounge.brain).is_empty());
@@ -881,8 +926,9 @@ fn phasen_fuer_den_brain_folgen_dem_auftrag() {
 }
 
 #[tokio::test]
-async fn rueckblick_beantwortet_nur_die_letzte_offene_nachricht_je_mitglied() {
+async fn rueckblick_holt_jede_nachricht_ab_der_marke_der_reihe_nach_nach() {
     let lounge = setup();
+    *lounge.store.mark.lock().await = Some(2);
     let mut answered = from(OTHER, message(3, NOW - 500, "habs dir geschickt"));
     answered.reply_message_id = Some(2);
     let mut by_bot = from(BOT, message(6, NOW - 100, "<@11> Schick mir deinen Code."));
@@ -894,32 +940,102 @@ async fn rueckblick_beantwortet_nur_die_letzte_offene_nachricht_je_mitglied() {
         message(4, NOW - 300, "hallo? 123456789"),
         from(11, message(5, NOW - 200, "brauche invite")),
         by_bot,
-        from(12, message(0, NOW - CATCH_UP_SECONDS - 1, "alt 444555666")),
     ]);
     lounge.decide(vec![
         Ok(ConversationReply::Silent),
         wants(InviteTurnAction::Invite, None),
+        Ok(ConversationReply::Silent),
     ]);
-    lounge.watcher.catch_up(NOW).await.expect("Rückblick läuft");
-    let asked = turns(&lounge.brain);
-    assert_eq!(asked.len(), 2);
-    assert_eq!(asked[0].message, "habs dir geschickt");
-    assert_eq!(asked[1].message, "hallo? 123456789");
-    assert_eq!(asked[1].recent.len(), 3);
-    assert_eq!(lounge.calls().await, 1);
     lounge
         .watcher
-        .catch_up(NOW + 60)
+        .catch_up(NOW, 0)
         .await
         .expect("Rückblick läuft");
-    assert_eq!(turns(&lounge.brain).len(), 2);
+    let asked: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .map(|turn| (turn.message, turn.recent.len()))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            ("habs dir geschickt".to_string(), 2),
+            ("hallo? 123456789".to_string(), 3),
+            ("brauche invite".to_string(), 4),
+        ]
+    );
+    assert_eq!(lounge.calls().await, 1);
+    assert_eq!(*lounge.store.mark.lock().await, Some(6));
+    lounge
+        .watcher
+        .catch_up(NOW + 60, 0)
+        .await
+        .expect("Rückblick läuft");
+    assert_eq!(turns(&lounge.brain).len(), 3);
+}
+
+#[tokio::test]
+async fn rueckblick_ohne_marke_beginnt_beim_start_statt_beim_alten_verlauf() {
+    let lounge = setup();
+    lounge.port.history.lock().await.extend([
+        message(1, NOW - 900, "Kann mich wer einladen? 123456789"),
+        from(OTHER, message(5, NOW - 10, "brauche invite")),
+    ]);
+    lounge
+        .watcher
+        .catch_up(NOW, 3)
+        .await
+        .expect("Rückblick läuft");
+    let asked: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .map(|turn| turn.message)
+        .collect();
+    assert_eq!(asked, ["brauche invite"]);
+    assert_eq!(*lounge.store.mark.lock().await, Some(5));
+}
+
+#[tokio::test]
+async fn fehlgeschlagener_turn_haelt_die_marke_und_kommt_in_der_naechsten_runde() {
+    let lounge = setup();
+    lounge.port.history.lock().await.extend([
+        message(1, NOW - 300, "Kann mich wer einladen? 123456789"),
+        from(OTHER, message(2, NOW - 200, "moin")),
+        message(3, NOW - 100, "hallo?"),
+    ]);
+    lounge.decide(vec![
+        Err(BrainError::Backend("weg".into())),
+        Ok(ConversationReply::Silent),
+    ]);
+    assert!(lounge.watcher.catch_up(NOW, 0).await.is_err());
+    let first: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .map(|turn| turn.message)
+        .collect();
+    assert_eq!(first, ["Kann mich wer einladen? 123456789", "moin"]);
+    assert_eq!(*lounge.store.mark.lock().await, Some(0));
+    lounge.decide(vec![
+        wants(InviteTurnAction::Invite, None),
+        Ok(ConversationReply::Silent),
+    ]);
+    lounge
+        .watcher
+        .catch_up(NOW + 60, 0)
+        .await
+        .expect("zweite Runde läuft durch");
+    let second: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .skip(2)
+        .map(|turn| turn.message)
+        .collect();
+    assert_eq!(second, ["Kann mich wer einladen? 123456789", "hallo?"]);
+    assert_eq!(*lounge.store.mark.lock().await, Some(3));
+    assert_eq!(lounge.calls().await, 1);
 }
 
 #[tokio::test]
 async fn ungelesener_verlauf_haelt_den_rueckblick_an() {
     let lounge = setup();
     lounge.port.history_fails.store(true, Ordering::SeqCst);
-    assert!(lounge.watcher.catch_up(NOW).await.is_err());
+    assert!(lounge.watcher.catch_up(NOW, 0).await.is_err());
     assert!(turns(&lounge.brain).is_empty());
 }
 
@@ -930,9 +1046,92 @@ async fn rueckblick_paginiert_ueber_mehr_als_hundert_nachrichten() {
         .map(|id| from(1000 + id, message(id, NOW - 1000 + id as i64, "Moin")))
         .collect();
     lounge.port.history.lock().await.extend(history);
-    lounge.watcher.catch_up(NOW).await.expect("Rückblick läuft");
+    lounge
+        .watcher
+        .catch_up(NOW, 0)
+        .await
+        .expect("Rückblick läuft");
     assert_eq!(turns(&lounge.brain).len(), 150);
     assert!(lounge.port.history_calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(*lounge.store.mark.lock().await, Some(150));
+}
+
+#[tokio::test]
+async fn zeilen_von_abgemeldeten_mitgliedern_gehen_nicht_an_den_brain() {
+    let lounge = setup();
+    let mut joined = from(OTHER, message(3, NOW - 30, "ist dem Server beigetreten"));
+    joined.system = true;
+    lounge.port.history.lock().await.extend([
+        from(OTHER, message(1, NOW - 60, "geheim von 8")),
+        from(10, message(2, NOW - 50, "offen von 10")),
+        joined,
+        from(BOT, message(4, NOW - 20, "Bot-Zeile")),
+    ]);
+    lounge.store.hidden.lock().await.insert(OTHER);
+    lounge
+        .post(message(5, NOW, "Kann mich wer einladen?"), NOW)
+        .await;
+    let lines: Vec<_> = turns(&lounge.brain)[0]
+        .recent
+        .iter()
+        .map(|line| line.text.clone())
+        .collect();
+    assert_eq!(lines, ["offen von 10", "Bot-Zeile"]);
+    lounge.store.hidden_fails.store(true, Ordering::SeqCst);
+    lounge.post(message(6, NOW + 5, "hallo?"), NOW + 5).await;
+    let lines: Vec<_> = turns(&lounge.brain)[1]
+        .recent
+        .iter()
+        .map(|line| line.text.clone())
+        .collect();
+    assert_eq!(lines, ["Bot-Zeile", "Kann mich wer einladen?"]);
+}
+
+#[tokio::test]
+async fn opt_out_waehrend_der_entscheidung_schreibt_nichts_und_laedt_nicht_ein() {
+    let lounge = setup();
+    lounge.store.opt_out_on_write.store(true, Ordering::SeqCst);
+    lounge.decide(vec![wants(InviteTurnAction::Invite, Some("Kommt sofort."))]);
+    let stored = lounge
+        .post(message(1, NOW, "Kannst du mich einladen? 123456789"), NOW)
+        .await;
+    assert_eq!(stored, None);
+    assert_eq!(turns(&lounge.brain).len(), 1);
+    assert!(notices(&lounge.brain).is_empty());
+    assert!(lounge.store.states.lock().await.is_empty());
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[tokio::test]
+async fn code_aus_ungelesener_eigener_zeile_zaehlt_fuer_die_einladung() {
+    let lounge = setup();
+    lounge.decide(vec![Err(BrainError::Backend("weg".into()))]);
+    lounge.post(message(1, NOW, "123456789"), NOW).await;
+    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
+    lounge
+        .post(message(2, NOW + 5, "kannst du mich einladen"), NOW + 5)
+        .await;
+    assert!(turns(&lounge.brain)[1].member.code_in_message);
+    assert_eq!(
+        lounge.invite.calls.lock().await.clone(),
+        vec![(BOT, GUILD, CODE.to_string(), USER)]
+    );
+}
+
+#[test]
+fn gespeicherter_zustand_wird_inhaltlich_verglichen() {
+    let legacy = format!(
+        r#"{{"last_seen":3,"friend_code":"{CODE}","request":{{"message_id":1,"created_at":{NOW},"direct":false,"phase":"Pending"}},"hint_sent":false,"last_hint_at":null,"last_result":null,"dispatch_started_at_millis":null,"last_dispatch_finished_at_millis":5,"status":{{"channel_id":{CHECK_IN_CHANNEL_ID},"check_in_message_id":9}}}}"#
+    );
+    let parsed: LoungeState = serde_json::from_str(&legacy).expect("alter Zustand lesbar");
+    assert!(stored_matches(Some(&legacy), Some(&parsed)));
+    let mut changed = parsed.clone();
+    changed.last_seen = 4;
+    assert!(!stored_matches(Some(&legacy), Some(&changed)));
+    assert!(stored_matches(None, None));
+    assert!(!stored_matches(Some(&legacy), None));
+    assert!(!stored_matches(None, Some(&parsed)));
+    assert!(!stored_matches(Some("kaputt"), Some(&parsed)));
 }
 
 #[tokio::test]
@@ -1029,27 +1228,80 @@ async fn fa_raus_wird_einmal_gemeldet_und_danach_die_einladung() {
 }
 
 #[tokio::test]
-async fn beantwortete_raumbitte_bekommt_keine_nachfrage() {
+async fn antwort_eines_helfers_ersetzt_die_nachfrage_nicht() {
     let lounge = setup();
     lounge.decide(vec![wants(InviteTurnAction::WaitForCommunity, None)]);
     lounge
         .post(message(1, NOW, "Kann mich wer einladen? 123456789"), NOW)
         .await;
-    let mut answer = from(OTHER, message(2, NOW + 60, "hab dich eingeladen"));
+    let mut answer = from(OTHER, message(2, NOW + 60, "<@7> FA ist raus"));
     answer.reply_message_id = Some(1);
     lounge.port.history.lock().await.push(answer);
     lounge.poll(NOW + CHECK_IN_SECONDS).await;
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[tokio::test]
+async fn von_hand_erledigte_bitte_schliesst_ohne_nachfrage() {
+    let lounge = setup();
+    lounge.store.put(pending(false)).await;
+    lounge.store.handled.store(true, Ordering::SeqCst);
+    lounge.poll(NOW + CHECK_IN_SECONDS).await;
     assert!(notices(&lounge.brain).is_empty());
     assert_eq!(lounge.calls().await, 0);
+    let state = lounge.store.state().await;
     assert_eq!(
-        lounge
-            .store
-            .state()
-            .await
-            .request
-            .map(|request| request.phase),
+        state.request.map(|request| request.phase),
         Some(Phase::Attempted)
     );
+}
+
+#[tokio::test]
+async fn abgelehnte_nachfrage_gilt_nicht_als_gestellt() {
+    let lounge = setup();
+    lounge.store.put(pending(false)).await;
+    lounge
+        .brain
+        .script_notices(vec![Ok(ConversationReply::Rejected)]);
+    lounge.poll(NOW + CHECK_IN_SECONDS).await;
+    let state = lounge.store.state().await;
+    assert!(!state.status.asked());
+    assert_eq!(state.status.check_in_at, Some(NOW + CHECK_IN_SECONDS));
+    assert_eq!(
+        request_phase(&state),
+        InviteRequestPhase::WaitingForCommunity
+    );
+    lounge.poll(NOW + 2 * CHECK_IN_SECONDS).await;
+    assert_eq!(notices(&lounge.brain).len(), 1);
+}
+
+#[tokio::test]
+async fn bitte_aus_altem_kanal_wird_ohne_versand_beendet() {
+    for channel_id in [Some(1_289_721_245_281_292_291), None] {
+        let lounge = setup();
+        let mut state = pending(false);
+        state.status.channel_id = channel_id;
+        lounge.store.put(state).await;
+        lounge.poll(NOW + 10).await;
+        let state = lounge.store.state().await;
+        assert_eq!(
+            state.request.map(|request| request.phase),
+            Some(Phase::Expired)
+        );
+        assert_eq!(
+            state.last_result.as_deref(),
+            Some("Bitte aus nicht mehr beobachtetem Kanal beendet")
+        );
+        assert!(notices(&lounge.brain).is_empty());
+        assert_eq!(lounge.calls().await, 0);
+    }
+    let lounge = setup();
+    let mut direct = pending(true);
+    direct.status.channel_id = Some(1_289_721_245_281_292_291);
+    lounge.store.put(direct).await;
+    lounge.poll(NOW + 10).await;
+    assert_eq!(lounge.calls().await, 1);
 }
 
 #[tokio::test]
@@ -1088,16 +1340,85 @@ async fn neustart_wiederholt_keinen_begonnenen_versuch() {
     assert_eq!(lounge.calls().await, 0);
 }
 
+fn dispatching(started_at_millis: Option<i64>) -> LoungeState {
+    let mut state = pending(true);
+    if let Some(request) = state.request.as_mut() {
+        request.phase = Phase::Dispatching;
+    }
+    state.dispatch_started_at_millis = started_at_millis;
+    state
+}
+
+#[tokio::test]
+async fn haengender_versand_nach_neustart_prueft_steam_statt_neu_zu_senden() {
+    for started in [Some(NOW * 1000 - DISPATCH_STALE_MILLIS), None] {
+        let lounge = setup();
+        lounge.store.put(dispatching(started)).await;
+        lounge.poll(NOW).await;
+        let state = lounge.store.state().await;
+        assert_eq!(
+            state.request.as_ref().map(|request| request.phase),
+            Some(Phase::Pending)
+        );
+        assert_eq!(state.status.wait, Some(SteamWait::Delivery));
+        lounge.poll(NOW).await;
+        assert_eq!(
+            lounge
+                .store
+                .state()
+                .await
+                .request
+                .map(|request| request.phase),
+            Some(Phase::Attempted)
+        );
+        assert_eq!(lounge.calls().await, 0);
+        assert!(notices(&lounge.brain).is_empty());
+    }
+    let lounge = setup();
+    lounge
+        .store
+        .put(dispatching(Some(NOW * 1000 - DISPATCH_STALE_MILLIS)))
+        .await;
+    *lounge.store.progress.lock().await = SteamProgress {
+        outcome: Some(SteamOutcome::Sent),
+        invited: true,
+        open: false,
+    };
+    lounge.poll(NOW).await;
+    lounge.poll(NOW).await;
+    assert_eq!(updates(&lounge.brain), vec![sent()]);
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[tokio::test]
+async fn laufender_versand_wird_vor_der_frist_nicht_angefasst() {
+    let lounge = setup();
+    let state = dispatching(Some(NOW * 1000 - DISPATCH_STALE_MILLIS + 1));
+    lounge.store.put(state.clone()).await;
+    lounge.poll(NOW).await;
+    assert_eq!(lounge.store.state().await, state);
+    assert_eq!(lounge.calls().await, 0);
+}
+
 #[tokio::test]
 async fn zwei_dispatcher_erhalten_nur_einen_versuch() {
-    let lounge = setup();
+    let lounge = Arc::new(setup());
+    lounge.invite.hold.store(true, Ordering::SeqCst);
     lounge.store.put(pending(true)).await;
-    let (first, second) = tokio::join!(
-        lounge.watcher.dispatch_due(USER, NOW + 10),
-        lounge.watcher.dispatch_due(USER, NOW + 10)
-    );
-    first.expect("erster Versuch");
-    second.expect("zweiter Versuch");
+    let runner = lounge.clone();
+    let first = tokio::spawn(async move { runner.watcher.dispatch_due(USER, NOW + 10).await });
+    lounge.invite.started.notified().await;
+    lounge
+        .watcher
+        .dispatch_due(USER, NOW + 10)
+        .await
+        .expect("zweiter Versuch");
+    lounge.invite.release.notify_one();
+    first
+        .await
+        .expect("Versandtask läuft")
+        .expect("erster Versuch");
+    assert_eq!(lounge.calls().await, 1);
     assert_eq!(lounge.invite.sends.load(Ordering::SeqCst), 1);
 }
 
@@ -1138,12 +1459,22 @@ async fn ablauf_waehrend_load_oder_claim_verhindert_jeden_versand() {
 async fn ablauf_waehrend_abschluss_speichert_den_versandstatus() {
     let mut lounge = setup();
     let clock = lounge.moving_clock();
-    *lounge.store.advance.lock().await = Some(ClockAdvance {
-        point: WaitPoint::Finish,
-        clock,
-        at: (NOW + 7200) * 1000,
-    });
-    lounge.direct_request().await;
+    let lounge = Arc::new(lounge);
+    lounge.invite.hold.store(true, Ordering::SeqCst);
+    let mut state = pending(true);
+    if let Some(request) = state.request.as_mut() {
+        request.created_at = NOW - REQUEST_WINDOW_SECONDS;
+    }
+    lounge.store.put(state).await;
+    let runner = lounge.clone();
+    let dispatch = tokio::spawn(async move { runner.watcher.dispatch_due(USER, NOW).await });
+    lounge.invite.started.notified().await;
+    clock.store((NOW + 7200) * 1000, Ordering::SeqCst);
+    lounge.invite.release.notify_one();
+    dispatch
+        .await
+        .expect("Versandtask läuft")
+        .expect("Versand abgeschlossen");
     assert_eq!(lounge.calls().await, 1);
     let state = lounge.store.state().await;
     assert_eq!(
@@ -1373,10 +1704,13 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
     if let Some(request) = state.request.as_mut() {
         request.created_at = NOW - REQUEST_WINDOW_SECONDS - 1;
     }
-    assert!(store
-        .compare_exchange(USER, None, &state)
-        .await
-        .expect("Zustand schreibbar"));
+    assert_eq!(
+        store
+            .compare_exchange(USER, None, &state)
+            .await
+            .expect("Zustand schreibbar"),
+        Cas::Written
+    );
     watcher.poll_due(NOW).await.expect("Warteaufträge geprüft");
     assert_eq!(
         store
@@ -1445,14 +1779,20 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
         pool: db.pool().clone(),
     };
     let mut state = pending(false);
-    assert!(store
-        .compare_exchange(USER, None, &state)
-        .await
-        .expect("Zustand schreibbar"));
-    assert!(!store
-        .compare_exchange(USER, None, &state)
-        .await
-        .expect("Zustand schreibbar"));
+    assert_eq!(
+        store
+            .compare_exchange(USER, None, &state)
+            .await
+            .expect("Zustand schreibbar"),
+        Cas::Written
+    );
+    assert_eq!(
+        store
+            .compare_exchange(USER, None, &state)
+            .await
+            .expect("Zustand schreibbar"),
+        Cas::Stale
+    );
     assert_eq!(
         store.pending_users().await.expect("offene Bitten lesbar"),
         vec![USER]
@@ -1466,7 +1806,8 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
         store.compare_exchange(USER, Some(&previous), &state)
     );
     assert_eq!(
-        usize::from(a.expect("erster Claim")) + usize::from(b.expect("zweiter Claim")),
+        usize::from(a.expect("erster Claim").written())
+            + usize::from(b.expect("zweiter Claim").written()),
         1
     );
     assert!(store
@@ -1491,4 +1832,27 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
     );
     assert!(!store.opted_out(USER).await);
     assert!(store.opted_out(u64::MAX).await);
+    sqlx::query(
+        "INSERT INTO core.user_privacy (user_id, opted_out) VALUES ($1, TRUE)
+         ON CONFLICT (user_id) DO UPDATE SET opted_out = TRUE",
+    )
+    .bind(USER as i64)
+    .execute(db.pool())
+    .await
+    .expect("Opt-out gesetzt");
+    let current = store.load(USER).await.expect("Zustand lesbar");
+    assert_eq!(
+        store
+            .compare_exchange(USER, current.as_ref(), &pending(false))
+            .await
+            .expect("Schreibversuch"),
+        Cas::OptedOut
+    );
+    assert_eq!(
+        store
+            .hidden_authors(&[USER, OTHER, u64::MAX])
+            .await
+            .expect("Datenschutz lesbar"),
+        HashSet::from([USER, u64::MAX])
+    );
 }

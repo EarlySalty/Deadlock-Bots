@@ -9,7 +9,7 @@ value = 'f1'
 label = 'Wie bekomme ich einen Deadlock-Invite?'
 emoji = '🔑'
 answer = '''**🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1426220702054355077> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.'''
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.'''
 
 [[options]]
 value = 'f2'
@@ -107,4 +107,4 @@ value = 'f15'
 label = 'Wo fange ich an — und wo kann ich fragen?'
 emoji = '🧭'
 answer = '''**🧭 Wo fange ich an — und wo kann ich fragen?**
-Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen oder einen Deadlock-Invite passt <#1426220702054355077>.'''
+Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.'''

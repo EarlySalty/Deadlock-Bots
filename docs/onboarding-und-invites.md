@@ -12,9 +12,9 @@ Zusätzlich gibt es das AI-Onboarding-Panel mit `Persönliche Tour starten` (3 k
 
 **Deadlock-Invite:** <#1464736918951432222> ist eine offene Invite-Lounge — keine Befehle, keine Formulare, keine Vorbedingungen. So läuft es:
 
-1. Schreib eine nette Frage in den Kanal („mag mich wer einladen? :)") und poste deinen **Steam-Freundescode** dazu (findest du in Steam unter Freunde → „Freund hinzufügen").
+1. Schreib eine nette Frage in den Kanal („mag mich wer einladen? :)") und poste deinen **Steam-Freundescode** dazu (findest du in Steam unter Freunde, „Freund hinzufügen").
 2. Ein Community-Mitglied fügt dich hinzu und lädt dich persönlich zum Playtest ein.
-3. Der Bot schaut mit drauf: Bist du neu auf dem Server und fehlt der Freundescode bei deiner Anfrage, erinnert er dich freundlich daran — ohne Code kann dich niemand einladen. Wer schon länger dabei ist, bekommt den Hinweis nicht.
+3. Der Bot liest mit: Fehlt dein Freundescode, fragt er danach. Meldet sich nach einer halben Stunde niemand, fragt er, ob du schon eine Einladung hast. Antwortest du mit „nein", schickt er dir die Einladung oder erst eine Steam-Freundschaftsanfrage. Antwortest du mit „ja", ist die Sache erledigt. Normaler Chat bleibt unbeantwortet.
 
 Zusätzlich lohnt sich die Steam-Verknüpfung in <#1398021105339334666> in jedem Fall: Damit bekommst du deine echte Rang-Rolle, und der Steam-Bot kann Invites auch automatisiert verschicken (läuft als Sicherheitsnetz im Hintergrund).
 
@@ -22,17 +22,17 @@ Zusätzlich lohnt sich die Steam-Verknüpfung in <#1398021105339334666> in jedem
 Alles kostenlos. Ein Invite kostet nie Geld — weder von der Community noch vom Bot. Es gibt einen optionalen Ko-fi-Support (freiwillig, kein Pflichtkauf und keine Beschleunigung).
 
 ## Was passiert technisch (kurz)?
-Das Regelwerk-Panel und der Screening-Autostart erzeugen private Onboarding-Threads; der Flow speichert Entscheidungen wie Voice-Tags. In <#1464736918951432222> beobachtet der Bot Invite-Anfragen und erinnert bei fehlendem Freundescode. Der Steam-Bot kann Invites zusätzlich automatisiert über die Steam-Spielsuche verschicken.
+Das Regelwerk-Panel und der Screening-Autostart erzeugen private Onboarding-Threads; der Flow speichert Entscheidungen wie Voice-Tags. In <#1464736918951432222> liest das Deadlock Brain jede Nachricht mit dem Stand der Anfrage und entscheidet, ob der Bot nach dem Code fragt, nachfragt, einlädt, hilft oder schweigt. Der Bot führt nur aus und schreibt keine eigenen Texte. Der Steam-Bot kann Invites zusätzlich automatisiert über die Steam-Spielsuche verschicken.
 
 ## Grenzen & häufige Fragen
 - **„Ich habe keinen Invite bekommen"**: Häufigster Grund ist ein „limited" Steam-Account — Steam blockiert Playtest-Invites, wenn auf dem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die erst beim Invite-Versuch sichtbar wird; kein Bot und kein Community-Mitglied kann sie umgehen.
 - Nach einem Invite kann es 1–2 Tage dauern, bis die Einladung bei Steam sichtbar ist.
-- Ohne Freundescode in deiner Anfrage kann dich niemand einladen — der Bot erinnert dich im Kanal daran.
+- Ohne Freundescode in deiner Anfrage kann dich niemand einladen; der Bot fragt im Kanal danach.
 - Es gibt KEINE Onboarding-Option „Invite/Betazugang" und keinen Invite-Befehl — einfach im Kanal fragen.
 - Ein Streamer-Setup-Flow im Onboarding existiert aktuell nicht (nur Hinweise); Streamer-Themen laufen über das Twitch-Dashboard.
 
 ## Für Devs (knapp)
 - Rust: `dl-community/src/onboarding.rs` (+ `onboarding_steps.json`), `ai_onboarding.rs`, `tags_ui.rs`, `reaction_roles.rs`, Invite-Lounge-Watcher in `dl-community`; automatisierter Invite-Pfad im Steam-Bot: `steam-flows/src/betainvite/`
-- Der Invite-Lounge-Watcher antwortet nur Mitgliedern, die weniger als 7 Tage auf dem Server sind (`NEWCOMER_MAX_JOIN_SECONDS`, `author_joined_at` aus dem Gateway-Event); unbekanntes Beitrittsdatum bedeutet keine Antwort. Trigger-Bedingungen und Cooldown vollständig in Deadlock-Docs: `internal/deadlock-bots/onboarding-und-invites-devs.md`
+- Der Invite-Lounge-Watcher (`dl-community/src/invite_lounge.rs`) gibt jede menschliche Nachricht in <#1464736918951432222> mit dem Anfragestand als `discord_invite_turn` an das Brain; es gibt keine Wortlisten und keine Beitrittsgrenze. Der Bot hält Zustand, Steam-Versand und Ausgang (`bot.kv_store`, ns `invite_lounge:requests`), das Brain schreibt die Texte über den Broker. Ein Rückblick nach dem Start und nach Ausfällen holt ungelesene Nachrichten ab einer gespeicherten Marke nach. Jeder Schreibzugriff auf eine Anfrage läuft in einer Transaktion unter der Datenschutz-Sperre des Mitglieds und vergleicht den gelesenen Stand inhaltlich (geparst, nicht als JSON-Text); ein abgemeldetes Mitglied wird dabei nie neu geschrieben. Rollout: alte Zeilen bleiben lesbar, es braucht keine Migration.
 - Der User-Slash-Command `/betainvite` wurde entfernt; der Funnel ist nur noch über den Panel-Button (`betainvite:panel:start`, Admin: `/publish_betainvite_panel`) erreichbar
 - Kanalnamen live: <#1464736918951432222>, <#1398021105339334666> (Server-as-Code-Renames)

@@ -27,7 +27,7 @@ const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 /// brach die Bridge mitten im Vorgang ab, während der Invite-Task bei Steam
 /// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
 /// und der Poller schickte sie später ein zweites Mal.
-const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
+pub const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
 /// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
 /// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
 /// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.

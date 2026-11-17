@@ -310,14 +310,6 @@ pub(crate) mod test_brain {
             })
         }
 
-        pub(crate) fn always_with_turns(text: &str, turns: Vec<ScriptedReply>) -> Arc<Self> {
-            Arc::new(Self {
-                turns: Mutex::new(turns.into()),
-                default_reply: Some(ConversationReply::answered(text)),
-                ..Self::default()
-            })
-        }
-
         pub(crate) fn failing() -> Arc<Self> {
             Self::replying(vec![Err(BrainError::Backend("scripted".into()))])
         }

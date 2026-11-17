@@ -32,7 +32,7 @@ const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", 
 // Discord-Systemmeldungen tragen teilweise einen menschlichen Autor (z. B.
 // MemberJoin). Sie sind keine Nachricht dieses Mitglieds. Inhalt darf leer sein:
 // Sticker, Anhänge und Weiterleitungen bleiben reguläre Nutzernachrichten.
-fn is_user_message(message: &Message) -> bool {
+pub fn is_user_message(message: &Message) -> bool {
     !message.author.bot
         && message.webhook_id.is_none()
         && matches!(

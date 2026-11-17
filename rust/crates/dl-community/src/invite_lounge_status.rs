@@ -159,7 +159,7 @@ impl OutboxEntry {
         now_millis.saturating_sub(first) < NOTICE_MAX_AGE_MILLIS
     }
 
-    pub(super) fn remembers_check_in(&self) -> bool {
+    pub(super) fn asks_check_in(&self) -> bool {
         self.update.current() == Some(InviteLoungeUpdate::CheckIn)
     }
 }
@@ -195,8 +195,6 @@ pub(super) struct RequestStatus {
     pub(super) check_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) check_in_at: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
 }
@@ -217,6 +215,10 @@ impl RequestStatus {
         let notice = notice.filter(|notice| !self.notices.contains(notice))?;
         self.notices.push(notice);
         Some(notice)
+    }
+
+    pub(super) fn forget(&mut self, notice: Notice) {
+        self.notices.retain(|claimed| *claimed != notice);
     }
 
     pub(super) fn asked(&self) -> bool {
@@ -341,15 +343,12 @@ pub(super) fn after_progress(wait: SteamWait, progress: SteamProgress, now: i64)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CheckIn {
     AlreadyInvited,
-    Skip,
     Ask,
 }
 
-pub(super) fn check_in_step(invited: bool, answered: bool) -> CheckIn {
+pub(super) fn check_in_step(invited: bool) -> CheckIn {
     if invited {
         CheckIn::AlreadyInvited
-    } else if answered {
-        CheckIn::Skip
     } else {
         CheckIn::Ask
     }
@@ -557,14 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn nachfrage_nach_dreissig_minuten_nur_ohne_antwort_und_ohne_einladung() {
+    fn nachfrage_nach_dreissig_minuten_nur_ohne_einladung() {
         assert!(!check_in_age(CHECK_IN_SECONDS - 1));
         assert!(check_in_age(CHECK_IN_SECONDS));
         assert!(check_in_age(7 * 24 * 60 * 60));
-        assert_eq!(check_in_step(false, false), CheckIn::Ask);
-        assert_eq!(check_in_step(false, true), CheckIn::Skip);
-        assert_eq!(check_in_step(true, false), CheckIn::AlreadyInvited);
-        assert_eq!(check_in_step(true, true), CheckIn::AlreadyInvited);
+        assert_eq!(check_in_step(false), CheckIn::Ask);
+        assert_eq!(check_in_step(true), CheckIn::AlreadyInvited);
         assert_eq!(Notice::CheckIn.update(), InviteLoungeUpdate::CheckIn);
     }
 
@@ -578,7 +575,7 @@ mod tests {
         let stored = r#"{"key":"invite-lounge:5:answer:6","request_message_id":5,"channel_id":7,"update":{"kind":"check_in_answer","outcome":"arrived"},"answer":"ja","already_invited":false,"attempts":0,"next_at_millis":0}"#;
         let entry: OutboxEntry = serde_json::from_str(stored).expect("alter Eintrag");
         assert_eq!(entry.update.current(), None);
-        assert!(!entry.remembers_check_in());
+        assert!(!entry.asks_check_in());
         assert_eq!(serde_json::to_string(&entry).expect("json"), stored);
         let current = OutboxEntry::notice(5, Some(7), Notice::Confirmed, false);
         let json = serde_json::to_string(&current).expect("json");
@@ -599,9 +596,9 @@ mod tests {
             reply.answer.as_deref(),
             Some("Pack noch deinen Code dazu :)")
         );
-        assert!(!reply.remembers_check_in());
-        assert!(OutboxEntry::notice(55, Some(1), Notice::CheckIn, false).remembers_check_in());
-        assert!(!entry.remembers_check_in());
+        assert!(!reply.asks_check_in());
+        assert!(OutboxEntry::notice(55, Some(1), Notice::CheckIn, false).asks_check_in());
+        assert!(!entry.asks_check_in());
         let mut entry = entry;
         assert!(entry.ready(0));
         entry.claim(1_000);
