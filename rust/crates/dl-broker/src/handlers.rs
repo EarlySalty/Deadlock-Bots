@@ -709,12 +709,7 @@ pub async fn send_message(
                     ),
                     Err(PortError::MessageNotFound) => (
                         404,
-                        error_body(
-                            &rid,
-                            Some(&idem),
-                            "not_found",
-                            "reply target not found",
-                        ),
+                        error_body(&rid, Some(&idem), "not_found", "reply target not found"),
                     ),
                     Err(err) => {
                         tracing::error!(%err, channel_id, "send_message fehlgeschlagen");

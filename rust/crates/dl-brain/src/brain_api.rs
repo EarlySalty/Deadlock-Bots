@@ -13,8 +13,8 @@ use brain_contracts::bot_tasks::{
     MAX_CHAT_LINE_CHARS, MAX_DIALOG_CHARS, MAX_DIALOG_TURNS, MAX_LABEL_CHARS,
     MAX_READABLE_CHANNELS, MAX_TASK_TEXT_CHARS,
 };
-use brain_contracts::invite::{InviteChatLine, InviteTurn, MAX_TURN_RECENT_LINES};
 use brain_contracts::image::QueryImage;
+use brain_contracts::invite::{InviteChatLine, InviteTurn, MAX_TURN_RECENT_LINES};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -1072,7 +1072,10 @@ mod tests {
         assert_eq!(bounded.recent.len(), MAX_TURN_RECENT_LINES);
         assert_eq!(bounded.recent[0].text, "3");
         assert_eq!(
-            bounded.reply_to.as_ref().map(|line| line.text.chars().count()),
+            bounded
+                .reply_to
+                .as_ref()
+                .map(|line| line.text.chars().count()),
             Some(MAX_CHAT_LINE_CHARS)
         );
         assert_eq!(bounded_turn(&bounded), bounded);
