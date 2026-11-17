@@ -56,13 +56,20 @@ pub async fn repo_activity_refresh(
         return resp;
     }
     // Binary unter repo/rust/target/release/, Repo-Wurzel = Data-Parent.
-    let (bin, repo_root) = {
-        let Some(rr) = app.repo_root() else {
+    let (bin, repo_root, base) = {
+        let Ok(data) = std::path::absolute(app.data_dir()) else {
             return err_text(500, "Repo-Pfad nicht auflösbar");
+        };
+        let Some(rr) = data.parent() else {
+            return err_text(500, "Repo-Pfad nicht auflösbar");
+        };
+        let Some(base) = rr.parent() else {
+            return err_text(500, "Repo-Basis nicht auflösbar");
         };
         (
             rr.join("rust/target/release/dl-repostats"),
             rr.to_path_buf(),
+            base.to_path_buf(),
         )
     };
     if !bin.exists() {
@@ -73,8 +80,11 @@ pub async fn repo_activity_refresh(
     }
     tracing::info!("AUDIT master-dashboard repo-activity refresh");
 
+    let out = app.data_dir().join("repo_activity.json");
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.current_dir(&repo_root)
+        .env("REPOSTATS_BASE", &base)
+        .env("REPOSTATS_OUT", &out)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
     let child = match cmd.spawn() {
