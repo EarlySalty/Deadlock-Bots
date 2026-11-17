@@ -35,6 +35,7 @@ struct MemoryStore {
     known: Mutex<HashMap<u64, String>>,
     advance: Mutex<Option<ClockAdvance>>,
     actions_since: AtomicI64,
+    actions_unset: AtomicBool,
     progress: Mutex<SteamProgress>,
     progress_queries: Mutex<Vec<(i64, i64)>>,
     handled: AtomicBool,
@@ -155,7 +156,8 @@ impl LoungeStore for MemoryStore {
         Ok(self.progress.lock().await.invited)
     }
     async fn actions_since(&self) -> Result<Option<i64>, String> {
-        Ok(Some(self.actions_since.load(Ordering::SeqCst)))
+        Ok((!self.actions_unset.load(Ordering::SeqCst))
+            .then(|| self.actions_since.load(Ordering::SeqCst)))
     }
     async fn mark_actions_since(&self, now: i64) -> Result<(), String> {
         let _ = self
@@ -258,7 +260,7 @@ impl InviteEventPort for RecordingInvite {
 }
 
 struct Lounge {
-    watcher: InviteLoungeWatcher,
+    watcher: Arc<InviteLoungeWatcher>,
     store: Arc<MemoryStore>,
     port: Arc<RecordingPort>,
     invite: Arc<RecordingInvite>,
@@ -279,6 +281,7 @@ fn watcher(
         guild_id: GUILD,
         clock_millis: Arc::new(|| NOW * 1000),
         locks: UserLocks::default(),
+        follow_ups: FollowUps::default(),
     }
 }
 
@@ -288,7 +291,12 @@ fn setup() -> Lounge {
     let invite = Arc::new(RecordingInvite::default());
     let brain = Arc::new(ScriptedBrain::default());
     Lounge {
-        watcher: watcher(store.clone(), port.clone(), invite.clone(), brain.clone()),
+        watcher: Arc::new(watcher(
+            store.clone(),
+            port.clone(),
+            invite.clone(),
+            brain.clone(),
+        )),
         store,
         port,
         invite,
@@ -300,7 +308,9 @@ impl Lounge {
     fn moving_clock(&mut self) -> Arc<AtomicI64> {
         let clock = Arc::new(AtomicI64::new(NOW * 1000));
         let reader = clock.clone();
-        self.watcher.clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
+        Arc::get_mut(&mut self.watcher)
+            .expect("Uhr wird vor dem ersten Teilen gesetzt")
+            .clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
         clock
     }
 
@@ -1692,7 +1702,8 @@ fn frischefenster_hat_eine_obere_und_untere_grenze() {
     assert!(is_fresh(NOW, NOW, 10));
     assert!(is_fresh(NOW - 10, NOW, 10));
     assert!(!is_fresh(NOW - 11, NOW, 10));
-    assert!(!is_fresh(NOW + 1, NOW, 10));
+    assert!(is_fresh(NOW + CLOCK_SKEW_SECONDS, NOW, 10));
+    assert!(!is_fresh(NOW + CLOCK_SKEW_SECONDS + 1, NOW, 10));
 }
 
 #[test]
@@ -1840,8 +1851,8 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
         store.compare_exchange(USER, Some(&previous), &state)
     );
     assert_eq!(
-        usize::from(a.expect("erster Claim").written())
-            + usize::from(b.expect("zweiter Claim").written()),
+        usize::from(a.expect("erster Claim") == Cas::Written)
+            + usize::from(b.expect("zweiter Claim") == Cas::Written),
         1
     );
     assert!(store
@@ -2270,4 +2281,99 @@ async fn postgres_alte_einladung_zaehlt_nicht_fuer_die_neue_bitte() {
         after_progress(SteamWait::Retry, fresh, NOW),
         Step::Finish(Some(Notice::Invite))
     );
+}
+
+#[tokio::test]
+async fn nachricht_ohne_startzeit_oder_aus_der_zukunft_bleibt_fuer_den_rueckblick() {
+    let lounge = setup();
+    lounge.store.actions_unset.store(true, Ordering::SeqCst);
+    let unmarked = lounge
+        .watcher
+        .handle_turn(
+            &message(1, NOW, "Kannst du mich einladen? 123456789"),
+            Context::Given(&[]),
+            NOW,
+        )
+        .await;
+    assert_eq!(unmarked, Ok(Turn::Failed));
+    lounge.store.actions_unset.store(false, Ordering::SeqCst);
+    let ahead = lounge
+        .watcher
+        .handle_turn(
+            &message(2, NOW + CLOCK_SKEW_SECONDS + 1, "hallo?"),
+            Context::Given(&[]),
+            NOW,
+        )
+        .await;
+    assert_eq!(ahead, Ok(Turn::Failed));
+    assert!(turns(&lounge.brain).is_empty());
+    assert!(lounge.store.states.lock().await.is_empty());
+    let skewed = lounge
+        .watcher
+        .handle_turn(&message(3, NOW + 60, "hallo?"), Context::Given(&[]), NOW)
+        .await;
+    assert_eq!(skewed, Ok(Turn::Stored(USER)));
+    assert_eq!(turns(&lounge.brain).len(), 1);
+}
+
+#[tokio::test]
+async fn folgeschritt_laeuft_je_mitglied_nur_einmal_und_holt_verpasstes_nach() {
+    let lounge = setup();
+    lounge.invite.hold.store(true, Ordering::SeqCst);
+    lounge.store.put(pending(true)).await;
+    let first = tokio::spawn(lounge.watcher.clone().run_follow_up(USER));
+    lounge.invite.started.notified().await;
+    lounge.watcher.clone().run_follow_up(USER).await;
+    assert_eq!(
+        lounge
+            .watcher
+            .follow_ups
+            .lock()
+            .expect("Folgeschritte lesbar")
+            .get(&USER)
+            .copied(),
+        Some(true)
+    );
+    lounge.invite.release.notify_one();
+    first.await.expect("Folgeschritt läuft");
+    assert!(lounge
+        .watcher
+        .follow_ups
+        .lock()
+        .expect("Folgeschritte lesbar")
+        .is_empty());
+    assert_eq!(lounge.calls().await, 1);
+    assert_eq!(updates(&lounge.brain), vec![sent()]);
+}
+
+#[tokio::test]
+async fn haengender_steam_versand_haelt_andere_nachrichten_nicht_auf() {
+    let lounge = setup();
+    lounge.invite.hold.store(true, Ordering::SeqCst);
+    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
+    let (queue, inbox) = tokio::sync::mpsc::channel(8);
+    let missed = Arc::new(AtomicBool::new(false));
+    let reader = tokio::spawn(read_live(lounge.watcher.clone(), inbox, missed.clone()));
+    queue
+        .send(message(1, NOW, "Kannst du mich einladen? 123456789"))
+        .await
+        .expect("Nachricht eingereiht");
+    lounge.invite.started.notified().await;
+    queue
+        .send(from(OTHER, message(2, NOW + 1, "moin zusammen")))
+        .await
+        .expect("Nachricht eingereiht");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while turns(&lounge.brain).len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("zweite Nachricht läuft während des Versands");
+    lounge.invite.release.notify_one();
+    drop(queue);
+    reader.await.expect("Leser endet");
+    assert!(!missed.load(Ordering::SeqCst));
+    assert_eq!(lounge.calls().await, 1);
+    assert_eq!(phase(&lounge.store.state().await), Some(Phase::Attempted));
 }

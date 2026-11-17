@@ -37,6 +37,7 @@ const DISPATCH_STALE_MILLIS: i64 =
 const LIVE_QUEUE: usize = 256;
 const TICK: Duration = Duration::from_secs(15);
 const MAX_CATCH_UP_BACKOFF: Duration = Duration::from_secs(16 * 60);
+const CLOCK_SKEW_SECONDS: i64 = 5 * 60;
 
 pub(crate) const PRIVACY_KV_NAMESPACES: [&str; 2] = [STATE_KV_NS, COOLDOWN_KV_NS];
 
@@ -211,9 +212,34 @@ enum Cas {
 }
 
 impl Cas {
-    fn written(self) -> bool {
-        self == Self::Written
+    fn written(self, user_id: u64, step: &'static str) -> bool {
+        match self {
+            Self::Written => true,
+            Self::Stale => {
+                tracing::info!(
+                    user_id,
+                    step,
+                    "Invite-Lounge: Stand hat sich parallel geändert, der Schritt wird beim nächsten Durchlauf neu bewertet"
+                );
+                false
+            }
+            Self::OptedOut => {
+                tracing::info!(
+                    user_id,
+                    step,
+                    "Invite-Lounge verwirft den Schritt nach Datenschutz-Opt-out"
+                );
+                false
+            }
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Accept,
+    Ignore,
+    Defer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,6 +548,56 @@ fn steam_id64(code: &str) -> Option<i64> {
 }
 
 type UserLocks = std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>;
+type FollowUps = std::sync::Mutex<HashMap<u64, bool>>;
+
+struct InFlight<'a> {
+    running: &'a FollowUps,
+    user_id: u64,
+    released: bool,
+}
+
+impl<'a> InFlight<'a> {
+    fn enter(running: &'a FollowUps, user_id: u64) -> Option<Self> {
+        let mut map = running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(rerun) = map.get_mut(&user_id) {
+            *rerun = true;
+            return None;
+        }
+        map.insert(user_id, false);
+        Some(Self {
+            running,
+            user_id,
+            released: false,
+        })
+    }
+
+    fn again(&mut self) -> bool {
+        let mut map = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(rerun) = map.get_mut(&self.user_id).filter(|rerun| **rerun) {
+            *rerun = false;
+            return true;
+        }
+        map.remove(&self.user_id);
+        self.released = true;
+        false
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.user_id);
+        }
+    }
+}
 
 pub struct InviteLoungeWatcher {
     store: Arc<dyn LoungeStore>,
@@ -531,6 +607,7 @@ pub struct InviteLoungeWatcher {
     guild_id: u64,
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
     locks: UserLocks,
+    follow_ups: FollowUps,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -586,6 +663,7 @@ impl InviteLoungeWatcher {
             guild_id,
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             locks: UserLocks::default(),
+            follow_ups: FollowUps::default(),
         }
     }
 
@@ -596,18 +674,25 @@ impl InviteLoungeWatcher {
             && event.channel_id == CHECK_IN_CHANNEL_ID
     }
 
-    async fn serve(&self, event: LoungeMessage) -> bool {
+    async fn serve(&self, event: LoungeMessage) -> Turn {
         let now = (self.clock_millis)() / 1000;
-        match self.handle_turn(&event, Context::Fetch, now).await {
-            Ok(Turn::Stored(user_id)) => {
-                self.follow_up(user_id, now).await;
-                true
-            }
-            Ok(Turn::Skipped) => true,
-            Ok(Turn::Failed) => false,
-            Err(error) => {
+        self.handle_turn(&event, Context::Fetch, now)
+            .await
+            .unwrap_or_else(|error| {
                 tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge-Nachricht konnte nicht verarbeitet werden, der Rückblick holt sie nach");
-                false
+                Turn::Failed
+            })
+    }
+
+    async fn run_follow_up(self: Arc<Self>, user_id: u64) {
+        let Some(mut in_flight) = InFlight::enter(&self.follow_ups, user_id) else {
+            return;
+        };
+        loop {
+            let now = (self.clock_millis)() / 1000;
+            self.follow_up(user_id, now).await;
+            if !in_flight.again() {
+                return;
             }
         }
     }
@@ -675,8 +760,10 @@ impl InviteLoungeWatcher {
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
-        if !self.accepts(event, bot_id, now).await? {
-            return Ok(Turn::Skipped);
+        match self.accepts(event, bot_id, now).await? {
+            Admission::Accept => {}
+            Admission::Ignore => return Ok(Turn::Skipped),
+            Admission::Defer => return Ok(Turn::Failed),
         }
         let user_id = event.author_id;
         let lock = self.user_lock(user_id);
@@ -786,32 +873,55 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn accepts(&self, event: &LoungeMessage, bot_id: u64, now: i64) -> Result<bool, String> {
+    async fn accepts(
+        &self,
+        event: &LoungeMessage,
+        bot_id: u64,
+        now: i64,
+    ) -> Result<Admission, String> {
         if !self.watches(event) || event.author_id == bot_id {
-            return Ok(false);
+            return Ok(Admission::Ignore);
         }
         if event.content.trim().is_empty() {
             tracing::info!(
                 message_id = event.message_id,
                 "Invite-Lounge: Nachricht ohne Text (Bild, Sticker oder Anhang) geht nicht an den Brain"
             );
-            return Ok(false);
+            return Ok(Admission::Ignore);
+        }
+        if now.saturating_sub(event.created_at) < -CLOCK_SKEW_SECONDS {
+            tracing::warn!(
+                message_id = event.message_id,
+                created_at = event.created_at,
+                now,
+                "Invite-Lounge: Nachricht liegt in der Zukunft, der Rückblick versucht sie erneut"
+            );
+            return Ok(Admission::Defer);
         }
         if !is_fresh(event.created_at, now, REQUEST_WINDOW_SECONDS) {
             tracing::info!(
                 message_id = event.message_id,
                 "Invite-Lounge überspringt verspätete Nachricht"
             );
-            return Ok(false);
+            return Ok(Admission::Ignore);
         }
-        let allowed = self.allows_actions(event.created_at).await?;
-        if !allowed {
-            tracing::info!(
-                message_id = event.message_id,
-                "Invite-Lounge überspringt Nachricht von vor dem ersten Start"
-            );
+        match self.store.actions_since().await? {
+            None => {
+                tracing::warn!(
+                    message_id = event.message_id,
+                    "Invite-Lounge: Startzeit noch nicht gespeichert, der Rückblick holt die Nachricht nach"
+                );
+                Ok(Admission::Defer)
+            }
+            Some(since) if event.created_at < since => {
+                tracing::info!(
+                    message_id = event.message_id,
+                    "Invite-Lounge überspringt Nachricht von vor dem ersten Start"
+                );
+                Ok(Admission::Ignore)
+            }
+            Some(_) => Ok(Admission::Accept),
         }
-        Ok(allowed)
     }
 
     fn user_lock(&self, user_id: u64) -> Arc<tokio::sync::Mutex<()>> {
@@ -927,7 +1037,7 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn catch_up(&self, now: i64, start_mark: u64) -> Result<(), String> {
+    async fn catch_up(self: &Arc<Self>, now: i64, start_mark: u64) -> Result<(), String> {
         let mark = match self.store.catch_up_mark().await? {
             Some(mark) => mark,
             None => {
@@ -944,6 +1054,7 @@ impl InviteLoungeWatcher {
         history.sort_by_key(|message| message.message_id);
         history.dedup_by_key(|message| message.message_id);
         let mut failed: HashSet<u64> = HashSet::new();
+        let mut effects = tokio::task::JoinSet::new();
         let mut reached = mark;
         for message in history.iter().filter(|message| message.message_id > mark) {
             if failed.contains(&message.author_id) {
@@ -953,7 +1064,9 @@ impl InviteLoungeWatcher {
                 .handle_turn(message, Context::Given(&history), now)
                 .await
             {
-                Ok(Turn::Stored(user_id)) => self.follow_up(user_id, now).await,
+                Ok(Turn::Stored(user_id)) => {
+                    effects.spawn(self.clone().run_follow_up(user_id));
+                }
                 Ok(Turn::Skipped) => {}
                 Ok(Turn::Failed) => {
                     failed.insert(message.author_id);
@@ -966,6 +1079,9 @@ impl InviteLoungeWatcher {
             if failed.is_empty() {
                 reached = message.message_id;
             }
+        }
+        while let Some(result) = effects.join_next().await {
+            log_follow_up(result);
         }
         if reached > mark {
             self.store.set_catch_up_mark(reached).await?;
@@ -1031,14 +1147,15 @@ impl InviteLoungeWatcher {
             let retrying = head.first_attempt_at_millis.is_some();
             head.claim(now_millis);
             let entry = head.clone();
-            match self
+            let cas = self
                 .store
                 .compare_exchange(user_id, Some(&previous), &claimed)
-                .await?
-            {
-                Cas::Written => {}
-                Cas::Stale => continue,
-                Cas::OptedOut => return Ok(()),
+                .await?;
+            if cas == Cas::Stale {
+                continue;
+            }
+            if !cas.written(user_id, "deliver_outbox") {
+                return Ok(());
             }
             let result = self.send_notice(user_id, &entry, retrying).await;
             self.finish_notice(user_id, &entry, result).await?;
@@ -1110,12 +1227,12 @@ impl InviteLoungeWatcher {
                 return Ok(());
             };
             settle_notice(&mut next, position, result, (self.clock_millis)());
-            if self
+            let cas = self
                 .store
                 .compare_exchange(user_id, Some(&previous), &next)
-                .await?
-                != Cas::Stale
-            {
+                .await?;
+            if cas != Cas::Stale {
+                cas.written(user_id, "finish_notice");
                 return Ok(());
             }
         }
@@ -1275,7 +1392,7 @@ impl InviteLoungeWatcher {
             .store
             .compare_exchange(user_id, Some(previous), &next)
             .await?
-            .written()
+            .written(user_id, "recover_dispatch")
         {
             tracing::warn!(
                 user_id,
@@ -1297,7 +1414,7 @@ impl InviteLoungeWatcher {
             .store
             .compare_exchange(user_id, Some(previous), &next)
             .await?
-            .written()
+            .written(user_id, "close_handled")
         {
             tracing::info!(
                 user_id,
@@ -1324,7 +1441,7 @@ impl InviteLoungeWatcher {
             .store
             .compare_exchange(user_id, Some(previous), &expired)
             .await?
-            .written()
+            .written(user_id, "expire")
         {
             tracing::info!(
                 user_id,
@@ -1364,8 +1481,9 @@ impl InviteLoungeWatcher {
         self.queue_step_notice(&mut next, notice).await;
         self.store
             .compare_exchange(user_id, Some(previous), &next)
-            .await
-            .map(|_| ())
+            .await?
+            .written(user_id, "settle");
+        Ok(())
     }
 
     async fn check_in(
@@ -1387,8 +1505,9 @@ impl InviteLoungeWatcher {
         queue_notice(&mut next, notice, invited);
         self.store
             .compare_exchange(user_id, Some(previous), &next)
-            .await
-            .map(|_| ())
+            .await?
+            .written(user_id, "check_in");
+        Ok(())
     }
 
     async fn send_invite(
@@ -1417,7 +1536,7 @@ impl InviteLoungeWatcher {
             .store
             .compare_exchange(user_id, Some(previous), &claimed)
             .await?
-            .written()
+            .written(user_id, "send_invite")
         {
             return Ok(());
         }
@@ -1483,12 +1602,12 @@ impl InviteLoungeWatcher {
             let notice = apply_step(&mut finished, step);
             self.queue_step_notice(&mut finished, notice).await;
             finished.last_result = Some(outcome.to_string());
-            if self
+            let cas = self
                 .store
                 .compare_exchange(user_id, Some(&current), &finished)
-                .await?
-                != Cas::Stale
-            {
+                .await?;
+            if cas != Cas::Stale {
+                cas.written(user_id, "finish_dispatch");
                 return Ok(());
             }
         }
@@ -1538,10 +1657,32 @@ async fn read_live(
     mut inbox: tokio::sync::mpsc::Receiver<LoungeMessage>,
     missed: Arc<AtomicBool>,
 ) {
-    while let Some(message) = inbox.recv().await {
-        if !watcher.serve(message).await {
-            missed.store(true, Ordering::SeqCst);
+    let mut follow_ups = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            message = inbox.recv() => {
+                let Some(message) = message else {
+                    break;
+                };
+                match watcher.serve(message).await {
+                    Turn::Stored(user_id) => {
+                        follow_ups.spawn(watcher.clone().run_follow_up(user_id));
+                    }
+                    Turn::Skipped => {}
+                    Turn::Failed => missed.store(true, Ordering::SeqCst),
+                }
+            }
+            Some(result) = follow_ups.join_next(), if !follow_ups.is_empty() => log_follow_up(result),
         }
+    }
+    while let Some(result) = follow_ups.join_next().await {
+        log_follow_up(result);
+    }
+}
+
+fn log_follow_up(result: Result<(), tokio::task::JoinError>) {
+    if let Err(err) = result {
+        tracing::error!(%err, "Invite-Lounge-Folgeschritt ist abgebrochen");
     }
 }
 
@@ -1598,7 +1739,7 @@ async fn watch(
                     catch_ups.spawn(async move { reader.catch_up(now, start_mark).await });
                 }
                 match watcher.due_users().await {
-                    Ok(users) => for user_id in users { spawn_dispatch(&mut dispatches, watcher.clone(), user_id); },
+                    Ok(users) => for user_id in users { dispatches.spawn(watcher.clone().run_follow_up(user_id)); },
                     Err(err) => tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden"),
                 }
             }
@@ -1620,26 +1761,13 @@ async fn watch(
                     }
                 }
             }
-            Some(result) = dispatches.join_next(), if !dispatches.is_empty() => {
-                if let Err(err) = result { tracing::error!(%err, "Invite-Lounge-Versandtask ist abgebrochen"); }
-            }
+            Some(result) = dispatches.join_next(), if !dispatches.is_empty() => log_follow_up(result),
         }
     }
 }
 
 fn snowflake_at(millis: i64) -> u64 {
     u64::try_from(millis.saturating_sub(1_420_070_400_000)).map_or(0, |since| since << 22)
-}
-
-fn spawn_dispatch(
-    dispatches: &mut tokio::task::JoinSet<()>,
-    watcher: Arc<InviteLoungeWatcher>,
-    user_id: u64,
-) {
-    dispatches.spawn(async move {
-        let now = (watcher.clock_millis)() / 1000;
-        watcher.follow_up(user_id, now).await;
-    });
 }
 
 fn build_turn(
@@ -1918,7 +2046,7 @@ fn unwatched(request: &Request, status: &RequestStatus) -> bool {
 }
 
 fn is_fresh(created_at: i64, now: i64, max_age: i64) -> bool {
-    (0..=max_age).contains(&now.saturating_sub(created_at))
+    (-CLOCK_SKEW_SECONDS..=max_age).contains(&now.saturating_sub(created_at))
 }
 
 fn is_due(request: &Request, status: &RequestStatus) -> bool {
