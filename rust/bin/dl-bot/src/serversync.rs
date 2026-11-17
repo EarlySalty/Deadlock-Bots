@@ -2081,27 +2081,35 @@ impl ServerSyncService {
     async fn support_funding_for_apply(
         &self,
         source: &dyn crate::supporter::FundingSource,
-    ) -> Result<(support_publish::SupportFunding, Option<String>), String> {
+    ) -> ServerSyncResult<Result<(support_publish::SupportFunding, Option<String>), String>> {
         let error = match source.funding().await {
-            Ok(funding) => return Ok((funding, None)),
+            Ok(funding) => return Ok(Ok((funding, None))),
             Err(error) => error,
         };
-        let raw = self
+        let Some(raw) = self
             .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
-            .await
-            .map_err(|kv_error| format!("{error}; letzter Stand nicht lesbar: {kv_error}"))?
-            .ok_or_else(|| format!("{error}; es gibt keinen veröffentlichten Stand"))?;
-        let last_live = support_publish::SupportFunding::from_kv(&raw).map_err(|decode_error| {
-            format!("{error}; veröffentlichter Stand unlesbar: {decode_error}")
-        })?;
+            .await?
+        else {
+            return Ok(Err(format!(
+                "{error}; es gibt keinen veröffentlichten Stand"
+            )));
+        };
+        let last_live = match support_publish::SupportFunding::from_kv(&raw) {
+            Ok(last_live) => last_live,
+            Err(decode_error) => {
+                return Ok(Err(format!(
+                    "{error}; veröffentlichter Stand unlesbar: {decode_error}"
+                )))
+            }
+        };
         let funding = support_fallback_funding(last_live, source.goal_cents());
-        Ok((
+        Ok(Ok((
             funding,
             Some(format!(
                 "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {}, bis der nächste Abgleich ihn aktualisiert.",
                 support_publish::format_euro(funding.raised_cents)
             )),
-        ))
+        )))
     }
 
     pub async fn support_funding_refresh(&self) -> ServerSyncResult<FundingRefresh> {
@@ -2185,7 +2193,7 @@ impl ServerSyncService {
                     %error,
                     raised_cents = fallback.raised_cents,
                     goal_cents = fallback.goal_cents,
-                    "Support: Monatsstand nicht abrufbar; geändertes Ziel oder geänderte Panel-Optionen gehen mit dem veröffentlichten Betrag raus"
+                    "Support: Monatsstand nicht abrufbar; der Abgleich rechnet mit dem veröffentlichten Betrag"
                 );
                 fallback
             }
@@ -3937,7 +3945,7 @@ impl ServerSyncOps for ServerSyncService {
         let source = self.supporter_funding.clone();
         let options = source.panel_options();
         let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
-        let funding_result = self.support_funding_for_apply(source.as_ref()).await;
+        let funding_result = self.support_funding_for_apply(source.as_ref()).await?;
         let (funding, funding_warning) = match funding_result {
             Ok(found) => found,
             Err(error) if confirm => {
@@ -3945,15 +3953,19 @@ impl ServerSyncOps for ServerSyncService {
                     "Support: Monatsstand unbekannt ({error}); Apply blockiert, damit das Panel keinen erfundenen Betrag zeigt."
                 )));
             }
-            Err(error) => (
-                support_publish::SupportFunding {
+            Err(error) => {
+                let preview = support_publish::SupportFunding {
                     raised_cents: 0,
                     goal_cents: source.goal_cents(),
-                },
-                Some(format!(
-                    "Support: Monatsstand unbekannt ({error}); die Vorschau zeigt 0 €, Bestätigen wird abgelehnt."
-                )),
-            ),
+                };
+                (
+                    preview,
+                    Some(format!(
+                        "Support: Monatsstand unbekannt ({error}); die Vorschau zeigt {}, Bestätigen wird abgelehnt.",
+                        support_publish::format_euro(preview.raised_cents)
+                    )),
+                )
+            }
         };
         let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
@@ -8012,9 +8024,6 @@ pub struct HttpState {
 }
 
 pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
-    let token = token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     Router::new()
         .route("/serversync/snapshot", post(http_snapshot))
         .route("/serversync/rollback-export", post(http_rollback_export))
@@ -8085,7 +8094,7 @@ fn authorize(
     if !peer.ip().is_loopback() {
         return Err(ServerSyncError::forbidden("loopback requests only"));
     }
-    let Some(expected) = state.token.as_deref().filter(|token| !token.is_empty()) else {
+    let Some(expected) = state.token.as_deref() else {
         return Err(ServerSyncError::forbidden(
             "SERVERSYNC_INTERNAL_TOKEN ist nicht konfiguriert",
         ));
