@@ -101,6 +101,7 @@ pub enum ServerSyncErrorKind {
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
 const LIVE_GUILD_MODEL_DISCORD_CALLS: u32 = 2;
 const DISCORD_HISTORY_PAGE_LIMIT: usize = 100;
+const HISTORY_SCAN_PROBE_LIMIT: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
@@ -1610,40 +1611,27 @@ impl ServerSyncService {
         stored_message_id: Option<u64>,
     ) -> ServerSyncResult<Vec<RegelwerkBotMessage>> {
         let mut messages = Vec::new();
-        let mut before: Option<u64> = None;
-        for page_index in 0.. {
-            if page_index == HISTORY_SCAN_MAX_PAGES {
-                return Err(history_scan_cap_error("Regelwerk"));
-            }
-            let mut url = self.discord_api_url(&format!(
-                "/channels/{RULES_CHANNEL_ID}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
-            ));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if author_id == bot_user_id && Some(message_id) != stored_message_id {
-                    messages.push(RegelwerkBotMessage {
-                        message_id,
-                        embed_titles: message
-                            .embeds
-                            .iter()
-                            .filter_map(|embed| embed.title.clone())
-                            .collect(),
-                    });
+        let truncated = self
+            .scan_message_history(RULES_CHANNEL_ID, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if author_id == bot_user_id && Some(message_id) != stored_message_id {
+                        messages.push(RegelwerkBotMessage {
+                            message_id,
+                            embed_titles: message
+                                .embeds
+                                .iter()
+                                .filter_map(|embed| embed.title.clone())
+                                .collect(),
+                        });
+                    }
                 }
-            }
-            before = history_before_cursor(before, &page)?;
-            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
-                break;
-            }
+                Ok(())
+            })
+            .await?;
+        if truncated {
+            return Err(history_scan_cap_error("Regelwerk"));
         }
         Ok(messages)
     }
@@ -2240,52 +2228,78 @@ impl ServerSyncService {
         Ok(FundingRefresh::Updated)
     }
 
+    async fn fetch_history_page(
+        &self,
+        channel_id: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> ServerSyncResult<Vec<DiscordMessage>> {
+        let mut url =
+            self.discord_api_url(&format!("/channels/{channel_id}/messages?limit={limit}"));
+        if let Some(before) = before {
+            url.push_str("&before=");
+            url.push_str(&before.to_string());
+        }
+        self.discord_get_json(url).await
+    }
+
+    async fn scan_message_history(
+        &self,
+        channel_id: u64,
+        mut visit: impl FnMut(&[DiscordMessage]) -> ServerSyncResult<()> + Send,
+    ) -> ServerSyncResult<bool> {
+        let mut before: Option<u64> = None;
+        for _ in 0..HISTORY_SCAN_MAX_PAGES {
+            let page = self
+                .fetch_history_page(channel_id, before, DISCORD_HISTORY_PAGE_LIMIT)
+                .await?;
+            if page.is_empty() {
+                return Ok(false);
+            }
+            visit(&page)?;
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
+                return Ok(false);
+            }
+        }
+        let probe = self
+            .fetch_history_page(channel_id, before, HISTORY_SCAN_PROBE_LIMIT)
+            .await?;
+        Ok(history_before_cursor(before, &probe)?.is_some())
+    }
+
     async fn fetch_rang_guide_legacy_cleanup_candidates(
         &self,
         bot_user_id: u64,
     ) -> ServerSyncResult<RangGuideLegacyScan> {
-        let mut before: Option<u64> = None;
         let mut candidates = Vec::new();
-        let mut truncated = false;
-        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url = self.discord_api_url(&format!(
-                "/channels/{}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}",
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-            ));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                let custom_ids =
-                    rang_guide_publish::collect_component_custom_ids(&message.components);
-                let legacy = rang_guide_publish::RangGuideLegacyMessage {
-                    message_id,
-                    author_id,
-                    flags: message.flags,
-                    has_embeds: !message.embeds.is_empty(),
-                    custom_ids,
-                };
-                if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(&legacy, bot_user_id)
-                {
-                    candidates.push(rang_guide_publish::RangGuideLegacyCleanupCandidate {
+        let truncated = self
+            .scan_message_history(rang_guide_publish::RANG_GUIDE_CHANNEL_ID, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    let custom_ids =
+                        rang_guide_publish::collect_component_custom_ids(&message.components);
+                    let legacy = rang_guide_publish::RangGuideLegacyMessage {
                         message_id,
-                        custom_ids: legacy.custom_ids,
-                    });
+                        author_id,
+                        flags: message.flags,
+                        has_embeds: !message.embeds.is_empty(),
+                        custom_ids,
+                    };
+                    if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(
+                        &legacy,
+                        bot_user_id,
+                    ) {
+                        candidates.push(rang_guide_publish::RangGuideLegacyCleanupCandidate {
+                            message_id,
+                            custom_ids: legacy.custom_ids,
+                        });
+                    }
                 }
-            }
-            before = history_before_cursor(before, &page)?;
-            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
-                break;
-            }
-            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
-        }
+                Ok(())
+            })
+            .await?;
         candidates.sort_unstable_by_key(|candidate| candidate.message_id);
         candidates.dedup_by_key(|candidate| candidate.message_id);
         Ok(RangGuideLegacyScan {
@@ -2299,34 +2313,20 @@ impl ServerSyncService {
         channel_id: u64,
         is_own: impl Fn(u64, u64, &DiscordMessage) -> bool + Send,
     ) -> ServerSyncResult<OwnMessageScan> {
-        let mut before: Option<u64> = None;
         let mut message_ids = Vec::new();
-        let mut truncated = false;
-        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url = self.discord_api_url(&format!(
-                "/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
-            ));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if is_own(message_id, author_id, message) {
-                    message_ids.push(message_id);
+        let found = &mut message_ids;
+        let truncated = self
+            .scan_message_history(channel_id, move |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if is_own(message_id, author_id, message) {
+                        found.push(message_id);
+                    }
                 }
-            }
-            before = history_before_cursor(before, &page)?;
-            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
-                break;
-            }
-            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
-        }
+                Ok(())
+            })
+            .await?;
         message_ids.sort_unstable();
         message_ids.dedup();
         Ok(OwnMessageScan {
@@ -2849,60 +2849,47 @@ impl ServerSyncService {
         bot_user_id: u64,
     ) -> ServerSyncResult<BTreeMap<String, Vec<u64>>> {
         let mut messages = BTreeMap::new();
-        let mut before: Option<u64> = None;
-        for page_index in 0.. {
-            if page_index == HISTORY_SCAN_MAX_PAGES {
-                return Err(history_scan_cap_error("Welcome"));
-            }
-            let mut url = self.discord_api_url(&format!(
-                "/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
-            ));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if author_id != bot_user_id {
-                    continue;
-                }
-                for embed in &message.embeds {
-                    if let Some(marker) = embed
-                        .footer
-                        .as_ref()
-                        .and_then(|footer| footer.text.as_deref())
-                    {
-                        if let Some(section_id) =
-                            welcome_publish::welcome_section_id_from_marker(marker)
+        let truncated = self
+            .scan_message_history(channel_id, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if author_id != bot_user_id {
+                        continue;
+                    }
+                    for embed in &message.embeds {
+                        if let Some(marker) = embed
+                            .footer
+                            .as_ref()
+                            .and_then(|footer| footer.text.as_deref())
+                        {
+                            if let Some(section_id) =
+                                welcome_publish::welcome_section_id_from_marker(marker)
+                            {
+                                messages
+                                    .entry(section_id.to_string())
+                                    .or_insert_with(Vec::new)
+                                    .push(message_id);
+                                continue;
+                            }
+                        }
+                        if let Some(section_id) = embed
+                            .title
+                            .as_deref()
+                            .and_then(welcome_publish::welcome_section_id_from_title)
                         {
                             messages
                                 .entry(section_id.to_string())
                                 .or_insert_with(Vec::new)
                                 .push(message_id);
-                            continue;
                         }
                     }
-                    if let Some(section_id) = embed
-                        .title
-                        .as_deref()
-                        .and_then(welcome_publish::welcome_section_id_from_title)
-                    {
-                        messages
-                            .entry(section_id.to_string())
-                            .or_insert_with(Vec::new)
-                            .push(message_id);
-                    }
                 }
-            }
-            before = history_before_cursor(before, &page)?;
-            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
-                break;
-            }
+                Ok(())
+            })
+            .await?;
+        if truncated {
+            return Err(history_scan_cap_error("Welcome"));
         }
         for ids in messages.values_mut() {
             ids.sort_unstable();
@@ -11490,9 +11477,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     #[tokio::test]
     async fn history_scans_melden_den_abbruch_nach_der_letzten_seite() {
         let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
-        for (count, expected_ids, expected_truncated) in
-            [(cap - 1, cap - 1, false), (cap + 1, cap, true)]
-        {
+        for (count, expected_ids, expected_truncated) in [
+            (cap - 1, cap - 1, false),
+            (cap, cap, false),
+            (cap + 1, cap, true),
+        ] {
             let fake = spawn_fake_discord(42, own_history(count), Vec::new()).await;
             let service = service_without_database(fake.base_url.clone());
 
@@ -11518,6 +11507,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 "{:?}",
                 regelwerk.err()
             );
+            if let Ok(regelwerk) = regelwerk {
+                assert_eq!(regelwerk.len() as u64, expected_ids);
+            }
         }
     }
 
