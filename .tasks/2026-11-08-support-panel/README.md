@@ -47,7 +47,7 @@ Grant and revoke live in `rust/bin/dl-bot/src/supporter/roles.rs`, driven from `
 
 ## Known limits
 
-- A single serversync Discord request is bounded by `DISCORD_REQUEST_TIMEOUT_MS` in `discord_http_client()`. A call through `discord_regelwerk_send_with_retry`, retries and rate-limit waits included, is bounded by `discord_pages::discord_call_timeout()` (`DISCORD_CALL_TIMEOUT_MS`); the waits alone stop at `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS`.
+- A single serversync Discord request is bounded by `DISCORD_REQUEST_TIMEOUT_MS` in `discord_http_client()`. A call through `discord_regelwerk_send_with_retry` sends at most `REGELWERK_DISCORD_MAX_ATTEMPTS` requests and waits at most `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS` in total between them, so it is bounded by `DISCORD_RETRY_CALL_BOUND` (attempts times `DISCORD_REQUEST_TIMEOUT_MS` plus the wait budget).
 - The live guild model that the Regelwerk publish and the Welcome apply load while they hold `panel_apply_lock` is bounded by `discord_call_timeout()` times `LIVE_GUILD_MODEL_DISCORD_CALLS`.
 - The Regelwerk, Welcome and panel history scans share `scan_message_history`: at most `HISTORY_SCAN_MAX_PAGES` pages of `DISCORD_HISTORY_PAGE_LIMIT` messages, and after a full last page one probe request for `HISTORY_SCAN_PROBE_LIMIT` older message. A scan counts as cut short only when that probe finds an older message, so a history of exactly `HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT` messages is complete.
 - The role sync reads members through `discord_pages::fetch_all_guild_members` in `rust/bin/dl-bot/src/discord_pages.rs` with `discord_call_timeout()` per page.

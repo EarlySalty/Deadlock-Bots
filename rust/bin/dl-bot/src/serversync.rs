@@ -68,6 +68,10 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
+const DISCORD_RETRY_CALL_BOUND: Duration = Duration::from_millis(
+    REGELWERK_DISCORD_MAX_ATTEMPTS as u64 * dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS
+        + dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS,
+);
 const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
@@ -5731,7 +5735,7 @@ where
     S: FnMut() -> Fut,
     Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
 {
-    let bound = crate::discord_pages::discord_call_timeout();
+    let bound = DISCORD_RETRY_CALL_BOUND;
     let budget = Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS);
     tokio::time::timeout(bound, discord_send_within_wait_budget(send, method, budget))
         .await
@@ -10678,6 +10682,60 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         .expect("429 response");
         assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(*attempts.lock().expect("attempts"), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discord_retry_bound_traegt_alle_versuche_mit_vollem_wartebudget() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let sender_attempts = Arc::clone(&attempts);
+        let request = Duration::from_millis(dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS)
+            - Duration::from_millis(1);
+        let waits = u32::try_from(REGELWERK_DISCORD_MAX_ATTEMPTS - 1).expect("wait count");
+        let wait =
+            Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS)
+                / waits;
+        let started = tokio::time::Instant::now();
+
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts = Arc::clone(&sender_attempts);
+                async move {
+                    tokio::time::sleep(request).await;
+                    *attempts.lock().expect("attempts") += 1;
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        json!({"retry_after": wait.as_secs_f64()}).to_string(),
+                    ))
+                }
+            },
+            "GET",
+        )
+        .await
+        .expect("429 after the last attempt");
+
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            *attempts.lock().expect("attempts"),
+            REGELWERK_DISCORD_MAX_ATTEMPTS
+        );
+        assert!(elapsed > crate::discord_pages::discord_call_timeout());
+        assert!(elapsed <= DISCORD_RETRY_CALL_BOUND, "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discord_retry_bricht_einen_haengenden_aufruf_am_bound_ab() {
+        let started = tokio::time::Instant::now();
+        let Err(error) = discord_regelwerk_send_with_retry(
+            std::future::pending::<ServerSyncResult<DiscordRestResponse>>,
+            "GET",
+        )
+        .await
+        else {
+            panic!("hanging call must end at the bound");
+        };
+        assert!(error.to_string().contains("lief länger als"), "{error}");
+        assert!(started.elapsed() >= DISCORD_RETRY_CALL_BOUND);
     }
 
     #[test]
