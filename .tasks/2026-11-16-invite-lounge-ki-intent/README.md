@@ -5,10 +5,10 @@ Worktrees: Bots `~/.worktrees/bots-invite-lounge-ki-intent-20261116` (branch `fe
 ## Goal
 In #deadlock-invite no word list decides whether a message is an invite request. Every human message goes to the Brain with the member's lounge state; the Brain picks intent and next step, the bot validates and executes, the Brain writes the text.
 
-Acceptance: Lachs replay gets a sensible reply and, after his answer, an invite; greenlight flow works; plain chat gets no reply; live proof after deploy.
+Acceptance: replay of member A (answer in another member's check-in) gets a sensible reply and, after the answer, an invite; the check-in flow of member B works; plain chat gets no reply; live proof after deploy.
 
 ## Ursache (four layers, proof 2026-11-16)
-- Mechanism: `record_message` creates a request only when `request_kind()` (word lists) hits; a code without an invite word stores `friend_code` and no request. Live row `user:798192827573076019`: `friend_code` 381230343, `request: null`. Lachs's 19:11 reply in greenlight's check-in thread matched neither `request_kind` nor `check_in_open` (state per author) and was dropped. greenlight's unthreaded "nein, noch nicht" (19:02) was dropped too (`last_seen` still his request message); his FA at 19:20 came from the 60-minute auto-dispatch (`is_due`, ROOM_WAIT_SECONDS), not from his answer.
+- Mechanism: `record_message` creates a request only when `request_kind()` (word lists) hits; a code without an invite word stores `friend_code` and no request. A live row of member A had a stored `friend_code` and `request: null`. Member A's reply in member B's check-in thread matched neither `request_kind` nor `check_in_open` (state per author) and was dropped. Member B's unthreaded "nein, noch nicht" was dropped too (`last_seen` still the request message); B's friend request came 18 minutes later from the 60-minute auto-dispatch (`is_due`, ROOM_WAIT_SECONDS), not from the answer.
 - Why possible: intent was inferred from vocabulary; every miss is silent by construction (`Ok(None)`).
 - Why nobody noticed: an ignored message leaves no log line and no row change.
 - Same pattern elsewhere: `is_offer`, `close_word`, `should_reply*`, `has_friend_code`, the backfill `record_history`, `check_in_open` (reply/mention gate for answers).
@@ -20,6 +20,12 @@ Acceptance: Lachs replay gets a sensible reply and, after his answer, an invite;
 ## Rollout
 Brain and bot ship together. The Brain branch removes `discord_invite_lounge`, `discord_invite_check_in`, reply `judged` and notice update `check_in_answer`, which the current bot still sends, and the new bot needs `discord_invite_turn`, reply `decided` and notice updates `confirmed`/`reply`. Order: merge both, deploy the Brain, deploy and restart dl-bot right after.
 
-Outbox cutover: the old bot can leave a transient `check_in_answer` outbox entry (0 rows live on 2026-11-16, 246 lounge rows). The new bot reads it as a retired entry that round-trips unchanged (the CAS parses the stored row and compares the state semantically, not the JSON text) and drops it silently on delivery. Rollback caveat: the old binary cannot read `confirmed`/`reply` outbox entries; drain the outbox before rolling back.
+Outbox cutover: the old bot can leave a transient `check_in_answer` outbox entry (0 rows live on 2026-11-16, 246 lounge rows). The new bot reads it as a retired entry that round-trips unchanged (the CAS parses the stored row and compares the state semantically, not the JSON text) and drops it silently on delivery. Rollback: Brain and bot go back together, because the old bot sends task kinds the new Brain no longer accepts. New rows keep `hint_sent` (always serialized, default false on read), so the old binary parses them, with one exception: it cannot read an outbox entry of kind `confirmed` or `reply`, and a row holding one fails to load for that member. Before switching the bot back, list such rows and wait until the new bot has delivered them, or remove the entries:
+
+```sql
+SELECT k FROM bot.kv_store
+WHERE ns = 'invite_lounge:requests'
+  AND jsonb_path_exists(v::jsonb, '$.outbox[*].update ? (@.kind == "confirmed" || @.kind == "reply")');
+```
 
 Deploy blocker to recheck: live dl-bot ran 59a0ac5f from the unmerged supporter branch.

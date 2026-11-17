@@ -1,17 +1,21 @@
 # Invite lounge KI intent: handover
 
-State 2026-11-17, gate round 3 fixer.
+State 2026-11-17, after the gate round 3 fixer.
 
-- Branch `feat/invite-lounge-ki-intent-20261116`, pins Brain 0ba41619. HEAD: see `git log -1`.
-- Local baseline reds (need a database, not caused by this branch): 4 dl-community DSN-only tests (reaction_roles runtime_gate, privacy runtime_gate, two scrim_signup) and 1 dl-bot faq test (service_faq_v2_repost_loescht_fremde_message_nicht).
+- Branch `feat/invite-lounge-ki-intent-20261116`, HEAD: see `git log -1`. The bot pins Brain 0ba41619.
+- Baseline: locally (no CENTRAL_TEST_DSN) 4 dl-community tests are red (reaction_roles runtime_gate, privacy runtime_gate, two scrim_signup) and every dl-bot test that needs the test database fails in the harness; on ionos with the throwaway database dl-community, dl-central-db and dl-bot are fully green.
+- Workspace clippy with `-D warnings` stops at `#[async_trait]` double_must_use in dl-brain and dl-changelog lib.rs; those files and the lint are not touched by this branch. Plain clippy reports no warning on a line this branch changed.
 
 ## Done in round 3
 
-- Turn path: every failed read (privacy, context, steam link, invite audit) fails the turn and the catch-up retries it; live order per author; start time repaired before each catch-up; catch-up window equals the request window.
-- One home: open phases from `Phase::OPEN`, privacy predicate `PRIVACY_HIDDEN_PREDICATE`, one Discord epoch constant; hidden members leave the tick.
+- Turn path: every failed read fails the turn and the catch-up retries it; live order per author; start time repaired before each catch-up; catch-up window equals the request window.
+- One home per rule: open phases, hidden-member predicate, Discord epoch, friend code validity (`friend_code_id` alone), turn bounding (`dl_brain::brain_api::bounded_turn`), notice mapping (exhaustive match), `http` workspace dependency, FAQ texts bound to `CHECK_IN_CHANNEL_ID` and `CHECK_IN_SECONDS` by a test.
+- Tests that could not fail now fail on regressions: follow-up rerun, Skipped vs Failed, scripted Brain applies the production projection and panics on an unscripted turn, per-turn facts, reply-target detection, maximal turn validates.
+- User texts and docs match the code: check-in rule, invite signposts to the lounge, neutral friend code placeholder, no em dashes in the rewritten FAQ lines.
+- Rollback: `hint_sent` is written again (read with default), README states the procedure for confirmed/reply outbox rows.
+- Privacy: no live friend code or member handles in tests or task docs.
 
 ## Open
 
-1. B3, B4, B6, B7, B8, E1, E4 to E8, F1 texts, F2 to F5, G, H, broker MessageNotFound handler test, tour length in characters.
-2. Full checks, DSN suite for dl-community and dl-central-db on ionos, publish, report.
-3. Integrator: re-pin to the final Brain head, then gate round 3.
+1. Integrator: re-pin to the final Brain head, then gate round 3.
+2. Integrator: run the README rollback query once on the live database before relying on it (it was not run against a database in this round).
