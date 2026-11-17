@@ -98,6 +98,8 @@ pub const STECKBRIEF_BUTTON_EDIT: &str = "Anpassen";
 pub const STECKBRIEF_BUTTON_NO: &str = "Lieber nicht";
 pub const STECKBRIEF_ROUTE_HELP: &str =
     "Der Post geht in <#1426220702054355077>, da schauen die richtigen Leute rein.";
+pub const STECKBRIEF_ROUTE_INVITE: &str =
+    "Der Post geht in <#1464736918951432222>, da schauen die Leute rein, die dich einladen können.";
 pub const STECKBRIEF_ROUTE_CASUAL: &str =
     "Der Post geht in <#1289721245281292291>, mitten ins Geschehen.";
 pub const STECKBRIEF_HOLD_TEXT: &str = "Gerade ist hier wenig los. Ich poste deine Vorstellung, sobald wieder Leute unterwegs sind, dann geht sie nicht unter. Du musst nichts weiter tun.";
@@ -311,21 +313,24 @@ impl ConciergeIntent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SteckbriefRoute {
-    HelpOrInvite,
+    Help,
+    Invite,
     Casual,
 }
 
 impl SteckbriefRoute {
     pub const fn channel_id(self) -> u64 {
         match self {
-            Self::HelpOrInvite => FRAG_DIE_COMMUNITY_CHANNEL_ID,
+            Self::Help => FRAG_DIE_COMMUNITY_CHANNEL_ID,
+            Self::Invite => crate::invite_lounge::CHECK_IN_CHANNEL_ID,
             Self::Casual => ALLGEMEIN_CHANNEL_ID,
         }
     }
 
     pub const fn hint(self) -> &'static str {
         match self {
-            Self::HelpOrInvite => STECKBRIEF_ROUTE_HELP,
+            Self::Help => STECKBRIEF_ROUTE_HELP,
+            Self::Invite => STECKBRIEF_ROUTE_INVITE,
             Self::Casual => STECKBRIEF_ROUTE_CASUAL,
         }
     }
@@ -1132,13 +1137,12 @@ fn forget_core_matches(tokens: &[&str]) -> bool {
 
 pub fn steckbrief_route(text: &str, intent: Option<ConciergeIntent>) -> SteckbriefRoute {
     let lower = text.to_ascii_lowercase();
-    if matches!(intent, Some(ConciergeIntent::Learn))
-        || contains_any(
-            &lower,
-            &["hilfe", "helfen", "coach", "invite", "mitnehmen", "lernen"],
-        )
+    if lower.contains("invite") {
+        SteckbriefRoute::Invite
+    } else if matches!(intent, Some(ConciergeIntent::Learn))
+        || contains_any(&lower, &["hilfe", "helfen", "coach", "mitnehmen", "lernen"])
     {
-        SteckbriefRoute::HelpOrInvite
+        SteckbriefRoute::Help
     } else {
         SteckbriefRoute::Casual
     }
@@ -9572,11 +9576,26 @@ mod tests {
     }
 
     #[test]
-    fn steckbrief_routing_hilfe_invite_zu_frag_die_community_sonst_allgemein() {
+    fn steckbrief_routing_hilfe_zu_frag_die_community_invite_in_die_lounge() {
         assert_eq!(
             steckbrief_route("ich brauche hilfe beim Einstieg", None),
-            SteckbriefRoute::HelpOrInvite
+            SteckbriefRoute::Help
         );
+        assert_eq!(
+            steckbrief_route("Hi, ich suche noch einen Invite, Hilfe wäre super", None),
+            SteckbriefRoute::Invite
+        );
+        assert_eq!(
+            SteckbriefRoute::Invite.channel_id(),
+            crate::invite_lounge::CHECK_IN_CHANNEL_ID
+        );
+        for route in [
+            SteckbriefRoute::Help,
+            SteckbriefRoute::Invite,
+            SteckbriefRoute::Casual,
+        ] {
+            assert!(route.hint().contains(&format!("<#{}>", route.channel_id())));
+        }
         assert_eq!(
             steckbrief_route(
                 "hi, ich stelle mich nur locker vor",
@@ -9586,7 +9605,7 @@ mod tests {
         );
         assert_eq!(
             steckbrief_route("hi", Some(ConciergeIntent::Learn)),
-            SteckbriefRoute::HelpOrInvite
+            SteckbriefRoute::Help
         );
     }
 
@@ -9629,7 +9648,11 @@ mod tests {
         .sum();
         assert!(visible <= 4000, "Components-V2-Textbudget: {visible}");
         let fallback = tour_fallback_text();
-        assert!(fallback.encode_utf16().count() <= 4000);
+        assert!(
+            fallback.chars().count() <= 2000,
+            "{}",
+            fallback.chars().count()
+        );
         assert!(fallback.contains("Community und Streamer"));
         assert!(fallback.ends_with(TOUR_CLOSING_TEXT));
     }

@@ -387,7 +387,7 @@ fn friend_code_modal() -> ModalSpec {
         fields: vec![ModalField {
             custom_id: "friend_code".to_string(),
             label: "Freundescode".to_string(),
-            placeholder: format!("z. B. {STEAM_BOT_FRIEND_CODE}"),
+            placeholder: "z. B. 123456789".to_string(),
             value: None,
             required: true,
             min_length: 1,
@@ -1344,6 +1344,8 @@ mod tests {
         server.abort();
     }
 
+    const TEST_FRIEND_CODE: &str = "123456789";
+
     #[tokio::test]
     async fn friend_code_button_oeffnet_modal_lokal() {
         // Kein Server nötig — der Klick darf NICHT geforwarded werden.
@@ -1353,6 +1355,9 @@ mod tests {
         let modal = reply.modal.expect("modal");
         assert_eq!(modal.custom_id, FRIEND_CODE_MODAL_CUSTOM_ID);
         assert_eq!(modal.fields[0].max_length, 32);
+        assert!(!modal.fields[0]
+            .placeholder
+            .contains(&STEAM_BOT_FRIEND_CODE.to_string()));
     }
 
     #[tokio::test]
@@ -1362,7 +1367,7 @@ mod tests {
         let handler = FriendCodeSubmit { client };
         let mut itx = interaction(FRIEND_CODE_MODAL_CUSTOM_ID);
         itx.options
-            .insert("friend_code".to_string(), json!("820142646"));
+            .insert("friend_code".to_string(), json!(TEST_FRIEND_CODE));
         let reply = handler.handle(itx).await;
         assert_eq!(reply.content.as_deref(), Some("ok"));
         let sent = received.lock().expect("lock");
@@ -1370,7 +1375,7 @@ mod tests {
             sent[0]["interaction"]["custom_id"],
             FRIEND_CODE_SUBMIT_CUSTOM_ID
         );
-        assert_eq!(sent[0]["interaction"]["values"][0], "820142646");
+        assert_eq!(sent[0]["interaction"]["values"][0], TEST_FRIEND_CODE);
         server.abort();
     }
 

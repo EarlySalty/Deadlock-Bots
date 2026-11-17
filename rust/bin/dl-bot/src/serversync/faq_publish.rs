@@ -49,11 +49,11 @@ pub const FAQ_SELECT_PLACEHOLDER: &str = "Wähl deine Frage …";
 pub const FAQ_UNKNOWN_VALUE_MESSAGE: &str =
     "Diese Frage kenne ich nicht mehr — Panel wird gleich aktualisiert.";
 
-pub const FAQ_ANSWER_F1: &str = "**🔑 Wie bekomme ich einen Deadlock-Invite?**\nDer Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.";
+pub const FAQ_ANSWER_F1: &str = "**🔑 Wie bekomme ich einen Deadlock-Invite?**\nDer Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an, dann kommt dein Invite automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite. Pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich der Bot oder jemand aus der Community einladen.";
 pub const FAQ_ANSWER_F2: &str = "**🤝 Muss ich dem Bot eine Steam-Freundschaftsanfrage schicken?**\nNormalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie auf Steam nur annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen\" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.";
 pub const FAQ_ANSWER_F3: &str = "**⏳ Wie lange dauert mein Invite?**\nSobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es in der Regel nur ein paar Stunden — oft schneller. Unsicher, ob alles durch ist? Über das Panel in <#1398021105339334666> kannst du deine Verknüpfung jederzeit neu prüfen lassen. Wenn es deutlich länger hängt, schau in „Mein Invite hängt — was tun?\".";
-pub const FAQ_ANSWER_F4: &str = "**🛠️ Mein Invite hängt — was tun?**\nFast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited\" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, frag in <#1426220702054355077> nach. Bei einem konkreten technischen Problem öffnest du ein Ticket in <#1459628609705738539>.";
-pub const FAQ_ANSWER_F5: &str = "**💌 Kann mich ein Mensch direkt einladen?**\nJa, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Nach einer halben Stunde fragt der Bot nach, ob du schon eine Einladung hast, außer Steam zeigt bis dahin schon eine an. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.";
+pub const FAQ_ANSWER_F4: &str = "**🛠️ Mein Invite hängt — was tun?**\nFast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited\" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, frag in <#1464736918951432222> nach. Bei einem konkreten technischen Problem öffnest du ein Ticket in <#1459628609705738539>.";
+pub const FAQ_ANSWER_F5: &str = "**💌 Kann mich ein Mensch direkt einladen?**\nJa, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Kennt der Bot deinen Code, fragt er nach einer halben Stunde nach, ob du schon eine Einladung hast. Hat dich unser Steam-Bot bis dahin schon eingeladen, spart er sich die Frage, und läuft gerade noch eine Einladung, wartet er sie ab. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.";
 pub const FAQ_ANSWER_F6: &str = "**🚧 Steam sagt „limited account\" — warum kein Invite?**\nDas ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited\" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket in <#1459628609705738539> auf — das Team geht die Optionen mit dir durch.";
 pub const FAQ_ANSWER_F7: &str = "**🔗 Wie verknüpfe ich meinen Steam-Account?**\nGeh in <#1398021105339334666> — der Guide dort führt dich Schritt für Schritt durch: Button klicken, auf der offiziellen Steam-Seite einloggen, Freundschaftsanfrage des Bots annehmen, fertig. Über dasselbe Panel kannst du den Stand jederzeit neu prüfen lassen.";
 pub const FAQ_ANSWER_F8: &str = "**🛡️ Was passiert bei der Verifizierung mit meinen Daten?**\nWas du davon hast: deine echte Rang-Rolle (hält sich ab dann von selbst aktuell), Zugang zu den Ranked-Funktionen (Ranked-Lanes öffnen und Ranked-Gesuchen beitreten) und du kannst Freunde per Invite reinholen. Zur Technik: Die Verknüpfung läuft über den offiziellen Steam-Login (OpenID) — wir sehen nie dein Passwort und haben keinerlei Zugriff auf deinen Account, wir bekommen nur deine Steam-ID. Deine Daten kannst du jederzeit exportieren oder löschen lassen.";
@@ -63,7 +63,7 @@ pub const FAQ_ANSWER_F11: &str = "**🎓 Wie funktioniert das kostenlose Coachin
 pub const FAQ_ANSWER_F12: &str = "**🎯 Wo finde ich Mitspieler?**\nZwei Wege: Poste ein Gesuch in <#1522769149208821881> — Modus, Rang-Bereich und Spielzeit wählst du einfach per Klick, und mit 🔔 kannst du dich benachrichtigen lassen, sobald ein passendes Gesuch reinkommt. Oder spring direkt in eine Voice-Lane: Über das Panel in <#1513468476365209670> öffnest du eine Lane für Normale Lane, Ranked oder Street Brawl (für Ranked brauchst du die Steam-Verknüpfung). Reinsetzen ist ausdrücklich erlaubt — du musst niemanden um Erlaubnis fragen.";
 pub const FAQ_ANSWER_F13: &str = "**🎙️ Wie funktionieren die Voice-Lanes?**\nDu darfst in jede rein — unsere Lanes haben keine Türsteher. Wer eine Lane öffnet, wählt den Modus; bei Ranked ist der Rang-Bereich eine Ansage, kein Schloss. Die Regel dahinter ist einfach: Der Lane-Ersteller entscheidet, wer bleibt — bei Streit entscheiden die Mods. Die Chill-Lanes sind unser rang-egales Wohnzimmer, die Neue-Spieler-Lane ist für alle, die gerade erst anfangen. Nur zuhören ist übrigens auch völlig okay.";
 pub const FAQ_ANSWER_F14: &str = "**🔔 Pings & Benachrichtigungen einstellen**\nOben links über dem Kanalbaum findest du „Kanäle & Rollen\" — dort schaltest du Benachrichtigungs-Rollen selbst an oder aus und kannst auch deine Onboarding-Angaben jederzeit ändern (das sind reine Angaben über dich, keine Berechtigungen). Für einzelne Kanäle gilt der Discord-Standard: Rechtsklick auf den Kanal → Benachrichtigungen anpassen.";
-pub const FAQ_ANSWER_F15: &str = "**🧭 Wo fange ich an — und wo kann ich fragen?**\nFolg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.";
+pub const FAQ_ANSWER_F15: &str = "**🧭 Wo fange ich an und wo kann ich fragen?**\nFolg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account und such dir Mitspieler, in der Reihenfolge und ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaqDefaultEntry {
@@ -160,7 +160,7 @@ pub const FAQ_DEFAULT_ENTRIES: &[FaqDefaultEntry] = &[
     },
     FaqDefaultEntry {
         value: "f15",
-        label: "Wo fange ich an — und wo kann ich fragen?",
+        label: "Wo fange ich an und wo kann ich fragen?",
         emoji: "🧭",
         answer: FAQ_ANSWER_F15,
     },
@@ -949,6 +949,21 @@ label = "Nope"
     fn faq_nennt_den_freundescode_den_die_lounge_als_bot_code_verwirft() {
         let code = format!("**{}**", dl_bridges::steam::STEAM_BOT_FRIEND_CODE);
         assert!(FAQ_ANSWER_F2.contains(&code), "{FAQ_ANSWER_F2}");
+    }
+
+    #[test]
+    fn invite_texte_nennen_lounge_und_nachfrage_aus_dem_code() {
+        use dl_community::invite_lounge::{CHECK_IN_CHANNEL_ID, CHECK_IN_SECONDS};
+        let lounge = format!("<#{CHECK_IN_CHANNEL_ID}>");
+        for answer in [FAQ_ANSWER_F1, FAQ_ANSWER_F4, FAQ_ANSWER_F5, FAQ_ANSWER_F15] {
+            assert!(answer.contains(&lounge), "{answer}");
+        }
+        let delay = match CHECK_IN_SECONDS / 60 {
+            30 => "nach einer halben Stunde",
+            minutes => panic!("FAQ F5 nennt keine Nachfrage nach {minutes} Minuten"),
+        };
+        assert!(FAQ_ANSWER_F5.contains(delay), "{FAQ_ANSWER_F5}");
+        assert!(super::super::regelwerk_publish::REGELWERK_SECTION_WEGWEISER.contains(&lounge));
     }
 
     #[test]

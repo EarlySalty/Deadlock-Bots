@@ -9,7 +9,7 @@ value = 'f1'
 label = 'Wie bekomme ich einen Deadlock-Invite?'
 emoji = '🔑'
 answer = '''**🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.'''
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an, dann kommt dein Invite automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite. Pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich der Bot oder jemand aus der Community einladen.'''
 
 [[options]]
 value = 'f2'
@@ -30,14 +30,14 @@ value = 'f4'
 label = 'Mein Invite hängt — was tun?'
 emoji = '🛠️'
 answer = '''**🛠️ Mein Invite hängt — was tun?**
-Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, frag in <#1426220702054355077> nach. Bei einem konkreten technischen Problem öffnest du ein Ticket in <#1459628609705738539>.'''
+Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, frag in <#1464736918951432222> nach. Bei einem konkreten technischen Problem öffnest du ein Ticket in <#1459628609705738539>.'''
 
 [[options]]
 value = 'f5'
 label = 'Kann mich ein Mensch direkt einladen?'
 emoji = '💌'
 answer = '''**💌 Kann mich ein Mensch direkt einladen?**
-Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Nach einer halben Stunde fragt der Bot nach, ob du schon eine Einladung hast, außer Steam zeigt bis dahin schon eine an. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.'''
+Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Kennt der Bot deinen Code, fragt er nach einer halben Stunde nach, ob du schon eine Einladung hast. Hat dich unser Steam-Bot bis dahin schon eingeladen, spart er sich die Frage, und läuft gerade noch eine Einladung, wartet er sie ab. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.'''
 
 [[options]]
 value = 'f6'
@@ -104,7 +104,7 @@ Oben links über dem Kanalbaum findest du „Kanäle & Rollen" — dort schaltes
 
 [[options]]
 value = 'f15'
-label = 'Wo fange ich an — und wo kann ich fragen?'
+label = 'Wo fange ich an und wo kann ich fragen?'
 emoji = '🧭'
-answer = '''**🧭 Wo fange ich an — und wo kann ich fragen?**
-Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.'''
+answer = '''**🧭 Wo fange ich an und wo kann ich fragen?**
+Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account und such dir Mitspieler, in der Reihenfolge und ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.'''

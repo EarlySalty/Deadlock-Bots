@@ -36,12 +36,12 @@ Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach ei
 | f12 | Wo finde ich Mitspieler? | 🎯 |
 | f13 | Wie funktionieren die Voice-Lanes? | 🎙️ |
 | f14 | Pings & Benachrichtigungen einstellen | 🔔 |
-| f15 | Wo fange ich an — und wo kann ich fragen? | 🧭 |
+| f15 | Wo fange ich an und wo kann ich fragen? | 🧭 |
 
 ## Antworten (ephemeral, V2-Gold-Container; jeweils Titel = Frage fett)
 
 [f1] **🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an, dann kommt dein Invite automatisch. Alternativ frag einfach in <#1464736918951432222> nach einem Invite. Pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich der Bot oder jemand aus der Community einladen.
 
 [f2] **🤝 Muss ich dem Bot eine Steam-Freundschaftsanfrage schicken?**
 Normalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie auf Steam nur annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.
@@ -50,10 +50,10 @@ Normalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfr
 Sobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es in der Regel nur ein paar Stunden — oft schneller. Unsicher, ob alles durch ist? Über das Panel in <#1398021105339334666> kannst du deine Verknüpfung jederzeit neu prüfen lassen. Wenn es deutlich länger hängt, schau in „Mein Invite hängt — was tun?".
 
 [f4] **🛠️ Mein Invite hängt — was tun?**
-Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach ein Ticket in <#1459628609705738539> auf: Da schaut ein Mensch drauf.
+Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1464736918951432222> oder mach ein Ticket in <#1459628609705738539> auf: Da schaut ein Mensch drauf.
 
 [f5] **💌 Kann mich ein Mensch direkt einladen?**
-Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Nach einer halben Stunde fragt der Bot nach, ob du schon eine Einladung hast, außer Steam zeigt bis dahin schon eine an.
+Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Ist dein Steam-Account nicht verknüpft, häng deinen Steam-Freundescode an. Kennt der Bot deinen Code, fragt er nach einer halben Stunde nach, ob du schon eine Einladung hast. Hat dich unser Steam-Bot bis dahin schon eingeladen, spart er sich die Frage, und läuft gerade noch eine Einladung, wartet er sie ab. Antwortest du mit „nein“, lädt er dich direkt ein, wenn ihr schon Steam-Freunde seid. Sonst schickt er dir erst eine Freundschaftsanfrage, und sobald du sie annimmst, kommt die Einladung.
 
 [f6] **🚧 Steam sagt „limited account" — warum kein Invite?**
 Das ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket in <#1459628609705738539> auf — das Team geht die Optionen mit dir durch.
@@ -82,5 +82,5 @@ Du darfst in jede rein — unsere Lanes haben keine Türsteher. Wer eine Lane ö
 [f14] **🔔 Pings & Benachrichtigungen einstellen**
 Oben links über dem Kanalbaum findest du „Kanäle & Rollen" — dort schaltest du Benachrichtigungs-Rollen selbst an oder aus und kannst auch deine Onboarding-Angaben jederzeit ändern (das sind reine Angaben über dich, keine Berechtigungen). Für einzelne Kanäle gilt der Discord-Standard: Rechtsklick auf den Kanal → Benachrichtigungen anpassen.
 
-[f15] **🧭 Wo fange ich an — und wo kann ich fragen?**
-Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Und für alles andere gilt: <#1426220702054355077> ist genau dafür da. Es gibt keine dummen Fragen, und hier antworten dir echte Menschen — normalerweise noch am selben Tag.
+[f15] **🧭 Wo fange ich an und wo kann ich fragen?**
+Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account und such dir Mitspieler, in der Reihenfolge und ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen passt <#1426220702054355077>, für einen Deadlock-Invite <#1464736918951432222>.
