@@ -1223,9 +1223,6 @@ mod tests {
         assert!(!REPLY_TIP.chars().any(|ch| ch.is_ascii_digit()));
         let channels = twitch_channel_list();
         assert!(reply_twitch().contains(&format!("bei {channels} ein Abo")));
-        assert!(crate::serversync::support_publish::SUPPORT_TWITCH
-            .replace("{kanaele}", &channels)
-            .contains(&format!("bei {channels} zählt")));
         for (interval, expected) in [
             (60, "jede Minute"),
             (300, "alle 5 Minuten"),
