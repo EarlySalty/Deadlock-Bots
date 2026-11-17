@@ -435,6 +435,12 @@ fn settle_scan_truncation(
     Ok(())
 }
 
+fn history_scan_cap_error(label: &str) -> ServerSyncError {
+    ServerSyncError::bad_request(format!(
+        "{label}: Der Verlauf ist länger als {HISTORY_SCAN_MAX_PAGES} Seiten und wurde nicht vollständig geprüft. Apply blockiert gegen Duplikate."
+    ))
+}
+
 fn stray_ids_outside_stored(stored: &[u64], discovered: &[u64]) -> Vec<u64> {
     discovered
         .iter()
@@ -1212,7 +1218,7 @@ impl ServerSyncService {
     }
 
     async fn fetch_native_onboarding_config(&self) -> ServerSyncResult<Value> {
-        let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let url = self.discord_api_url(&format!("/guilds/{}/onboarding", self.guild_id));
         let response = self
             .http_client
             .get(url)
@@ -1236,7 +1242,7 @@ impl ServerSyncService {
         &self,
         config: &NativeOnboardingConfig,
     ) -> ServerSyncResult<()> {
-        let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let url = self.discord_api_url(&format!("/guilds/{}/onboarding", self.guild_id));
         let payload = native_onboarding_put_payload(config);
         let response = self
             .http_client
@@ -1261,10 +1267,7 @@ impl ServerSyncService {
     }
 
     async fn fetch_server_guide_config(&self) -> ServerSyncResult<Value> {
-        let url = format!(
-            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
-            self.guild_id
-        );
+        let url = self.discord_api_url(&format!("/guilds/{}/new-member-welcome", self.guild_id));
         let response = self
             .http_client
             .get(url)
@@ -1275,10 +1278,7 @@ impl ServerSyncService {
     }
 
     async fn put_server_guide_config(&self, config: &ServerGuideConfig) -> ServerSyncResult<()> {
-        let url = format!(
-            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
-            self.guild_id
-        );
+        let url = self.discord_api_url(&format!("/guilds/{}/new-member-welcome", self.guild_id));
         let response = self
             .http_client
             .put(url)
@@ -1554,10 +1554,9 @@ impl ServerSyncService {
         // API v10 kennt aktive Threads nur noch guild-weit (der Kanal-Endpoint
         // liefert 404); daher guild-weit holen und auf den Regelwerk-Kanal filtern.
         let active: DiscordThreadPage = self
-            .discord_get_json(format!(
-                "{DISCORD_API_BASE}/guilds/{}/threads/active",
-                self.guild_id
-            ))
+            .discord_get_json(
+                self.discord_api_url(&format!("/guilds/{}/threads/active", self.guild_id)),
+            )
             .await?;
         let rules_channel_id = RULES_CHANNEL_ID.to_string();
         let active_in_rules = active
@@ -1569,10 +1568,13 @@ impl ServerSyncService {
 
         for endpoint in ["archived/public", "archived/private"] {
             let mut before: Option<DateTime<chrono::FixedOffset>> = None;
-            loop {
-                let mut url = format!(
-                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit={DISCORD_HISTORY_PAGE_LIMIT}"
-                );
+            for page_index in 0.. {
+                if page_index == HISTORY_SCAN_MAX_PAGES {
+                    return Err(history_scan_cap_error("Regelwerk-Threads"));
+                }
+                let mut url = self.discord_api_url(&format!(
+                    "/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit={DISCORD_HISTORY_PAGE_LIMIT}"
+                ));
                 if let Some(before) = before {
                     url.push_str("&before=");
                     url.push_str(
@@ -1603,9 +1605,13 @@ impl ServerSyncService {
     ) -> ServerSyncResult<Vec<RegelwerkBotMessage>> {
         let mut messages = Vec::new();
         let mut before: Option<u64> = None;
-        loop {
-            let mut url =
-                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}");
+        for page_index in 0.. {
+            if page_index == HISTORY_SCAN_MAX_PAGES {
+                return Err(history_scan_cap_error("Regelwerk"));
+            }
+            let mut url = self.discord_api_url(&format!(
+                "/channels/{RULES_CHANNEL_ID}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
+            ));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -1653,7 +1659,9 @@ impl ServerSyncService {
         message_id: u64,
         content: &str,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{message_id}");
+        let url = self.discord_api_url(&format!(
+            "/channels/{RULES_CHANNEL_ID}/messages/{message_id}"
+        ));
         let payload = json!({ "content": content });
         let response = discord_regelwerk_send_with_retry(
             || {
@@ -1683,7 +1691,7 @@ impl ServerSyncService {
     async fn post_regelwerk_message(&self, content: &str) -> ServerSyncResult<u64> {
         let message: DiscordMessageWriteResponse = self
             .discord_post_json(
-                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages"),
+                self.discord_api_url(&format!("/channels/{RULES_CHANNEL_ID}/messages")),
                 json!({ "content": content }),
             )
             .await?;
@@ -2814,9 +2822,9 @@ impl ServerSyncService {
         let mut deleted = Vec::new();
         for message_id in message_ids {
             if self
-                .discord_delete(format!(
-                    "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
-                ))
+                .discord_delete(
+                    self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}")),
+                )
                 .await?
             {
                 deleted.push(message_id);
@@ -2832,8 +2840,13 @@ impl ServerSyncService {
     ) -> ServerSyncResult<BTreeMap<String, Vec<u64>>> {
         let mut messages = BTreeMap::new();
         let mut before: Option<u64> = None;
-        loop {
-            let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}");
+        for page_index in 0.. {
+            if page_index == HISTORY_SCAN_MAX_PAGES {
+                return Err(history_scan_cap_error("Welcome"));
+            }
+            let mut url = self.discord_api_url(&format!(
+                "/channels/{channel_id}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}"
+            ));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -2894,7 +2907,7 @@ impl ServerSyncService {
         message_id: u64,
         section: &welcome_publish::WelcomeSectionOutput,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
         let response = self
             .send_welcome_message_payload("PATCH", url, &section.payload)
             .await?;
@@ -2911,7 +2924,7 @@ impl ServerSyncService {
         channel_id: u64,
         section: &welcome_publish::WelcomeSectionOutput,
     ) -> ServerSyncResult<u64> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
         let response = self
             .send_welcome_message_payload("POST", url, &section.payload)
             .await?;
@@ -3660,7 +3673,7 @@ impl ServerSyncOps for ServerSyncService {
         let mut threads_deleted = 0usize;
         for (index, thread_id) in thread_ids.iter().enumerate() {
             if self
-                .discord_delete(format!("{DISCORD_API_BASE}/channels/{thread_id}"))
+                .discord_delete(self.discord_api_url(&format!("/channels/{thread_id}")))
                 .await?
             {
                 threads_deleted += 1;
@@ -3673,10 +3686,10 @@ impl ServerSyncOps for ServerSyncService {
         let mut bot_messages_deleted = 0usize;
         for (index, message) in bot_messages.iter().enumerate() {
             if self
-                .discord_delete(format!(
-                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{}",
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{RULES_CHANNEL_ID}/messages/{}",
                     message.message_id
-                ))
+                )))
                 .await?
             {
                 bot_messages_deleted += 1;
@@ -5662,9 +5675,16 @@ fn archive_before_cursor(
 ) -> ServerSyncResult<Option<DateTime<chrono::FixedOffset>>> {
     let oldest = threads
         .last()
-        .and_then(|thread| thread.thread_metadata.as_ref())
-        .and_then(|metadata| metadata.archive_timestamp.as_deref())
-        .map(|stamp| {
+        .map(|thread| {
+            let stamp = thread
+                .thread_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.archive_timestamp.as_deref())
+                .ok_or_else(|| {
+                    ServerSyncError::internal(
+                        "Discord-Thread-Archiv liefert keinen Archivzeitpunkt".to_string(),
+                    )
+                })?;
             DateTime::parse_from_rfc3339(stamp).map_err(|err| {
                 ServerSyncError::internal(format!(
                     "Discord-Thread-Archiv liefert ungültigen Zeitstempel `{stamp}`: {err}"
@@ -5693,14 +5713,34 @@ fn history_before_cursor(
 }
 
 async fn discord_regelwerk_send_with_retry<S, Fut>(
-    mut send: S,
+    send: S,
     method: &str,
 ) -> ServerSyncResult<DiscordRestResponse>
 where
     S: FnMut() -> Fut,
     Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
 {
+    let bound = crate::discord_pages::discord_call_timeout();
     let budget = Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS);
+    tokio::time::timeout(bound, discord_send_within_wait_budget(send, method, budget))
+        .await
+        .map_err(|_| {
+            ServerSyncError::internal(format!(
+                "Discord {method} lief länger als {} ms",
+                bound.as_millis()
+            ))
+        })?
+}
+
+async fn discord_send_within_wait_budget<S, Fut>(
+    mut send: S,
+    method: &str,
+    budget: Duration,
+) -> ServerSyncResult<DiscordRestResponse>
+where
+    S: FnMut() -> Fut,
+    Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
+{
     let mut waited = Duration::ZERO;
     for attempt in 1..=REGELWERK_DISCORD_MAX_ATTEMPTS {
         let response = send().await?;
@@ -5711,7 +5751,7 @@ where
             return Ok(response);
         }
         let retry_after = regelwerk_retry_after(&response).unwrap_or(Duration::from_secs(1));
-        if waited + retry_after > budget {
+        if waited.saturating_add(retry_after) > budget {
             tracing::warn!(
                 method,
                 attempt,
@@ -5755,9 +5795,8 @@ fn regelwerk_retry_after(response: &DiscordRestResponse) -> Option<Duration> {
 }
 
 fn retry_after_duration(seconds: f64) -> Option<Duration> {
-    seconds
-        .is_finite()
-        .then(|| Duration::from_secs_f64(seconds.max(0.0)))
+    (!seconds.is_nan())
+        .then(|| Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(Duration::MAX))
 }
 
 fn retry_after_from_body(body: &[u8]) -> Option<f64> {
@@ -10560,6 +10599,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             archive_before_cursor(first, &[thread("2026-11-02T10:00:00.000000+00:00")]).is_err()
         );
         assert!(archive_before_cursor(first, &[thread("kein Datum")]).is_err());
+        let without_metadata: DiscordThread =
+            serde_json::from_value(json!({"id": "2"})).expect("thread without metadata");
+        assert!(archive_before_cursor(first, &[without_metadata]).is_err());
+        assert_eq!(archive_before_cursor(first, &[]).expect("empty page"), None);
     }
 
     #[test]
@@ -10574,6 +10617,63 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let retry_after = regelwerk_retry_after(&response).expect("retry-after header");
 
         assert_eq!(retry_after.as_millis(), 250);
+        for (raw, expected) in [
+            ("inf", Some(Duration::MAX)),
+            ("1e30", Some(Duration::MAX)),
+            ("-3", Some(Duration::ZERO)),
+            ("NaN", None),
+        ] {
+            response.headers.insert(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_static(raw),
+            );
+            assert_eq!(regelwerk_retry_after(&response), expected, "{raw}");
+        }
+    }
+
+    fn rate_limited_sender(
+        retry_after: f64,
+        attempts: Arc<Mutex<usize>>,
+    ) -> impl FnMut() -> std::pin::Pin<
+        Box<dyn Future<Output = ServerSyncResult<DiscordRestResponse>> + Send>,
+    > {
+        move || {
+            let attempts = Arc::clone(&attempts);
+            Box::pin(async move {
+                *attempts.lock().expect("attempts") += 1;
+                Ok(DiscordRestResponse::for_test(
+                    reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    json!({"retry_after": retry_after}).to_string(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_retry_gibt_429_bei_riesiger_wartezeit_ohne_panik_zurueck() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let response = discord_regelwerk_send_with_retry(
+            rate_limited_sender(1e30, Arc::clone(&attempts)),
+            "GET",
+        )
+        .await
+        .expect("429 response");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 1);
+    }
+
+    #[tokio::test]
+    async fn discord_retry_summiert_die_wartezeiten_gegen_das_budget() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let response = discord_send_within_wait_budget(
+            rate_limited_sender(0.006, Arc::clone(&attempts)),
+            "GET",
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("429 response");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 2);
     }
 
     #[test]
@@ -11372,7 +11472,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
     #[tokio::test]
     async fn history_scans_melden_den_abbruch_nach_der_letzten_seite() {
-        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
         for (count, expected_ids, expected_truncated) in
             [(cap - 1, cap - 1, false), (cap + 1, cap, true)]
         {
@@ -11391,6 +11491,16 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .await
                 .expect("legacy scan");
             assert_eq!(legacy.truncated, expected_truncated);
+
+            let welcome = service.fetch_welcome_marker_message_ids(7, 42).await;
+            let regelwerk = service.fetch_regelwerk_bot_messages(42, None).await;
+            assert_eq!(welcome.is_err(), expected_truncated, "{:?}", welcome.err());
+            assert_eq!(
+                regelwerk.is_err(),
+                expected_truncated,
+                "{:?}",
+                regelwerk.err()
+            );
         }
     }
 
@@ -12919,7 +13029,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 }
             }
 
-            let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+            let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
             for index in 0..stored.len() {
                 dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &$id_key(index))
                     .await
@@ -13922,7 +14032,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             );
         }
 
-        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
         let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
         let mut long_full = own_history(cap + 1);
         long_full.extend(voice_ux_fake_panel_messages(&planned));
