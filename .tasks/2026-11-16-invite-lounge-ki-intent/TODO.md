@@ -4,7 +4,7 @@ State 2026-11-17, after the gate round 3 fixer.
 
 - Branch `feat/invite-lounge-ki-intent-20261116`, HEAD: see `git log -1`. The bot pins Brain 0ba41619.
 - Baseline: locally (no CENTRAL_TEST_DSN) 4 dl-community tests are red (reaction_roles runtime_gate, privacy runtime_gate, two scrim_signup) and every dl-bot test that needs the test database fails in the harness; on ionos with the throwaway database dl-community, dl-central-db and dl-bot are fully green.
-- Workspace clippy with `-D warnings` stops at `#[async_trait]` double_must_use in dl-brain and dl-changelog lib.rs; those files and the lint are not touched by this branch. Plain clippy reports no warning on a line this branch changed.
+- Workspace clippy with `-D warnings` stops at `#[async_trait]` double_must_use on the trait declarations in dl-brain and dl-changelog lib.rs. The branch changes neither those trait lines nor the async-trait version, and dl-changelog (no branch diff) fails the same way, so it comes from the toolchain. Plain clippy reports no warning on a line this branch changed.
 
 ## Done in round 3
 

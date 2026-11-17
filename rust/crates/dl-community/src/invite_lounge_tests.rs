@@ -2420,6 +2420,10 @@ fn freundescode_prueft_bereich_und_bot_code() {
     );
     assert_eq!(friend_code("0000000000"), None);
     assert_eq!(friend_code("seit 3 Tagen, Versuch 99999"), None);
+    assert_eq!(
+        friend_code(&format!("seit 3 Tagen, Code {CODE}")),
+        Some(CODE.into())
+    );
     assert_eq!(friend_code("100000"), Some("100000".into()));
     assert_eq!(friend_code("76561197960265729"), None);
     assert_eq!(friend_code("Code: 00123456789"), Some(CODE.into()));
