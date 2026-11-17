@@ -14,7 +14,7 @@ use brain_contracts::bot_tasks::{
     MAX_READABLE_CHANNELS, MAX_TASK_TEXT_CHARS,
 };
 use brain_contracts::image::QueryImage;
-use brain_contracts::invite::{InviteChatLine, InviteTurn, MAX_TURN_RECENT_LINES};
+use brain_contracts::invite::{InviteChatLine, InviteTurn};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -255,7 +255,7 @@ fn bounded_turn(turn: &InviteTurn) -> InviteTurn {
         })
     };
     let mut recent: Vec<InviteChatLine> = turn.recent.iter().filter_map(line).collect();
-    recent.drain(..recent.len().saturating_sub(MAX_TURN_RECENT_LINES));
+    recent.drain(..recent.len().saturating_sub(MAX_CHAT_LINES));
     InviteTurn {
         message: turn.message.chars().take(MAX_TASK_TEXT_CHARS).collect(),
         reply_to: turn.reply_to.as_ref().and_then(line),
@@ -1053,7 +1053,7 @@ mod tests {
             text: text.into(),
         };
         let mut recent = vec![line("  ")];
-        recent.extend((0..MAX_TURN_RECENT_LINES + 3).map(|index| line(&index.to_string())));
+        recent.extend((0..MAX_CHAT_LINES + 3).map(|index| line(&index.to_string())));
         let turn = InviteTurn {
             message: "x".repeat(MAX_TASK_TEXT_CHARS + 5),
             reply_to: Some(line(&"y".repeat(MAX_CHAT_LINE_CHARS + 5))),
@@ -1069,7 +1069,7 @@ mod tests {
         let bounded = bounded_turn(&turn);
         assert!(bounded.valid());
         assert_eq!(bounded.message.chars().count(), MAX_TASK_TEXT_CHARS);
-        assert_eq!(bounded.recent.len(), MAX_TURN_RECENT_LINES);
+        assert_eq!(bounded.recent.len(), MAX_CHAT_LINES);
         assert_eq!(bounded.recent[0].text, "3");
         assert_eq!(
             bounded

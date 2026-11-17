@@ -1183,14 +1183,15 @@ impl InviteLoungeWatcher {
                 }
             }
         }
-        let target = entry
-            .channel_id
-            .map_or(dl_brain::NoticeTarget::DirectMessage, |channel_id| {
-                dl_brain::NoticeTarget::Reply {
-                    channel_id,
-                    message_id: entry.request_message_id,
-                }
-            });
+        let target =
+            entry
+                .channel_id
+                .map_or(dl_brain::NoticeTarget::DirectMessage {}, |channel_id| {
+                    dl_brain::NoticeTarget::Reply {
+                        channel_id,
+                        message_id: entry.request_message_id,
+                    }
+                });
         let task = dl_brain::DiscordConversation::InviteNotice {
             notice: dl_brain::InviteNotice {
                 idempotency_key: entry.key.clone(),
@@ -1796,7 +1797,7 @@ fn build_turn(
     earlier.sort_by_key(|message| message.message_id);
     earlier.dedup_by_key(|message| message.message_id);
     let mut recent: Vec<InviteChatLine> = earlier.into_iter().filter_map(line).collect();
-    recent.drain(..recent.len().saturating_sub(dl_brain::MAX_TURN_RECENT_LINES));
+    recent.drain(..recent.len().saturating_sub(dl_brain::MAX_CHAT_LINES));
     let reply_to = event
         .reply_message_id
         .and_then(|id| {

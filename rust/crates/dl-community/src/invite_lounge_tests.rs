@@ -490,7 +490,7 @@ async fn lachs_antwort_im_fremden_check_in_wird_gefragt_und_nein_loest_die_einla
     assert!(!turn.member.code_in_message);
     assert_eq!(lounge.calls().await, 0);
     let (_, reply) = notices(&lounge.brain).remove(0);
-    assert_eq!(reply.update, InviteLoungeUpdate::Reply);
+    assert_eq!(reply.update, InviteLoungeUpdate::Reply {});
     assert_eq!(
         reply.answer.as_deref(),
         Some("Hast du schon eine Einladung bekommen?")
@@ -523,7 +523,7 @@ async fn lachs_antwort_im_fremden_check_in_wird_gefragt_und_nein_loest_die_einla
     );
     assert_eq!(
         updates(&lounge.brain),
-        vec![InviteLoungeUpdate::Reply, sent()]
+        vec![InviteLoungeUpdate::Reply {}, sent()]
     );
     assert!(lounge.outbox().await.is_empty());
 }
@@ -547,7 +547,7 @@ async fn greenlight_nachfrage_nach_dreissig_minuten_und_nein_ohne_antwortbezug_l
     lounge.poll(NOW + CHECK_IN_SECONDS - 1).await;
     assert!(notices(&lounge.brain).is_empty());
     lounge.poll(NOW + CHECK_IN_SECONDS).await;
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn {}]);
     assert_eq!(lounge.calls().await, 0);
     lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
     lounge
@@ -555,11 +555,14 @@ async fn greenlight_nachfrage_nach_dreissig_minuten_und_nein_ohne_antwortbezug_l
         .await;
     let turn = turns(&lounge.brain).remove(1);
     assert_eq!(turn.member.phase, InviteRequestPhase::CheckInAsked);
-    assert_eq!(turn.member.last_update, Some(InviteLoungeUpdate::CheckIn));
+    assert_eq!(
+        turn.member.last_update,
+        Some(InviteLoungeUpdate::CheckIn {})
+    );
     assert_eq!(lounge.calls().await, 1);
     assert_eq!(
         updates(&lounge.brain),
-        vec![InviteLoungeUpdate::CheckIn, sent()]
+        vec![InviteLoungeUpdate::CheckIn {}, sent()]
     );
     assert_eq!(
         lounge
@@ -589,12 +592,12 @@ async fn ja_auf_die_nachfrage_schliesst_ohne_einladung() {
         lounge.poll(NOW + 7200).await;
         assert_eq!(lounge.calls().await, 0);
         let closing = match text {
-            Some(_) => InviteLoungeUpdate::Reply,
+            Some(_) => InviteLoungeUpdate::Reply {},
             None => Notice::Confirmed.update(),
         };
         assert_eq!(
             updates(&lounge.brain),
-            vec![InviteLoungeUpdate::CheckIn, closing]
+            vec![InviteLoungeUpdate::CheckIn {}, closing]
         );
         let state = lounge.store.state().await;
         assert_eq!(
@@ -648,7 +651,7 @@ async fn schweigen_loest_nie_eine_einladung_aus() {
         lounge.poll(at).await;
     }
     assert_eq!(lounge.calls().await, 0);
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn {}]);
     assert_eq!(
         lounge
             .store
@@ -692,7 +695,7 @@ async fn code_nachfrage_und_fortsetzung_mit_code() {
     );
     assert_eq!(
         updates(&lounge.brain),
-        vec![InviteLoungeUpdate::Reply, sent()]
+        vec![InviteLoungeUpdate::Reply {}, sent()]
     );
 }
 
@@ -735,7 +738,7 @@ async fn bereits_eingeladene_bekommen_hilfe_statt_einladung() {
         .await;
     assert!(turns(&lounge.brain)[0].member.already_invited);
     assert_eq!(lounge.calls().await, 0);
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply {}]);
     let state = lounge.store.state().await;
     assert_eq!(state.last_seen, 2);
     assert_eq!(state.request, None);
@@ -855,17 +858,18 @@ async fn fehlende_bot_id_bricht_ab_ohne_brain() {
 
 #[test]
 fn turn_text_ersetzt_erwaehnungen_und_haelt_die_grenzen_ein() {
-    let mut context: Vec<LoungeMessage> = (1..=20)
+    let lines = dl_brain::MAX_CHAT_LINES as u64 + 5;
+    let mut context: Vec<LoungeMessage> = (1..=lines)
         .map(|id| from(OTHER, message(id, NOW, &format!("Zeile {id}"))))
         .collect();
     context.push(from(
         OTHER,
-        message(21, NOW, &"x".repeat(MAX_CHAT_LINE_CHARS + 10)),
+        message(lines + 1, NOW, &"x".repeat(MAX_CHAT_LINE_CHARS + 10)),
     ));
-    context.push(from(OTHER, message(22, NOW, "   ")));
-    context.push(from(OTHER, message(40, NOW, "später")));
+    context.push(from(OTHER, message(lines + 2, NOW, "   ")));
+    context.push(from(OTHER, message(lines + 20, NOW, "später")));
     let mut event = message(
-        30,
+        lines + 10,
         NOW,
         &format!(
             "<@99> <@!7> <@8> <@&5> <#6> {}",
@@ -879,7 +883,7 @@ fn turn_text_ersetzt_erwaehnungen_und_haelt_die_grenzen_ein() {
         .message
         .starts_with("@Bot @Mitglied @jemand @Rolle #kanal y"));
     assert_eq!(turn.message.chars().count(), MAX_TASK_TEXT_CHARS);
-    assert_eq!(turn.recent.len(), dl_brain::MAX_TURN_RECENT_LINES);
+    assert_eq!(turn.recent.len(), dl_brain::MAX_CHAT_LINES);
     assert_eq!(
         turn.recent.last().map(|line| line.text.chars().count()),
         Some(MAX_CHAT_LINE_CHARS)
@@ -1265,7 +1269,7 @@ async fn antwort_eines_helfers_ersetzt_die_nachfrage_nicht() {
     answer.reply_message_id = Some(1);
     lounge.port.history.lock().await.push(answer);
     lounge.poll(NOW + CHECK_IN_SECONDS).await;
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn {}]);
     assert_eq!(lounge.calls().await, 0);
 }
 
@@ -1583,7 +1587,7 @@ async fn ohne_kanal_geht_die_meldung_als_dm() {
         .expect("Meldung zugestellt");
     let notices = notices(&lounge.brain);
     assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].1.target, NoticeTarget::DirectMessage);
+    assert_eq!(notices[0].1.target, NoticeTarget::DirectMessage {});
     assert!(lounge.outbox().await.is_empty());
 }
 
@@ -1956,7 +1960,7 @@ async fn abgelehnte_brain_nachfrage_gibt_den_claim_frei_und_der_timer_fragt_spae
     lounge.poll(NOW + 3 * CHECK_IN_SECONDS).await;
     assert_eq!(
         updates(&lounge.brain),
-        vec![InviteLoungeUpdate::Reply, InviteLoungeUpdate::CheckIn]
+        vec![InviteLoungeUpdate::Reply {}, InviteLoungeUpdate::CheckIn {}]
     );
     assert!(lounge.store.state().await.status.asked());
     assert_eq!(lounge.calls().await, 0);
@@ -2020,7 +2024,7 @@ async fn bestaetigung_schliesst_auch_waehrend_steam_wartet_oder_versendet() {
     let state = lounge.store.state().await;
     assert_eq!(phase(&state), Some(Phase::Attempted));
     assert_eq!(state.status.wait, None);
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply {}]);
     assert!(lounge.store.progress_queries.lock().await.is_empty());
     assert_eq!(lounge.calls().await, 0);
 
@@ -2084,7 +2088,7 @@ async fn veraltete_entscheidung_wird_gegen_den_neuen_stand_verworfen() {
         false,
     )
     .await;
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn {}]);
     let state = lounge.store.state().await;
     assert_eq!(state.last_seen, 2);
     assert!(state.outbox.is_empty());
@@ -2102,7 +2106,7 @@ async fn veraltete_entscheidung_wird_gegen_den_neuen_stand_verworfen() {
     assert_eq!(phase(&state), Some(Phase::Attempted));
     assert_eq!(
         updates(&lounge.brain),
-        vec![InviteLoungeUpdate::CheckIn, InviteLoungeUpdate::Reply]
+        vec![InviteLoungeUpdate::CheckIn {}, InviteLoungeUpdate::Reply {}]
     );
     assert_eq!(lounge.calls().await, 0);
 }
@@ -2190,7 +2194,7 @@ async fn ja_ohne_offene_bitte_antwortet_nur_mit_text() {
     lounge
         .post(message(1, NOW, "hab Deadlock schon, danke"), NOW)
         .await;
-    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply]);
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::Reply {}]);
     assert_eq!(lounge.store.state().await.request, None);
 
     let lounge = setup();

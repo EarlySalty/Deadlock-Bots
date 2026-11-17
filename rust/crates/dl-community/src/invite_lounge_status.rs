@@ -47,8 +47,8 @@ impl Notice {
             Self::InvalidCode => problem(InviteProblem::InvalidFriendCode),
             Self::Rejected => problem(InviteProblem::SteamRejected),
             Self::NotAccepted => problem(InviteProblem::FriendRequestNotAccepted),
-            Self::CheckIn => InviteLoungeUpdate::CheckIn,
-            Self::Confirmed => InviteLoungeUpdate::Confirmed,
+            Self::CheckIn => InviteLoungeUpdate::CheckIn {},
+            Self::Confirmed => InviteLoungeUpdate::Confirmed {},
         }
     }
 
@@ -137,7 +137,7 @@ impl OutboxEntry {
             format!("invite-lounge:{message_id}:reply"),
             message_id,
             Some(channel_id),
-            InviteLoungeUpdate::Reply,
+            InviteLoungeUpdate::Reply {},
             already_invited,
         );
         entry.answer = Some(text);
@@ -609,12 +609,12 @@ mod tests {
         assert!(check_in_age(7 * 24 * 60 * 60));
         assert_eq!(check_in_step(false), CheckIn::Ask);
         assert_eq!(check_in_step(true), CheckIn::AlreadyInvited);
-        assert_eq!(Notice::CheckIn.update(), InviteLoungeUpdate::CheckIn);
+        assert_eq!(Notice::CheckIn.update(), InviteLoungeUpdate::CheckIn {});
     }
 
     #[test]
     fn bestaetigung_meldet_den_eingang() {
-        assert_eq!(Notice::Confirmed.update(), InviteLoungeUpdate::Confirmed);
+        assert_eq!(Notice::Confirmed.update(), InviteLoungeUpdate::Confirmed {});
     }
 
     #[test]
@@ -642,7 +642,10 @@ mod tests {
         let json = serde_json::to_string(&current).expect("json");
         assert!(json.contains(r#""update":{"kind":"confirmed"}"#), "{json}");
         let back: OutboxEntry = serde_json::from_str(&json).expect("eintrag");
-        assert_eq!(back.update.current(), Some(InviteLoungeUpdate::Confirmed));
+        assert_eq!(
+            back.update.current(),
+            Some(InviteLoungeUpdate::Confirmed {})
+        );
     }
 
     #[test]
@@ -652,7 +655,7 @@ mod tests {
         let reply = OutboxEntry::reply(60, 1, "Pack noch deinen Code dazu :)".into(), false, None);
         assert_eq!(reply.key, "invite-lounge:60:reply");
         assert_eq!(reply.request_message_id, 60);
-        assert_eq!(reply.update.current(), Some(InviteLoungeUpdate::Reply));
+        assert_eq!(reply.update.current(), Some(InviteLoungeUpdate::Reply {}));
         assert_eq!(
             reply.answer.as_deref(),
             Some("Pack noch deinen Code dazu :)")

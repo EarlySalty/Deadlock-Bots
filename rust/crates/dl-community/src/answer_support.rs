@@ -336,7 +336,7 @@ pub(crate) mod test_brain {
     fn delivered(target: &NoticeTarget) -> ConversationReply {
         let message_id = match target {
             NoticeTarget::Reply { message_id, .. } => message_id + 200_000,
-            NoticeTarget::DirectMessage => 300_000,
+            NoticeTarget::DirectMessage {} => 300_000,
         };
         ConversationReply::Delivered {
             content: "Brain-Status".into(),
