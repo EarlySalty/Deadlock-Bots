@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use crate::web::{err_text, ok_json, DashboardApp};
 
 static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Antwort, wenn der Collector noch nie lief (Datei fehlt) — wie das Original.
 fn unavailable() -> Value {
@@ -99,7 +100,7 @@ pub async fn repo_activity_refresh(
             return err_text(500, "Collector-Start fehlgeschlagen");
         }
     };
-    let run = match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await {
+    let run = match tokio::time::timeout(REFRESH_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(err)) => {
             tracing::error!(%err, "dl-repostats Lauf fehlgeschlagen");
