@@ -53,7 +53,7 @@ Sobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es in der Reg
 Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach ein Ticket in <#1459628609705738539> auf: Da schaut ein Mensch drauf.
 
 [f5] **💌 Kann mich ein Mensch direkt einladen?**
-Ja — Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Meldet sich nach einer halben Stunde niemand, fragt der Bot nach, ob du schon eine Einladung hast.
+Ja, Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1464736918951432222>. Nach einer halben Stunde fragt der Bot nach, ob du schon eine Einladung hast, außer Steam zeigt bis dahin schon eine an.
 
 [f6] **🚧 Steam sagt „limited account" — warum kein Invite?**
 Das ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket in <#1459628609705738539> auf — das Team geht die Optionen mit dir durch.

@@ -14,7 +14,7 @@ Zusätzlich gibt es das AI-Onboarding-Panel mit `Persönliche Tour starten` (3 k
 
 1. Schreib eine nette Frage in den Kanal („mag mich wer einladen? :)") und poste deinen **Steam-Freundescode** dazu (findest du in Steam unter Freunde, „Freund hinzufügen").
 2. Ein Community-Mitglied fügt dich hinzu und lädt dich persönlich zum Playtest ein.
-3. Der Bot liest mit: Fehlt dein Freundescode, fragt er danach. Meldet sich nach einer halben Stunde niemand, fragt er, ob du schon eine Einladung hast. Antwortest du mit „nein", schickt er dir die Einladung oder erst eine Steam-Freundschaftsanfrage. Antwortest du mit „ja", ist die Sache erledigt. Normaler Chat bleibt unbeantwortet.
+3. Der Bot liest mit: Fehlt dein Freundescode, fragt er danach. Nach einer halben Stunde fragt er, ob du schon eine Einladung hast, außer Steam zeigt bis dahin schon eine an. Antwortest du mit „nein", schickt er dir die Einladung oder erst eine Steam-Freundschaftsanfrage. Antwortest du mit „ja", ist die Sache erledigt. Normaler Chat bleibt unbeantwortet.
 
 Zusätzlich lohnt sich die Steam-Verknüpfung in <#1398021105339334666> in jedem Fall: Damit bekommst du deine echte Rang-Rolle, und der Steam-Bot kann Invites auch automatisiert verschicken (läuft als Sicherheitsnetz im Hintergrund).
 

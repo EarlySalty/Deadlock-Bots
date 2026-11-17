@@ -1463,6 +1463,38 @@ mod tests {
         );
     }
 
+    async fn discord_error(status: u16, body: &str) -> serenity::Error {
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .expect("HTTP-Antwort"),
+        );
+        let error =
+            serenity::http::ErrorResponse::from_response(response, reqwest::Method::POST).await;
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(error))
+    }
+
+    #[tokio::test]
+    async fn nur_ein_fehlendes_antwortziel_gilt_als_geloeschte_nachricht() {
+        let unknown_target = discord_error(
+            400,
+            r#"{"code": 50035, "message": "Invalid Form Body", "errors": {"message_reference": {"_errors": [{"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"}]}}}"#,
+        )
+        .await;
+        assert!(DiscordAdapter::is_unknown_reply_target(&unknown_target));
+        let too_long = discord_error(
+            400,
+            r#"{"code": 50035, "message": "Invalid Form Body", "errors": {"content": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH", "message": "Must be 2000 or fewer in length."}]}}}"#,
+        )
+        .await;
+        assert!(!DiscordAdapter::is_unknown_reply_target(&too_long));
+        let unknown_channel =
+            discord_error(404, r#"{"code": 10003, "message": "Unknown Channel"}"#).await;
+        assert!(!DiscordAdapter::is_unknown_reply_target(&unknown_channel));
+        assert!(DiscordAdapter::is_unknown_channel(&unknown_channel));
+    }
+
     #[test]
     fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
         let adapter = DiscordAdapter::new("test-token");

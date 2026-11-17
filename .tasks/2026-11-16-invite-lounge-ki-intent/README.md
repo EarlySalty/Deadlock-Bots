@@ -20,6 +20,6 @@ Acceptance: Lachs replay gets a sensible reply and, after his answer, an invite;
 ## Rollout
 Brain and bot ship together. The Brain branch removes `discord_invite_lounge`, `discord_invite_check_in`, reply `judged` and notice update `check_in_answer`, which the current bot still sends, and the new bot needs `discord_invite_turn`, reply `decided` and notice updates `confirmed`/`reply`. Order: merge both, deploy the Brain, deploy and restart dl-bot right after.
 
-Outbox cutover: the old bot can leave a transient `check_in_answer` outbox entry (0 rows live on 2026-11-16, 246 lounge rows). The new bot reads it as a retired entry that round-trips byte-identically (the CAS compares JSON text) and drops it silently on delivery. Rollback caveat: the old binary cannot read `confirmed`/`reply` outbox entries; drain the outbox before rolling back.
+Outbox cutover: the old bot can leave a transient `check_in_answer` outbox entry (0 rows live on 2026-11-16, 246 lounge rows). The new bot reads it as a retired entry that round-trips unchanged (the CAS parses the stored row and compares the state semantically, not the JSON text) and drops it silently on delivery. Rollback caveat: the old binary cannot read `confirmed`/`reply` outbox entries; drain the outbox before rolling back.
 
 Deploy blocker to recheck: live dl-bot ran 59a0ac5f from the unmerged supporter branch.
