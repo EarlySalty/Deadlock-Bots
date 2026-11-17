@@ -99,6 +99,7 @@ pub enum ServerSyncErrorKind {
 }
 
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
+const LIVE_GUILD_MODEL_DISCORD_CALLS: u32 = 2;
 const DISCORD_HISTORY_PAGE_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
@@ -1164,7 +1165,7 @@ impl ServerSyncService {
     }
 
     async fn fetch_live_guild_model_bounded(&self) -> ServerSyncResult<GuildModel> {
-        let timeout = crate::discord_pages::discord_call_timeout();
+        let timeout = crate::discord_pages::discord_call_timeout() * LIVE_GUILD_MODEL_DISCORD_CALLS;
         tokio::time::timeout(
             timeout,
             dl_server_as_code::import::fetch_live_guild_model(
@@ -8522,6 +8523,44 @@ mod tests {
     type ConfirmCall = bool;
     type WelcomeApplyCall = bool;
     type RouterApplyCall = bool;
+
+    #[tokio::test]
+    async fn live_guild_model_fetch_makes_as_many_discord_calls_as_its_bound_allows() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let channels = calls.clone();
+        let roles = calls.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/v10/guilds/{guild}/channels",
+                axum::routing::get(move || {
+                    channels.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!([])) }
+                }),
+            )
+            .route(
+                "/api/v10/guilds/{guild}/roles",
+                axum::routing::get(move || {
+                    roles.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!([])) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let http = serenity::http::HttpBuilder::new("test-only")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .build();
+        let model = dl_server_as_code::import::fetch_live_guild_model(&http, GUILD_ID).await;
+        server.abort();
+        assert!(model.is_ok(), "{:?}", model.err());
+        assert_eq!(calls.load(Ordering::SeqCst), LIVE_GUILD_MODEL_DISCORD_CALLS);
+    }
 
     #[test]
     fn banner_ohne_datei_fehlt_kaputter_link_und_ordner_brechen_ab() {
