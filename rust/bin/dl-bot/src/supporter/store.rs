@@ -5,11 +5,15 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 const KV_NS: &str = "supporter";
 const MANUAL_IMPORT_KEY: &str = "manual_import_at";
+const TABLE_LOCK_TIMEOUT_MS: u64 =
+    *dl_core::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() * 1_000 / 4;
+const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 #[derive(Debug)]
 pub enum StoreError {
     Missing,
     GateDisabled,
+    LockTimeout,
     Db(sqlx::Error),
     Discord(String),
 }
@@ -19,7 +23,11 @@ impl fmt::Display for StoreError {
         match self {
             Self::Missing => write!(
                 f,
-                "core.supporter_sources oder ihr Datenschutz-Trigger supporter_sources_privacy_gate fehlt, Abgleich pausiert bis zur Migration"
+                "core.supporter_sources oder ihr Datenschutz-Trigger supporter_sources_privacy_gate fehlt, Abgleich pausiert, bis Tabelle und Trigger wieder angelegt sind"
+            ),
+            Self::LockTimeout => write!(
+                f,
+                "core.supporter_sources bleibt länger als {TABLE_LOCK_TIMEOUT_MS} ms von einer anderen Sitzung gesperrt, Abgleich versucht es beim nächsten Lauf erneut"
             ),
             Self::GateDisabled => write!(
                 f,
@@ -35,7 +43,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Db(error) => Some(error),
-            Self::Missing | Self::GateDisabled | Self::Discord(_) => None,
+            Self::Missing | Self::GateDisabled | Self::LockTimeout | Self::Discord(_) => None,
         }
     }
 }
@@ -54,6 +62,13 @@ pub async fn require_table(pool: &PgPool) -> Result<(), StoreError> {
 }
 
 async fn lock_gated_table(tx: &mut Transaction<'_, Postgres>) -> Result<(), StoreError> {
+    lock_gated_table_within(tx, TABLE_LOCK_TIMEOUT_MS).await
+}
+
+async fn lock_gated_table_within(
+    tx: &mut Transaction<'_, Postgres>,
+    lock_timeout_ms: u64,
+) -> Result<(), StoreError> {
     let present: bool =
         sqlx::query_scalar("SELECT to_regclass('core.supporter_sources') IS NOT NULL")
             .fetch_one(&mut **tx)
@@ -61,9 +76,19 @@ async fn lock_gated_table(tx: &mut Transaction<'_, Postgres>) -> Result<(), Stor
     if !present {
         return Err(StoreError::Missing);
     }
-    sqlx::query("LOCK TABLE core.supporter_sources IN ROW EXCLUSIVE MODE")
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{lock_timeout_ms}ms"))
         .execute(&mut **tx)
         .await?;
+    sqlx::query("LOCK TABLE core.supporter_sources IN ROW EXCLUSIVE MODE")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| match &error {
+            sqlx::Error::Database(db) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) => {
+                StoreError::LockTimeout
+            }
+            _ => StoreError::Db(error),
+        })?;
     let state: Option<String> = sqlx::query_scalar(
         "SELECT tgenabled::text FROM pg_catalog.pg_trigger
           WHERE tgrelid = 'core.supporter_sources'::regclass
@@ -290,7 +315,6 @@ mod tests {
         .execute(pool)
         .await?;
         sync_boost_rows(pool, &[51]).await?;
-        assert_eq!(import_manual(pool, &[52]).await?, 1);
         sqlx::query("DROP TRIGGER supporter_sources_privacy_gate ON core.supporter_sources")
             .execute(pool)
             .await?;
@@ -298,7 +322,64 @@ mod tests {
             sync_boost_rows(pool, &[53]).await,
             Err(StoreError::Missing)
         ));
+        assert!(matches!(
+            import_manual(pool, &[52]).await,
+            Err(StoreError::Missing)
+        ));
         assert_eq!(source_rows(pool, 53).await?, 0);
+        assert_eq!(source_rows(pool, 52).await?, 0);
+        assert!(!manual_import_done(pool).await?);
+        Ok(())
+    }
+
+    async fn alter_trigger_within(pool: &PgPool, lock_timeout: &str) -> Result<(), sqlx::Error> {
+        let mut other = pool.begin().await?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(lock_timeout)
+            .execute(&mut *other)
+            .await?;
+        sqlx::query(
+            "ALTER TABLE core.supporter_sources DISABLE TRIGGER supporter_sources_privacy_gate",
+        )
+        .execute(&mut *other)
+        .await?;
+        other.rollback().await
+    }
+
+    fn lock_not_available(result: Result<(), sqlx::Error>) -> bool {
+        matches!(result, Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE))
+    }
+
+    #[tokio::test]
+    async fn trigger_bleibt_bis_zum_ende_der_schreibtransaktion_gesperrt() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let mut writer = pool.begin().await?;
+        lock_gated_table(&mut writer).await?;
+        assert!(lock_not_available(
+            alter_trigger_within(pool, "100ms").await
+        ));
+        writer.rollback().await?;
+        alter_trigger_within(pool, "100ms").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gesperrte_tabelle_endet_nach_der_wartegrenze() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let mut holder = pool.begin().await?;
+        sqlx::query("LOCK TABLE core.supporter_sources IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await?;
+        let mut writer = pool.begin().await?;
+        assert!(matches!(
+            lock_gated_table_within(&mut writer, 100).await,
+            Err(StoreError::LockTimeout)
+        ));
+        writer.rollback().await?;
+        holder.rollback().await?;
+        require_table(pool).await?;
         Ok(())
     }
 

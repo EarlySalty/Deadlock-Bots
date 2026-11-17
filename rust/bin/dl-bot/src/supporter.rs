@@ -2,7 +2,6 @@ pub mod links;
 pub mod roles;
 pub mod store;
 
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,25 +36,6 @@ pub struct SupporterConfig {
     pub tiers_eur: Vec<u64>,
     pub request_timeout: Duration,
     pub discord_timeout: Duration,
-}
-
-impl fmt::Debug for SupporterConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SupporterConfig")
-            .field("role_grant_apply", &self.role_grant_apply)
-            .field("role_sync_apply", &self.role_sync_apply)
-            .field("max_revokes", &self.max_revokes)
-            .field("interval", &self.interval)
-            .field("goal_cents", &self.goal_cents)
-            .field("steam_api_base", &self.steam_api_base)
-            .field("steam_token_set", &self.steam_token.is_some())
-            .field("twitch_api_base", &self.twitch_api_base)
-            .field("twitch_token_set", &self.twitch_token.is_some())
-            .field("tiers_eur", &self.tiers_eur)
-            .field("request_timeout", &self.request_timeout)
-            .field("discord_timeout", &self.discord_timeout)
-            .finish()
-    }
 }
 
 impl SupporterConfig {
@@ -305,9 +285,9 @@ fn log_role_outcome(previous: Option<String>, outcome: Result<(), String>) -> Op
         }
         Err(error) => {
             if previous.as_deref() == Some(error.as_str()) {
-                tracing::debug!(%error, "Server-Unterstützer: Abgleich weiter übersprungen");
+                tracing::debug!(%error, "Server-Unterstützer: Abgleich endet weiter mit Fehler");
             } else {
-                tracing::warn!(%error, "Server-Unterstützer: Abgleich übersprungen");
+                tracing::warn!(%error, "Server-Unterstützer: Abgleich endet mit Fehler; bis dahin geschriebene Änderungen bleiben");
             }
             Some(error)
         }
