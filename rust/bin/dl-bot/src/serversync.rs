@@ -2248,12 +2248,10 @@ impl ServerSyncService {
         let mut candidates = Vec::new();
         let mut truncated = false;
         for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit={}",
-                self.discord_api_base.trim_end_matches('/'),
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
-                DISCORD_HISTORY_PAGE_LIMIT
-            );
+            let mut url = self.discord_api_url(&format!(
+                "/channels/{}/messages?limit={DISCORD_HISTORY_PAGE_LIMIT}",
+                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+            ));
             if let Some(before) = before {
                 url.push_str("&before=");
                 url.push_str(&before.to_string());
@@ -2796,12 +2794,11 @@ impl ServerSyncService {
         let candidates = output.legacy_cleanup_candidates.clone();
         for candidate in candidates {
             match self
-                .discord_delete(format!(
-                    "{}/channels/{}/messages/{}",
-                    self.discord_api_base.trim_end_matches('/'),
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{}",
                     rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
                     candidate.message_id
-                ))
+                )))
                 .await
             {
                 Ok(true) => output.deleted_legacy_message_ids.push(candidate.message_id),
