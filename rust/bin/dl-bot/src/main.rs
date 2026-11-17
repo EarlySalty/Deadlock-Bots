@@ -33,12 +33,15 @@ use std::{
 
 use anyhow::Context;
 use dl_core::runtime_config::lookup as operating_value;
+use dl_core::runtime_config::{token_by_names, BROKER_TOKEN_NAMES, TWITCH_TOKEN_NAME};
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
-    operating_value(name)
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    token_by_names(operating_value, &[name])
+}
+
+fn broker_token_chain() -> Option<String> {
+    token_by_names(operating_value, &BROKER_TOKEN_NAMES)
 }
 
 fn warn_if_lagebild_token_empty(token: &str) {
@@ -666,9 +669,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
-        env("MASTER_BROKER_TOKEN")
-            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+        broker_token_chain(),
     );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
@@ -739,9 +740,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             Some(matcher)
         }
         None => {
-            tracing::warn!(
-                "TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge + Matcher inaktiv"
-            );
+            tracing::warn!("{TWITCH_TOKEN_NAME} fehlt, Twitch-Live-Bridge und Matcher inaktiv");
             None
         }
     };
@@ -1399,11 +1398,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
     };
 
-    // Master-Broker :8770 — Token-Kette wie das Original
-    let broker_token = env("MASTER_BROKER_TOKEN")
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
-        .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let broker_token = broker_token_chain()
+        .with_context(|| format!("Broker-Token fehlt ({})", BROKER_TOKEN_NAMES.join("/")))?;
     let twitch_invites = twitch_invites::TwitchInvites::new(
         central_pool.clone(),
         adapter.clone(),
@@ -1479,14 +1475,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
-    // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN")
-        .or_else(|| env("MASTER_BROKER_TOKEN"))
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"));
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(broker_token_chain);
     if serversync_token.is_none() {
         tracing::warn!(
-            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
+            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/{}), Server-Sync-HTTP-Routen liefern 403",
+            BROKER_TOKEN_NAMES.join("/")
         );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);
@@ -1502,7 +1495,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
-    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
+    let mcp_token = dl_core::runtime_config::secret_value(TWITCH_TOKEN_NAME);
     let mcp_state = Arc::new(
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?

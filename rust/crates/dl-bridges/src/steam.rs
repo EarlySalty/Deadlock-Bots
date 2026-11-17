@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_central_db::kv;
-use dl_core::runtime_config::{supporter_wire, token_by_names};
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
@@ -101,14 +100,6 @@ const ADMIN_COMMANDS: [&str; 6] = [
 
 // ── HTTP-Client ────────────────────────────────────────────────────────────
 
-pub fn twitch_internal_token(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    token_by_names(lookup, &[supporter_wire::TWITCH_TOKEN_NAME])
-}
-
-pub fn token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    token_by_names(lookup, &supporter_wire::SUPPORTER_TOKEN_NAMES)
-}
-
 pub struct SteamBotClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: String,
@@ -116,10 +107,19 @@ pub struct SteamBotClient {
 }
 
 impl SteamBotClient {
+    /// ENVs wie das Original: STEAM_BOT_API_URL + Token-Kette
+    /// TWITCH_INTERNAL_API_TOKEN → MASTER_BROKER_TOKEN → MAIN_BOT_INTERNAL_TOKEN.
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Arc<Self> {
-        let base_url = token_by_names(&lookup, &["STEAM_BOT_API_URL"])
-            .unwrap_or_else(|| DEFAULT_API_URL.to_string());
-        Self::new(base_url, token_from_lookup(&lookup))
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let base_url = get("STEAM_BOT_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        let token = get("TWITCH_INTERNAL_API_TOKEN")
+            .or_else(|| get("MASTER_BROKER_TOKEN"))
+            .or_else(|| get("MAIN_BOT_INTERNAL_TOKEN"));
+        Self::new(base_url, token)
     }
 
     pub fn new(base_url: impl Into<String>, token: Option<String>) -> Arc<Self> {
@@ -1570,28 +1570,5 @@ mod tests {
             component_forward_timeout("steam_link_panel:open"),
             DEFAULT_TIMEOUT
         );
-    }
-
-    #[test]
-    fn supporter_token_follows_the_shared_name_order() {
-        let names = supporter_wire::SUPPORTER_TOKEN_NAMES;
-        for first in 0..names.len() {
-            let answering = &names[first..];
-            let token = token_from_lookup(|key| {
-                answering
-                    .iter()
-                    .position(|name| *name == key)
-                    .map(|offset| format!(" value-{} ", first + offset))
-            });
-            assert_eq!(token, Some(format!("value-{first}")), "{}", names[first]);
-        }
-        let blank_first =
-            token_from_lookup(|key| match names.iter().position(|name| *name == key) {
-                Some(0) => Some("   ".to_string()),
-                Some(index) => Some(format!("value-{index}")),
-                None => None,
-            });
-        assert_eq!(blank_first.as_deref(), Some("value-1"));
-        assert_eq!(token_from_lookup(|_| None), None);
     }
 }

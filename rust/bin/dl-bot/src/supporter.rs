@@ -9,9 +9,10 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use dl_core::runtime_config::{
-    CommunityOptions, SUPPORTER_CUTOVER_GRACE_DAYS, SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
-    SUPPORTER_DEFAULT_MAX_REVOKES, SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS,
-    SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS, SUPPORTER_DEFAULT_TIERS_EUR,
+    supporter_wire, token_by_names, CommunityOptions, SUPPORTER_CUTOVER_GRACE_DAYS,
+    SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS, SUPPORTER_DEFAULT_MAX_REVOKES,
+    SUPPORTER_DEFAULT_REQUEST_TIMEOUT_MS, SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
+    SUPPORTER_DEFAULT_TIERS_EUR, TWITCH_TOKEN_NAME,
 };
 
 use crate::serversync::support_publish::{SupportFunding, SupportPanelOptions};
@@ -78,9 +79,9 @@ impl SupporterConfig {
                 .supporter_funding_goal_cents
                 .unwrap_or(SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS),
             steam_api_base: steam_api_base.to_string(),
-            steam_token: dl_bridges::steam::token_from_lookup(&lookup),
+            steam_token: token_by_names(&lookup, &supporter_wire::SUPPORTER_TOKEN_NAMES),
             twitch_api_base: community.supporter_twitch_api_base.clone(),
-            twitch_token: dl_bridges::steam::twitch_internal_token(&lookup),
+            twitch_token: token_by_names(&lookup, &[TWITCH_TOKEN_NAME]),
             tiers_eur: community
                 .supporter_tiers_eur
                 .clone()

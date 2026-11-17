@@ -37,11 +37,12 @@ const _: () =
 
 pub const MASTER_BROKER_TOKEN_NAME: &str = "MASTER_BROKER_TOKEN";
 pub const MAIN_BOT_TOKEN_NAME: &str = "MAIN_BOT_INTERNAL_TOKEN";
-pub const TURNIER_TOKEN_NAME: &str = "TURNIER_INTERNAL_API_TOKEN";
-pub const COACHING_BOT_TOKEN_NAME: &str = "COACHING_BOT_TOKEN";
-pub const SERVERSYNC_TOKEN_NAME: &str = "SERVERSYNC_INTERNAL_TOKEN";
-pub const STEAM_INTERNAL_API_TOKEN_NAME: &str = "STEAM_INTERNAL_API_TOKEN";
-pub const INTERNAL_API_TOKEN_NAME: &str = "INTERNAL_API_TOKEN";
+pub const TWITCH_TOKEN_NAME: &str = "TWITCH_INTERNAL_API_TOKEN";
+pub const BROKER_TOKEN_NAMES: [&str; 3] = [
+    MASTER_BROKER_TOKEN_NAME,
+    MAIN_BOT_TOKEN_NAME,
+    TWITCH_TOKEN_NAME,
+];
 
 pub fn token_by_names(lookup: impl Fn(&str) -> Option<String>, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| token_value(&lookup, name))
@@ -54,12 +55,12 @@ fn token_value(lookup: impl Fn(&str) -> Option<String>, name: &str) -> Option<St
 }
 
 pub mod supporter_wire {
-    pub const TWITCH_TOKEN_NAME: &str = "TWITCH_INTERNAL_API_TOKEN";
     pub const SUPPORTER_TOKEN_NAMES: [&str; 3] = [
-        TWITCH_TOKEN_NAME,
+        super::TWITCH_TOKEN_NAME,
         super::MASTER_BROKER_TOKEN_NAME,
         super::MAIN_BOT_TOKEN_NAME,
     ];
+    pub const TOKEN_HEADER: &str = "X-Internal-Token";
     pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
     pub const TIP_PATH: &str = "/supporter/v1/tip";
     pub const PORTAL_PATH: &str = "/supporter/v1/portal";
@@ -804,12 +805,12 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "CHANGELOG_API_TOKEN"
         | MASTER_BROKER_TOKEN_NAME
         | MAIN_BOT_TOKEN_NAME
-        | supporter_wire::TWITCH_TOKEN_NAME
-        | STEAM_INTERNAL_API_TOKEN_NAME
-        | INTERNAL_API_TOKEN_NAME
-        | TURNIER_TOKEN_NAME
-        | SERVERSYNC_TOKEN_NAME
-        | COACHING_BOT_TOKEN_NAME
+        | TWITCH_TOKEN_NAME
+        | "STEAM_INTERNAL_API_TOKEN"
+        | "INTERNAL_API_TOKEN"
+        | "TURNIER_INTERNAL_API_TOKEN"
+        | "SERVERSYNC_INTERNAL_TOKEN"
+        | "COACHING_BOT_TOKEN"
         | "DISCORD_OAUTH_CLIENT_SECRET"
         | "PUBLIC_STATS_SESSION_SECRET"
         | "SESSIONS_ENCRYPTION_KEY"
@@ -939,6 +940,10 @@ mod discord_brain_secret_tests {
             super::secret_value("DISCORD_PUBLIC_FACTS_TOKEN").as_deref(),
             Some("fixture-public-facts")
         );
+        assert_eq!(
+            super::secret_value(super::TWITCH_TOKEN_NAME).as_deref(),
+            Some("fixture-general")
+        );
         assert!(super::secret_value("RUST_LOG").is_none());
     }
 }
@@ -950,6 +955,35 @@ mod supporter_bound_tests {
 
     fn parse(line: &str) -> bool {
         BotConfig::parse(&format!("schema_version=1\n[runtime.community]\n{line}\n")).is_ok()
+    }
+
+    #[test]
+    fn token_ketten_nehmen_den_ersten_nicht_leeren_namen() {
+        for names in [supporter_wire::SUPPORTER_TOKEN_NAMES, BROKER_TOKEN_NAMES] {
+            for first in 0..names.len() {
+                let answering = &names[first..];
+                let token = token_by_names(
+                    |key| {
+                        answering
+                            .iter()
+                            .position(|name| *name == key)
+                            .map(|offset| format!(" value-{} ", first + offset))
+                    },
+                    &names,
+                );
+                assert_eq!(token, Some(format!("value-{first}")), "{}", names[first]);
+            }
+            let blank_first = token_by_names(
+                |key| match names.iter().position(|name| *name == key) {
+                    Some(0) => Some("   ".to_string()),
+                    Some(index) => Some(format!("value-{index}")),
+                    None => None,
+                },
+                &names,
+            );
+            assert_eq!(blank_first.as_deref(), Some("value-1"));
+            assert_eq!(token_by_names(|_| None, &names), None);
+        }
     }
 
     #[test]
