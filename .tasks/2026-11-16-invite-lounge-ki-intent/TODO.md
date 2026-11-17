@@ -9,7 +9,7 @@
 ## Next steps
 
 1. Run `python3 -I /tmp/claude-1000/-home-nathanael-Documents/256566d7-1e4d-4435-ba94-8c86500c75c6/scratchpad/tests_edit.py rust/crates/dl-community/src/invite_lounge_tests.rs` (written, not yet run), then rustfmt and fix compile errors.
-2. cargo-slot test -p dl-community, dl-brain, dl-bot (faq_publish, concierge tour); the 4 local reds are DB tests without CENTRAL_TEST_DSN; on ionos (test-db-run) the full dl-community DB suite has 0 reds (585/585 on 2026-11-17 before the pre-gate fixes). Clippy on changed crates.
+2. cargo-slot test -p dl-community, dl-brain, dl-bot (faq_publish, concierge tour); the local reds are DB tests without CENTRAL_TEST_DSN (4 in dl-community, 1 in dl-bot faq: service_faq_v2_repost_loescht_fremde_message_nicht); on ionos (test-db-run) the full dl-community DB suite has 0 reds (585/585 before the pre-gate fixes, 598/598 at 0e03f498) and dl-bot faq is 15/15. Clippy on changed crates.
 3. README rollout note: CAS is semantic now. Commit `fix(invite-lounge): ...` with Ursache block (layers 1-4, twins: reply gates, brain_api twin), then publish branch to origin.
 4. Wait for Brain round 4 verdict, re-pin Brain SHA if it changed, then `gate-review --repo /home/nathanael/.worktrees/bots-invite-lounge-ki-intent-20261116 --base origin/main` (round 2).
 5. Deploy still blocked: /opt/deadlock/bots/current points at 59a0ac5f (supporter commit not on main), user decision needed.
