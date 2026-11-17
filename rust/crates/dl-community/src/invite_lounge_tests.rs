@@ -34,15 +34,17 @@ struct MemoryStore {
     states: Mutex<HashMap<u64, LoungeState>>,
     known: Mutex<HashMap<u64, String>>,
     advance: Mutex<Option<ClockAdvance>>,
-    actions_since: AtomicI64,
-    actions_unset: AtomicBool,
+    actions_since: Mutex<Option<i64>>,
     progress: Mutex<SteamProgress>,
     progress_queries: Mutex<Vec<(i64, i64)>>,
-    handled: AtomicBool,
+    manual: Mutex<Option<ManualInvite>>,
     opted_out: AtomicBool,
+    privacy_fails: AtomicBool,
     opt_out_on_write: AtomicBool,
     hidden: Mutex<HashSet<u64>>,
     hidden_fails: AtomicBool,
+    links_fail: AtomicBool,
+    audit_fails: AtomicBool,
     mark: Mutex<Option<u64>>,
 }
 
@@ -129,10 +131,16 @@ impl LoungeStore for MemoryStore {
             .collect())
     }
     async fn known_code(&self, id: u64) -> Result<Option<String>, String> {
+        if self.links_fail.load(Ordering::SeqCst) {
+            return Err("Steam-Links nicht lesbar".into());
+        }
         Ok(self.known.lock().await.get(&id).cloned())
     }
-    async fn opted_out(&self, _user_id: u64) -> bool {
-        self.opted_out.load(Ordering::SeqCst)
+    async fn opted_out(&self, _user_id: u64) -> Result<bool, String> {
+        if self.privacy_fails.load(Ordering::SeqCst) {
+            return Err("Datenschutzstand nicht lesbar".into());
+        }
+        Ok(self.opted_out.load(Ordering::SeqCst))
     }
     async fn hidden_authors(&self, user_ids: &[u64]) -> Result<HashSet<u64>, String> {
         if self.hidden_fails.load(Ordering::SeqCst) {
@@ -153,16 +161,16 @@ impl LoungeStore for MemoryStore {
         Ok(())
     }
     async fn invited(&self, _code: &str) -> Result<bool, String> {
+        if self.audit_fails.load(Ordering::SeqCst) {
+            return Err("Einladungsaudit nicht lesbar".into());
+        }
         Ok(self.progress.lock().await.invited)
     }
     async fn actions_since(&self) -> Result<Option<i64>, String> {
-        Ok((!self.actions_unset.load(Ordering::SeqCst))
-            .then(|| self.actions_since.load(Ordering::SeqCst)))
+        Ok(*self.actions_since.lock().await)
     }
     async fn mark_actions_since(&self, now: i64) -> Result<(), String> {
-        let _ = self
-            .actions_since
-            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+        self.actions_since.lock().await.get_or_insert(now);
         Ok(())
     }
     async fn steam_progress(
@@ -177,8 +185,8 @@ impl LoungeStore for MemoryStore {
             .extend([(since, requested_at)]);
         Ok(*self.progress.lock().await)
     }
-    async fn handled_since(&self, _code: &str, _since: i64) -> Result<bool, String> {
-        Ok(self.handled.load(Ordering::SeqCst))
+    async fn manual_invite(&self, _code: &str, _since: i64) -> Result<ManualInvite, String> {
+        Ok(self.manual.lock().await.unwrap_or(ManualInvite::None))
     }
 }
 
@@ -265,6 +273,7 @@ struct Lounge {
     port: Arc<RecordingPort>,
     invite: Arc<RecordingInvite>,
     brain: Arc<ScriptedBrain>,
+    clock: Arc<AtomicI64>,
 }
 
 fn watcher(
@@ -272,6 +281,7 @@ fn watcher(
     port: Arc<RecordingPort>,
     invite: Arc<RecordingInvite>,
     brain: Arc<ScriptedBrain>,
+    clock: Arc<AtomicI64>,
 ) -> InviteLoungeWatcher {
     InviteLoungeWatcher {
         brain,
@@ -279,46 +289,57 @@ fn watcher(
         port,
         invite,
         guild_id: GUILD,
-        clock_millis: Arc::new(|| NOW * 1000),
+        clock_millis: Arc::new(move || clock.load(Ordering::SeqCst)),
         locks: UserLocks::default(),
         follow_ups: FollowUps::default(),
+        order: std::sync::Mutex::new(LiveOrder::default()),
+    }
+}
+
+fn started_store() -> MemoryStore {
+    MemoryStore {
+        actions_since: Mutex::new(Some(0)),
+        ..MemoryStore::default()
     }
 }
 
 fn setup() -> Lounge {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(started_store());
     let port = Arc::new(RecordingPort::default());
     let invite = Arc::new(RecordingInvite::default());
     let brain = Arc::new(ScriptedBrain::default());
+    let clock = Arc::new(AtomicI64::new(NOW * 1000));
     Lounge {
         watcher: Arc::new(watcher(
             store.clone(),
             port.clone(),
             invite.clone(),
             brain.clone(),
+            clock.clone(),
         )),
         store,
         port,
         invite,
         brain,
+        clock,
     }
 }
 
 impl Lounge {
     fn moving_clock(&mut self) -> Arc<AtomicI64> {
-        let clock = Arc::new(AtomicI64::new(NOW * 1000));
-        let reader = clock.clone();
-        Arc::get_mut(&mut self.watcher)
-            .expect("Uhr wird vor dem ersten Teilen gesetzt")
-            .clock_millis = Arc::new(move || reader.load(Ordering::SeqCst));
-        clock
+        self.clock.clone()
+    }
+
+    fn advance_to(&self, now: i64) {
+        self.clock.fetch_max(now * 1000, Ordering::SeqCst);
     }
 
     fn decide(&self, replies: Vec<ScriptedReply>) {
         self.brain.script_turns(replies);
     }
 
-    async fn post(&self, message: LoungeMessage, now: i64) -> Option<u64> {
+    async fn post(&self, message: LoungeMessage, now: i64) -> Turn {
+        self.advance_to(now);
         let context = self
             .port
             .history(message.channel_id, Some(message.message_id))
@@ -330,18 +351,32 @@ impl Lounge {
             .handle_turn(&message, Context::Given(&context), now)
             .await
             .expect("Nachricht verarbeitet");
-        let Turn::Stored(user_id) = turn else {
-            return None;
-        };
-        self.watcher.follow_up(user_id, now).await;
-        Some(user_id)
+        if let Turn::Stored(user_id) = turn {
+            self.watcher.clone().run_follow_up(user_id).await;
+        }
+        turn
+    }
+
+    async fn live(&self, message: LoungeMessage, now: i64) -> Turn {
+        self.advance_to(now);
+        self.port.history.lock().await.push(message.clone());
+        let turn = self.watcher.serve_live(message).await;
+        if let Turn::Stored(user_id) = turn {
+            self.watcher.clone().run_follow_up(user_id).await;
+        }
+        turn
     }
 
     async fn poll(&self, now: i64) {
+        self.advance_to(now);
+        let mut follow_ups = tokio::task::JoinSet::new();
         self.watcher
-            .poll_due(now)
+            .poll_due(&mut follow_ups)
             .await
             .expect("Warteaufträge geprüft");
+        while let Some(result) = follow_ups.join_next().await {
+            result.expect("Folgeschritt läuft durch");
+        }
     }
 
     async fn calls(&self) -> usize {
@@ -746,21 +781,42 @@ async fn bereits_eingeladene_bekommen_hilfe_statt_einladung() {
 
 #[tokio::test]
 async fn entscheidung_waehrend_laufendem_versand_bleibt_still() {
-    let lounge = setup();
-    let mut state = pending(true);
-    if let Some(request) = state.request.as_mut() {
-        request.phase = Phase::Dispatching;
+    for reply in [
+        wants(InviteTurnAction::Invite, None),
+        wants(
+            InviteTurnAction::WaitForCommunity,
+            Some("Gleich schaut jemand drauf."),
+        ),
+        wants(
+            InviteTurnAction::AskAlreadyInvited,
+            Some("Hast du schon eine Einladung bekommen?"),
+        ),
+    ] {
+        let lounge = setup();
+        let mut state = pending(true);
+        if let Some(request) = state.request.as_mut() {
+            request.phase = Phase::Dispatching;
+        }
+        state.dispatch_started_at_millis = Some(NOW * 1000);
+        lounge.store.put(state.clone()).await;
+        lounge.decide(vec![reply]);
+        lounge
+            .post(message(2, NOW + 5, "und jetzt? 123456789"), NOW + 5)
+            .await;
+        assert_eq!(
+            turns(&lounge.brain)[0].member.phase,
+            InviteRequestPhase::InProgress
+        );
+        assert_eq!(
+            lounge.store.state().await,
+            LoungeState {
+                last_seen: 2,
+                ..state
+            }
+        );
+        assert!(notices(&lounge.brain).is_empty());
+        assert_eq!(lounge.calls().await, 0);
     }
-    state.dispatch_started_at_millis = Some(NOW * 1000);
-    lounge.store.put(state).await;
-    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
-    lounge
-        .post(message(2, NOW + 5, "und jetzt? 123456789"), NOW + 5)
-        .await;
-    let state = lounge.store.state().await;
-    assert_eq!(state.last_seen, 2);
-    assert!(state.outbox.is_empty());
-    assert_eq!(lounge.calls().await, 0);
 }
 
 #[tokio::test]
@@ -803,10 +859,7 @@ async fn gesehene_nachricht_geht_kein_zweites_mal_an_den_brain() {
 #[tokio::test]
 async fn fremde_kanaele_bots_alte_und_leere_nachrichten_loesen_nichts_aus() {
     let lounge = setup();
-    lounge
-        .store
-        .actions_since
-        .store(NOW - 100, Ordering::SeqCst);
+    *lounge.store.actions_since.lock().await = Some(NOW - 100);
     let mut other_channel = message(1, NOW, "Kannst du mich einladen? 123456789");
     other_channel.channel_id = 100;
     let mut other_guild = message(2, NOW, "Kannst du mich einladen? 123456789");
@@ -824,10 +877,7 @@ async fn fremde_kanaele_bots_alte_und_leere_nachrichten_loesen_nichts_aus() {
     ] {
         lounge.post(event, NOW).await;
     }
-    lounge
-        .store
-        .actions_since
-        .store(NOW - 2 * REQUEST_WINDOW_SECONDS, Ordering::SeqCst);
+    *lounge.store.actions_since.lock().await = Some(NOW - 2 * REQUEST_WINDOW_SECONDS);
     let mut system = message(8, NOW, "hat den Server betreten 123456789");
     system.system = true;
     for event in [
@@ -1030,7 +1080,10 @@ async fn fehlgeschlagener_turn_haelt_die_marke_und_kommt_in_der_naechsten_runde(
         Err(BrainError::Backend("weg".into())),
         Ok(ConversationReply::Silent),
     ]);
-    assert!(lounge.watcher.catch_up(NOW, 0).await.is_err());
+    assert_eq!(
+        lounge.watcher.catch_up(NOW, 0).await,
+        Ok(HashSet::from([USER]))
+    );
     let first: Vec<_> = turns(&lounge.brain)
         .into_iter()
         .map(|turn| turn.message)
@@ -1041,11 +1094,10 @@ async fn fehlgeschlagener_turn_haelt_die_marke_und_kommt_in_der_naechsten_runde(
         wants(InviteTurnAction::Invite, None),
         Ok(ConversationReply::Silent),
     ]);
-    lounge
-        .watcher
-        .catch_up(NOW + 60, 0)
-        .await
-        .expect("zweite Runde läuft durch");
+    assert_eq!(
+        lounge.watcher.catch_up(NOW + 60, 0).await,
+        Ok(HashSet::new())
+    );
     let second: Vec<_> = turns(&lounge.brain)
         .into_iter()
         .skip(2)
@@ -1103,13 +1155,17 @@ async fn zeilen_von_abgemeldeten_mitgliedern_gehen_nicht_an_den_brain() {
         .collect();
     assert_eq!(lines, ["offen von 10", "Bot-Zeile"]);
     lounge.store.hidden_fails.store(true, Ordering::SeqCst);
-    lounge.post(message(6, NOW + 5, "hallo?"), NOW + 5).await;
-    let lines: Vec<_> = turns(&lounge.brain)[1]
-        .recent
-        .iter()
-        .map(|line| line.text.clone())
-        .collect();
-    assert_eq!(lines, ["Bot-Zeile", "Kann mich wer einladen?"]);
+    let failed = lounge
+        .watcher
+        .handle_turn(
+            &message(6, NOW + 5, "hallo?"),
+            Context::Given(&lounge.port.history.lock().await.clone()),
+            NOW + 5,
+        )
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(turns(&lounge.brain).len(), 1);
+    assert_eq!(lounge.store.state().await.last_seen, 5);
 }
 
 #[tokio::test]
@@ -1120,7 +1176,7 @@ async fn opt_out_waehrend_der_entscheidung_schreibt_nichts_und_laedt_nicht_ein()
     let stored = lounge
         .post(message(1, NOW, "Kannst du mich einladen? 123456789"), NOW)
         .await;
-    assert_eq!(stored, None);
+    assert_eq!(stored, Turn::Skipped);
     assert_eq!(turns(&lounge.brain).len(), 1);
     assert!(notices(&lounge.brain).is_empty());
     assert!(lounge.store.states.lock().await.is_empty());
@@ -1277,7 +1333,7 @@ async fn antwort_eines_helfers_ersetzt_die_nachfrage_nicht() {
 async fn von_hand_erledigte_bitte_schliesst_ohne_nachfrage() {
     let lounge = setup();
     lounge.store.put(pending(false)).await;
-    lounge.store.handled.store(true, Ordering::SeqCst);
+    *lounge.store.manual.lock().await = Some(ManualInvite::Invited);
     lounge.poll(NOW + CHECK_IN_SECONDS).await;
     assert!(notices(&lounge.brain).is_empty());
     assert_eq!(lounge.calls().await, 0);
@@ -1347,27 +1403,6 @@ async fn bereits_eingeladen_laut_steam_meldet_beim_check_in_ohne_einladung() {
             status: InviteStatus::AlreadyHasGame
         }]
     );
-    assert_eq!(lounge.calls().await, 0);
-}
-
-#[tokio::test]
-async fn neustart_wiederholt_keinen_begonnenen_versuch() {
-    let lounge = setup();
-    let mut state = pending(true);
-    if let Some(request) = state.request.as_mut() {
-        request.phase = Phase::Attempted;
-    }
-    lounge.store.put(state).await;
-    let restarted = watcher(
-        lounge.store.clone(),
-        lounge.port.clone(),
-        lounge.invite.clone(),
-        lounge.brain.clone(),
-    );
-    restarted
-        .poll_due(NOW + 8000)
-        .await
-        .expect("Warteaufträge geprüft");
     assert_eq!(lounge.calls().await, 0);
 }
 
@@ -1730,12 +1765,13 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
         pool: db.pool().clone(),
     });
     let lounge = setup();
-    let watcher = watcher(
+    let watcher = Arc::new(watcher(
         store.clone(),
         lounge.port.clone(),
         lounge.invite.clone(),
         lounge.brain.clone(),
-    );
+        lounge.clock.clone(),
+    ));
     let mut state = pending(false);
     if let Some(request) = state.request.as_mut() {
         request.created_at = NOW - REQUEST_WINDOW_SECONDS - 1;
@@ -1758,7 +1794,14 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
     let mut open = store.pending_users().await.expect("offene Bitten lesbar");
     open.sort_unstable();
     assert_eq!(open, vec![USER, OTHER]);
-    watcher.poll_due(NOW).await.expect("Warteaufträge geprüft");
+    let mut follow_ups = tokio::task::JoinSet::new();
+    watcher
+        .poll_due(&mut follow_ups)
+        .await
+        .expect("Warteaufträge geprüft");
+    while let Some(result) = follow_ups.join_next().await {
+        result.expect("Folgeschritt läuft durch");
+    }
     for user_id in [USER, OTHER] {
         assert_eq!(
             store
@@ -1780,7 +1823,7 @@ async fn postgres_alte_bitte_wird_dauerhaft_ohne_versand_beendet() {
 
 #[cfg(feature = "testing")]
 #[tokio::test]
-async fn postgres_offene_admin_einladung_zaehlt_als_erledigt() {
+async fn postgres_nur_belegte_einladung_von_hand_zaehlt_als_erledigt() {
     let db = dl_central_db::testing::test_pool()
         .await
         .expect("Testdatenbank");
@@ -1788,34 +1831,150 @@ async fn postgres_offene_admin_einladung_zaehlt_als_erledigt() {
         pool: db.pool().clone(),
     };
     let steam_id = steam_id64(CODE).expect("gültiger Freundescode");
-    assert!(!store.handled_since(CODE, NOW).await.expect("Abfrage läuft"));
+    let manual = |since: i64| store.manual_invite(CODE, since);
+    assert_eq!(manual(NOW).await, Ok(ManualInvite::None));
     sqlx::query(
         "INSERT INTO steam.invite_requests (steam_id64, account_id, admin_id, created_at)
          VALUES ($1, 123456789, 7, $2)",
     )
     .bind(steam_id)
-    .bind(NOW + 5)
+    .bind(NOW - 600)
     .execute(db.pool())
     .await
     .expect("Testzeile");
-    assert!(store.handled_since(CODE, NOW).await.expect("Abfrage läuft"));
-    assert!(!store
-        .handled_since(CODE, NOW + 10)
+    assert_eq!(manual(NOW).await, Ok(ManualInvite::InFlight));
+    sqlx::query("DELETE FROM steam.invite_requests WHERE steam_id64 = $1")
+        .bind(steam_id)
+        .execute(db.pool())
         .await
-        .expect("Abfrage läuft"));
+        .expect("Zeile entfernt");
+    let event = |decision: &'static str, at: i64| {
+        sqlx::query(
+            "INSERT INTO steam.bot_event_log (occurred_at, event_type, decision, steam_id)
+             VALUES (to_timestamp($2), 'playtest_invite', $3, $1)",
+        )
+        .bind(steam_id)
+        .bind(at as f64)
+        .bind(decision)
+    };
+    for decision in ["rejected", "timeout", "failed", "queued"] {
+        event(decision, NOW + 5)
+            .execute(db.pool())
+            .await
+            .expect("Testzeile");
+    }
+    assert_eq!(manual(NOW).await, Ok(ManualInvite::None));
+    event("sent", NOW + 20)
+        .execute(db.pool())
+        .await
+        .expect("Testzeile");
+    assert_eq!(manual(NOW + 10).await, Ok(ManualInvite::Invited));
+    assert_eq!(manual(NOW + 30).await, Ok(ManualInvite::None));
     sqlx::query(
-        "INSERT INTO steam.bot_event_log (occurred_at, event_type, decision, steam_id)
-         VALUES (to_timestamp($2), 'playtest_invite', 'sent', $1)",
+        "INSERT INTO steam.beta_invite_audit (discord_id, steam_id64, steam_profile, invited_at)
+         VALUES ($1, $2, 'profil', to_timestamp($3))",
     )
+    .bind(USER as i64)
     .bind(steam_id)
-    .bind((NOW + 20) as f64)
+    .bind((NOW + 40) as f64)
     .execute(db.pool())
     .await
     .expect("Testzeile");
-    assert!(store
-        .handled_since(CODE, NOW + 10)
+    assert_eq!(manual(NOW + 30).await, Ok(ManualInvite::Invited));
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn postgres_offene_phasen_und_verborgene_mitglieder_im_takt() {
+    let db = dl_central_db::testing::test_pool()
         .await
-        .expect("Abfrage läuft"));
+        .expect("Testdatenbank");
+    let store = Arc::new(PgLoungeStore {
+        pool: db.pool().clone(),
+    });
+    let lounge = setup();
+    let watcher = watcher(
+        store.clone(),
+        lounge.port.clone(),
+        lounge.invite.clone(),
+        lounge.brain.clone(),
+        lounge.clock.clone(),
+    );
+    let with_phase = |phase: Phase, outbox: bool| {
+        let mut state = pending(false);
+        if let Some(request) = state.request.as_mut() {
+            request.phase = phase;
+        }
+        if outbox {
+            state.outbox = vec![OutboxEntry::reply(
+                1,
+                CHECK_IN_CHANNEL_ID,
+                "Schick kurz deinen Code.".into(),
+                false,
+                None,
+            )];
+        }
+        state
+    };
+    let rows = [
+        (USER, with_phase(Phase::Dispatching, false)),
+        (OTHER, with_phase(Phase::Pending, true)),
+        (10, with_phase(Phase::WaitingForCode, false)),
+        (11, with_phase(Phase::Attempted, true)),
+        (12, with_phase(Phase::Expired, false)),
+    ];
+    for (user_id, state) in &rows {
+        assert_eq!(
+            store
+                .compare_exchange(*user_id, None, state)
+                .await
+                .expect("Zustand schreibbar"),
+            Cas::Written
+        );
+    }
+    sqlx::query("INSERT INTO bot.kv_store (ns, k, v) VALUES ($1, 'user:kaputt', $2)")
+        .bind(STATE_KV_NS)
+        .bind(serde_json::to_string(&with_phase(Phase::Pending, true)).expect("Zustand als JSON"))
+        .execute(db.pool())
+        .await
+        .expect("kaputter Schlüssel");
+    let sorted = |mut users: Vec<u64>| {
+        users.sort_unstable();
+        users
+    };
+    assert_eq!(
+        sorted(store.pending_users().await.expect("offene Bitten lesbar")),
+        vec![USER, OTHER, 10]
+    );
+    assert_eq!(
+        sorted(store.outbox_users().await.expect("Ausgang lesbar")),
+        vec![OTHER, 11]
+    );
+    assert_eq!(
+        watcher
+            .due_users()
+            .await
+            .expect("fällige Mitglieder lesbar"),
+        vec![USER, OTHER, 10, 11]
+    );
+    sqlx::query(
+        "INSERT INTO core.user_privacy (user_id, opted_out, deleted_at)
+         VALUES ($1, TRUE, NULL), ($2, FALSE, now())",
+    )
+    .bind(OTHER as i64)
+    .bind(11_i64)
+    .execute(db.pool())
+    .await
+    .expect("Datenschutzstand gesetzt");
+    assert_eq!(
+        watcher
+            .due_users()
+            .await
+            .expect("fällige Mitglieder lesbar"),
+        vec![USER, 10]
+    );
+    assert_eq!(store.opted_out(11).await, Ok(true));
+    assert_eq!(store.opted_out(USER).await, Ok(false));
 }
 
 #[cfg(feature = "testing")]
@@ -1885,8 +2044,8 @@ async fn postgres_zustand_claim_bekannter_code_und_opt_out() {
         store.known_code(USER).await.expect("Code lesbar"),
         Some(CODE.into())
     );
-    assert!(!store.opted_out(USER).await);
-    assert!(store.opted_out(u64::MAX).await);
+    assert_eq!(store.opted_out(USER).await, Ok(false));
+    assert_eq!(store.opted_out(u64::MAX).await, Ok(true));
     sqlx::query(
         "INSERT INTO core.user_privacy (user_id, opted_out) VALUES ($1, TRUE)
          ON CONFLICT (user_id) DO UPDATE SET opted_out = TRUE",
@@ -2058,7 +2217,7 @@ async fn decide_while_timer_runs(
 ) -> Arc<Lounge> {
     let lounge = Arc::new(setup());
     lounge.store.put(state).await;
-    lounge.store.handled.store(handled, Ordering::SeqCst);
+    *lounge.store.manual.lock().await = handled.then_some(ManualInvite::Invited);
     lounge.decide(vec![reply]);
     let (started, release) = lounge.brain.gate_first_call();
     let runner = lounge.clone();
@@ -2290,7 +2449,7 @@ async fn postgres_alte_einladung_zaehlt_nicht_fuer_die_neue_bitte() {
 #[tokio::test]
 async fn nachricht_ohne_startzeit_oder_aus_der_zukunft_bleibt_fuer_den_rueckblick() {
     let lounge = setup();
-    lounge.store.actions_unset.store(true, Ordering::SeqCst);
+    *lounge.store.actions_since.lock().await = None;
     let unmarked = lounge
         .watcher
         .handle_turn(
@@ -2300,7 +2459,7 @@ async fn nachricht_ohne_startzeit_oder_aus_der_zukunft_bleibt_fuer_den_rueckblic
         )
         .await;
     assert_eq!(unmarked, Ok(Turn::Failed));
-    lounge.store.actions_unset.store(false, Ordering::SeqCst);
+    *lounge.store.actions_since.lock().await = Some(0);
     let ahead = lounge
         .watcher
         .handle_turn(
@@ -2356,8 +2515,7 @@ async fn haengender_steam_versand_haelt_andere_nachrichten_nicht_auf() {
     lounge.invite.hold.store(true, Ordering::SeqCst);
     lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
     let (queue, inbox) = tokio::sync::mpsc::channel(8);
-    let missed = Arc::new(AtomicBool::new(false));
-    let reader = tokio::spawn(read_live(lounge.watcher.clone(), inbox, missed.clone()));
+    let reader = tokio::spawn(read_live(lounge.watcher.clone(), inbox));
     queue
         .send(message(1, NOW, "Kannst du mich einladen? 123456789"))
         .await
@@ -2377,7 +2535,222 @@ async fn haengender_steam_versand_haelt_andere_nachrichten_nicht_auf() {
     lounge.invite.release.notify_one();
     drop(queue);
     reader.await.expect("Leser endet");
-    assert!(!missed.load(Ordering::SeqCst));
+    assert!(!lounge.watcher.order().take_missed());
     assert_eq!(lounge.calls().await, 1);
     assert_eq!(phase(&lounge.store.state().await), Some(Phase::Attempted));
+}
+
+#[test]
+fn live_reihenfolge_haelt_den_autor_bis_zum_naechsten_rueckblick() {
+    let mut order = LiveOrder::default();
+    order.hold(USER);
+    assert!(order.holds(USER));
+    assert!(!order.holds(OTHER));
+    assert!(order.take_missed());
+    let generation = order.begin();
+    order.finish(generation, &HashSet::new());
+    assert!(!order.holds(USER));
+}
+
+#[test]
+fn halt_waehrend_laufendem_rueckblick_wartet_auf_die_folgerunde() {
+    let mut order = LiveOrder::default();
+    let first = order.begin();
+    order.hold(USER);
+    order.finish(first, &HashSet::new());
+    assert!(order.holds(USER));
+    let second = order.begin();
+    order.finish(second, &HashSet::new());
+    assert!(!order.holds(USER));
+}
+
+#[test]
+fn verpasste_gateway_nachrichten_halten_alle_bis_zum_rueckblick() {
+    let mut order = LiveOrder::default();
+    order.hold_everyone();
+    assert!(order.holds(OTHER));
+    let generation = order.begin();
+    order.finish(generation, &HashSet::from([USER]));
+    assert!(!order.holds(OTHER));
+    assert!(order.holds(USER));
+}
+
+#[test]
+fn start_haelt_live_nachrichten_bis_zum_ersten_rueckblick() {
+    let mut order = LiveOrder::at_start();
+    assert!(order.take_missed());
+    assert!(order.holds(USER));
+    let generation = order.begin();
+    order.finish(generation, &HashSet::new());
+    assert!(!order.holds(OTHER));
+    assert!(!order.holds(USER));
+}
+
+#[tokio::test]
+async fn gescheiterte_live_nachricht_haelt_spaetere_des_mitglieds_fuer_den_rueckblick() {
+    let lounge = setup();
+    lounge.decide(vec![Err(BrainError::Backend("weg".into()))]);
+    let first = lounge
+        .live(message(1, NOW, "Kann mich wer einladen? 123456789"), NOW)
+        .await;
+    assert_eq!(first, Turn::Failed);
+    let later = lounge.live(message(2, NOW + 10, "hallo?"), NOW + 10).await;
+    assert_eq!(later, Turn::Failed);
+    lounge.decide(vec![Ok(ConversationReply::Silent)]);
+    let other = lounge
+        .live(from(OTHER, message(3, NOW + 20, "moin")), NOW + 20)
+        .await;
+    assert_eq!(other, Turn::Stored(OTHER));
+    assert_eq!(turns(&lounge.brain).len(), 2);
+    assert!(!lounge.store.states.lock().await.contains_key(&USER));
+    lounge.decide(vec![
+        wants(InviteTurnAction::WaitForCommunity, None),
+        Ok(ConversationReply::Silent),
+    ]);
+    let generation = lounge.watcher.order().begin();
+    let failed = lounge
+        .watcher
+        .catch_up(NOW + 30, 0)
+        .await
+        .expect("Rückblick läuft");
+    lounge.watcher.order().finish(generation, &failed);
+    assert!(failed.is_empty());
+    let replayed: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .skip(2)
+        .map(|turn| turn.message)
+        .collect();
+    assert_eq!(replayed, ["Kann mich wer einladen? 123456789", "hallo?"]);
+    let state = lounge.store.state().await;
+    assert_eq!(state.last_seen, 2);
+    assert_eq!(phase(&state), Some(Phase::Pending));
+    lounge.decide(vec![Ok(ConversationReply::Silent)]);
+    let next = lounge.live(message(4, NOW + 40, "danke"), NOW + 40).await;
+    assert_eq!(next, Turn::Stored(USER));
+}
+
+#[tokio::test]
+async fn unlesbarer_kontext_verbraucht_die_live_nachricht_nicht() {
+    let lounge = setup();
+    lounge.port.history_fails.store(true, Ordering::SeqCst);
+    let turn = lounge
+        .live(message(1, NOW, "Kann mich wer einladen? 123456789"), NOW)
+        .await;
+    assert_eq!(turn, Turn::Failed);
+    assert!(turns(&lounge.brain).is_empty());
+    assert!(lounge.store.states.lock().await.is_empty());
+    assert!(lounge.watcher.order().take_missed());
+}
+
+#[tokio::test]
+async fn unlesbare_fakten_verbrauchen_die_nachricht_nicht() {
+    for pick in 0..3 {
+        let lounge = setup();
+        let flags = [
+            &lounge.store.privacy_fails,
+            &lounge.store.links_fail,
+            &lounge.store.audit_fails,
+        ];
+        flags[pick].store(true, Ordering::SeqCst);
+        let text = if pick == 1 {
+            "Kannst du mich einladen?"
+        } else {
+            "Kannst du mich einladen? 123456789"
+        };
+        let event = message(1, NOW, text);
+        let failed = lounge
+            .watcher
+            .handle_turn(&event, Context::Given(&[]), NOW)
+            .await;
+        assert!(failed.is_err());
+        assert!(turns(&lounge.brain).is_empty());
+        assert!(lounge.store.states.lock().await.is_empty());
+        flags[pick].store(false, Ordering::SeqCst);
+        lounge.decide(vec![Ok(ConversationReply::Silent)]);
+        let stored = lounge
+            .watcher
+            .handle_turn(&event, Context::Given(&[]), NOW)
+            .await;
+        assert_eq!(stored, Ok(Turn::Stored(USER)));
+    }
+}
+
+#[tokio::test]
+async fn unlesbarer_datenschutzstand_haelt_den_folgeschritt_an() {
+    let lounge = setup();
+    lounge.store.put(pending(true)).await;
+    lounge.store.privacy_fails.store(true, Ordering::SeqCst);
+    lounge.poll(NOW + 10).await;
+    assert_eq!(lounge.calls().await, 0);
+    lounge.store.privacy_fails.store(false, Ordering::SeqCst);
+    lounge.poll(NOW + 20).await;
+    assert_eq!(lounge.calls().await, 1);
+}
+
+#[tokio::test]
+async fn code_aus_stiller_nachricht_bleibt_fuer_den_naechsten_turn() {
+    for reply in [
+        Ok(ConversationReply::Silent),
+        decided(
+            InviteIntent::InviteProblem,
+            InviteTurnAction::Help,
+            Some("Schau mal in deine Steam-Bibliothek."),
+        ),
+    ] {
+        let lounge = setup();
+        lounge.decide(vec![reply, Ok(ConversationReply::Silent)]);
+        lounge
+            .post(message(1, NOW, "mein Code ist 123456789"), NOW)
+            .await;
+        assert_eq!(
+            lounge.store.state().await.friend_code.as_deref(),
+            Some(CODE)
+        );
+        lounge.store.progress.lock().await.invited = true;
+        lounge
+            .post(message(2, NOW + 10, "und jetzt?"), NOW + 10)
+            .await;
+        let turn = turns(&lounge.brain).remove(1);
+        assert!(turn.member.has_friend_code);
+        assert!(turn.member.already_invited);
+        assert!(!turn.member.code_in_message);
+    }
+}
+
+#[tokio::test]
+async fn laufende_einladung_von_hand_haelt_die_nachfrage_an_und_laeuft_trotzdem_ab() {
+    let lounge = setup();
+    lounge.store.put(pending(false)).await;
+    *lounge.store.manual.lock().await = Some(ManualInvite::InFlight);
+    lounge.poll(NOW + CHECK_IN_SECONDS).await;
+    assert!(notices(&lounge.brain).is_empty());
+    assert_eq!(phase(&lounge.store.state().await), Some(Phase::Pending));
+    lounge.poll(NOW + REQUEST_WINDOW_SECONDS + 1).await;
+    assert_eq!(phase(&lounge.store.state().await), Some(Phase::Expired));
+    assert!(notices(&lounge.brain).is_empty());
+    assert_eq!(lounge.calls().await, 0);
+}
+
+#[tokio::test]
+async fn rueckblick_bewertet_nur_nachrichten_im_anfragefenster() {
+    let lounge = setup();
+    lounge.port.history.lock().await.extend([
+        message(
+            1,
+            NOW - REQUEST_WINDOW_SECONDS - 10,
+            "Kann mich wer einladen? 123456789",
+        ),
+        from(
+            OTHER,
+            message(2, NOW - REQUEST_WINDOW_SECONDS + 10, "brauche invite"),
+        ),
+    ]);
+    lounge.decide(vec![Ok(ConversationReply::Silent)]);
+    assert_eq!(lounge.watcher.catch_up(NOW, 0).await, Ok(HashSet::new()));
+    let asked: Vec<_> = turns(&lounge.brain)
+        .into_iter()
+        .map(|turn| turn.message)
+        .collect();
+    assert_eq!(asked, ["brauche invite"]);
+    assert_eq!(*lounge.store.mark.lock().await, Some(2));
 }

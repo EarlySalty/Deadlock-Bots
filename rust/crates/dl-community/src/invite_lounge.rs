@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, MutexGuard};
 use std::time::Duration;
 
 use dl_brain::{
@@ -17,8 +16,8 @@ use sqlx::PgPool;
 mod status;
 use status::{
     after_invite, after_progress, check_in_age, check_in_step, classify_invite_reply,
-    steam_outcome, CheckIn, Claim, Notice, OutboxEntry, RequestStatus, SteamProgress, SteamWait,
-    Step,
+    steam_outcome, CheckIn, Claim, ManualInvite, Notice, OutboxEntry, RequestStatus, SteamProgress,
+    SteamWait, Step,
 };
 
 pub const CHECK_IN_CHANNEL_ID: u64 = 1_464_736_918_951_432_222;
@@ -30,7 +29,7 @@ const ACTIONS_SINCE_KEY: &str = "actions_since_v1";
 const CATCH_UP_MARK_KEY: &str = "catch_up_mark_v1";
 const USER_KEY_PREFIX: &str = "user:";
 const REQUEST_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
-const CATCH_UP_SECONDS: i64 = 3 * 24 * 60 * 60;
+const DISCORD_EPOCH_MILLIS: i64 = 1_420_070_400_000;
 const STEAM_ID64_BASE: u64 = 76_561_197_960_265_728;
 const DISPATCH_STALE_MILLIS: i64 =
     (dl_bridges::steam::INVITE_FORWARD_TIMEOUT_SECS as i64 + status::FOLLOW_UP_SECONDS) * 1000;
@@ -121,7 +120,7 @@ impl InviteLoungeReplyPort for dl_discord::DiscordAdapter {
                 author_id: message.author.id.get(),
                 content: message.content,
                 created_at: message.timestamp.unix_timestamp(),
-                created_at_millis: (message.id.get() >> 22) as i64 + 1_420_070_400_000,
+                created_at_millis: snowflake_millis(message.id.get()),
                 is_bot: message.author.bot,
                 reply_message_id: message
                     .message_reference
@@ -167,11 +166,20 @@ enum Phase {
 }
 
 impl Phase {
+    const OPEN: [Self; 3] = [Self::WaitingForCode, Self::Pending, Self::Dispatching];
+
     fn open(self) -> bool {
-        matches!(
-            self,
-            Self::WaitingForCode | Self::Pending | Self::Dispatching
-        )
+        Self::OPEN.contains(&self)
+    }
+
+    fn open_names() -> Result<Vec<String>, String> {
+        Self::OPEN
+            .iter()
+            .map(|phase| match serde_json::to_value(phase) {
+                Ok(serde_json::Value::String(name)) => Ok(name),
+                _ => Err(format!("Phase {phase:?} hat keinen Textnamen")),
+            })
+            .collect()
     }
 }
 
@@ -262,7 +270,7 @@ trait LoungeStore: Send + Sync {
     async fn pending_users(&self) -> Result<Vec<u64>, String>;
     async fn outbox_users(&self) -> Result<Vec<u64>, String>;
     async fn known_code(&self, user_id: u64) -> Result<Option<String>, String>;
-    async fn opted_out(&self, user_id: u64) -> bool;
+    async fn opted_out(&self, user_id: u64) -> Result<bool, String>;
     async fn hidden_authors(&self, user_ids: &[u64]) -> Result<HashSet<u64>, String>;
     async fn actions_since(&self) -> Result<Option<i64>, String>;
     async fn mark_actions_since(&self, now: i64) -> Result<(), String>;
@@ -275,7 +283,7 @@ trait LoungeStore: Send + Sync {
         requested_at: i64,
     ) -> Result<SteamProgress, String>;
     async fn invited(&self, code: &str) -> Result<bool, String>;
-    async fn handled_since(&self, code: &str, since: i64) -> Result<bool, String>;
+    async fn manual_invite(&self, code: &str, since: i64) -> Result<ManualInvite, String>;
 }
 
 fn stored_matches(raw: Option<&str>, previous: Option<&LoungeState>) -> bool {
@@ -329,7 +337,7 @@ impl LoungeStore for PgLoungeStore {
         if !stored_matches(current.as_deref(), previous) {
             return Ok(Cas::Stale);
         }
-        let written = sqlx::query(
+        sqlx::query(
             "INSERT INTO bot.kv_store (ns, k, v) VALUES ($1, $2, $3)
              ON CONFLICT (ns, k) DO UPDATE SET v = EXCLUDED.v",
         )
@@ -340,28 +348,37 @@ impl LoungeStore for PgLoungeStore {
         .await
         .map_err(|err| err.to_string())?;
         tx.commit().await.map_err(|err| err.to_string())?;
-        Ok(if written.rows_affected() == 1 {
-            Cas::Written
-        } else {
-            Cas::Stale
-        })
+        Ok(Cas::Written)
     }
 
     async fn pending_users(&self) -> Result<Vec<u64>, String> {
-        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND v::jsonb #>> '{request,phase}' IN ('WaitingForCode', 'Pending', 'Dispatching')")
-            .bind(STATE_KV_NS).fetch_all(&self.pool).await.map_err(|err| err.to_string())?;
-        user_ids(keys)
+        let keys: Vec<String> =
+            sqlx::query_scalar(&visible_rows("kv.v::jsonb #>> '{request,phase}' = ANY($3)"))
+                .bind(STATE_KV_NS)
+                .bind(USER_KEY_PREFIX)
+                .bind(Phase::open_names()?)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|err| err.to_string())?;
+        Ok(user_ids(keys))
     }
 
     async fn outbox_users(&self) -> Result<Vec<u64>, String> {
-        let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM bot.kv_store WHERE ns = $1 AND jsonb_array_length(COALESCE(v::jsonb -> 'outbox', '[]'::jsonb)) > 0")
-            .bind(STATE_KV_NS).fetch_all(&self.pool).await.map_err(|err| err.to_string())?;
-        user_ids(keys)
+        let keys: Vec<String> = sqlx::query_scalar(&visible_rows(
+            "jsonb_array_length(COALESCE(kv.v::jsonb -> 'outbox', '[]'::jsonb)) > 0",
+        ))
+        .bind(STATE_KV_NS)
+        .bind(USER_KEY_PREFIX)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(user_ids(keys))
     }
 
     async fn known_code(&self, user_id: u64) -> Result<Option<String>, String> {
+        let discord_id = i64::try_from(user_id).map_err(|err| err.to_string())?;
         let steam_id: Option<String> = sqlx::query_scalar("SELECT steam_id FROM core.steam_links WHERE discord_id = $1 AND verified ORDER BY primary_account DESC, steam_id LIMIT 1")
-            .bind(user_id as i64).fetch_optional(&self.pool).await.map_err(|err| err.to_string())?;
+            .bind(discord_id).fetch_optional(&self.pool).await.map_err(|err| err.to_string())?;
         Ok(steam_id
             .and_then(|id| id.parse::<u64>().ok())
             .and_then(|id| id.checked_sub(STEAM_ID64_BASE))
@@ -369,11 +386,8 @@ impl LoungeStore for PgLoungeStore {
             .map(|id| id.to_string()))
     }
 
-    async fn opted_out(&self, user_id: u64) -> bool {
-        match i64::try_from(user_id) {
-            Ok(user_id) => crate::privacy::is_opted_out(&self.pool, user_id).await,
-            Err(_) => true,
-        }
+    async fn opted_out(&self, user_id: u64) -> Result<bool, String> {
+        Ok(!self.hidden_authors(&[user_id]).await?.is_empty())
     }
 
     async fn hidden_authors(&self, user_ids: &[u64]) -> Result<HashSet<u64>, String> {
@@ -386,14 +400,9 @@ impl LoungeStore for PgLoungeStore {
             .iter()
             .filter_map(|id| i64::try_from(*id).ok())
             .collect();
-        let rows: Vec<i64> = sqlx::query_scalar(
-            "SELECT user_id FROM core.user_privacy
-              WHERE user_id = ANY($1) AND (opted_out OR deleted_at IS NOT NULL)",
-        )
-        .bind(&ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|err| err.to_string())?;
+        let rows = dl_central_db::hidden_privacy_users(&self.pool, &ids)
+            .await
+            .map_err(|err| err.to_string())?;
         hidden.extend(rows.into_iter().filter_map(|id| u64::try_from(id).ok()));
         Ok(hidden)
     }
@@ -435,22 +444,44 @@ impl LoungeStore for PgLoungeStore {
     }
 
     async fn actions_since(&self) -> Result<Option<i64>, String> {
-        Ok(kv::get(&self.pool, BACKFILL_KV_NS, ACTIONS_SINCE_KEY)
+        kv::get(&self.pool, BACKFILL_KV_NS, ACTIONS_SINCE_KEY)
             .await
             .map_err(|err| err.to_string())?
-            .and_then(|value| value.parse().ok()))
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| "Ungültige Startzeit der Invite-Lounge".to_string())
+            })
+            .transpose()
     }
 
     async fn mark_actions_since(&self, now: i64) -> Result<(), String> {
-        kv::set_if_absent(
-            &self.pool,
-            BACKFILL_KV_NS,
-            ACTIONS_SINCE_KEY,
-            &now.to_string(),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+        let stored = kv::get(&self.pool, BACKFILL_KV_NS, ACTIONS_SINCE_KEY)
+            .await
+            .map_err(|err| err.to_string())?;
+        match stored {
+            Some(value) if value.parse::<i64>().is_ok() => Ok(()),
+            Some(value) => {
+                tracing::warn!(%value, now, "Invite-Lounge: ungültige Startzeit wird durch den aktuellen Start ersetzt");
+                kv::set(
+                    &self.pool,
+                    BACKFILL_KV_NS,
+                    ACTIONS_SINCE_KEY,
+                    &now.to_string(),
+                )
+                .await
+                .map_err(|err| err.to_string())
+            }
+            None => kv::set_if_absent(
+                &self.pool,
+                BACKFILL_KV_NS,
+                ACTIONS_SINCE_KEY,
+                &now.to_string(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        }
     }
 
     async fn steam_progress(
@@ -491,33 +522,47 @@ impl LoungeStore for PgLoungeStore {
         })
     }
 
-    async fn handled_since(&self, code: &str, since: i64) -> Result<bool, String> {
+    async fn manual_invite(&self, code: &str, since: i64) -> Result<ManualInvite, String> {
         let Some(steam_id) = steam_id64(code) else {
-            return Ok(false);
+            return Ok(ManualInvite::None);
         };
-        sqlx::query_scalar(
+        let (invited, in_flight): (bool, bool) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM steam.bot_event_log
                             WHERE event_type = 'playtest_invite' AND steam_id = $1
-                              AND occurred_at >= to_timestamp($2))
+                              AND decision = 'sent' AND occurred_at >= to_timestamp($2))
                  OR EXISTS(SELECT 1 FROM steam.beta_invite_audit
-                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2))
-                 OR EXISTS(SELECT 1 FROM steam.invite_requests
-                            WHERE steam_id64 = $1 AND created_at >= $2)",
+                            WHERE steam_id64 = $1 AND invited_at >= to_timestamp($2)),
+                    EXISTS(SELECT 1 FROM steam.invite_requests WHERE steam_id64 = $1)",
         )
         .bind(steam_id)
         .bind(since as f64)
         .fetch_one(&self.pool)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+        Ok(ManualInvite::from_evidence(invited, in_flight))
     }
 }
 
-fn user_ids(keys: Vec<String>) -> Result<Vec<u64>, String> {
+fn visible_rows(filter: &str) -> String {
+    format!(
+        "SELECT kv.k FROM bot.kv_store kv
+          WHERE kv.ns = $1 AND {filter}
+            AND NOT EXISTS (SELECT 1 FROM core.user_privacy p
+                             WHERE $2 || p.user_id::text = kv.k AND {})",
+        dl_central_db::PRIVACY_HIDDEN_PREDICATE
+    )
+}
+
+fn user_ids(keys: Vec<String>) -> Vec<u64> {
     keys.into_iter()
-        .map(|key| {
-            key.strip_prefix(USER_KEY_PREFIX)
-                .and_then(|id| id.parse().ok())
-                .ok_or_else(|| "Ungültiger Nutzer-Schlüssel im Lounge-Zustand".to_string())
+        .filter_map(|key| {
+            let id = key
+                .strip_prefix(USER_KEY_PREFIX)
+                .and_then(|id| id.parse().ok());
+            if id.is_none() {
+                tracing::warn!(%key, "Invite-Lounge: ungültiger Nutzer-Schlüssel im Lounge-Zustand wird übersprungen");
+            }
+            id
         })
         .collect()
 }
@@ -548,6 +593,64 @@ fn steam_id64(code: &str) -> Option<i64> {
 }
 
 type UserLocks = std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>;
+
+#[derive(Debug, Default)]
+struct LiveOrder {
+    started: u64,
+    everyone: Option<u64>,
+    authors: HashMap<u64, u64>,
+    missed: bool,
+}
+
+impl LiveOrder {
+    fn at_start() -> Self {
+        Self {
+            everyone: Some(1),
+            missed: true,
+            ..Self::default()
+        }
+    }
+
+    fn hold(&mut self, author_id: u64) {
+        let needed = self.started + 1;
+        let held = self.authors.entry(author_id).or_insert(needed);
+        *held = (*held).max(needed);
+        self.missed = true;
+    }
+
+    fn hold_everyone(&mut self) {
+        let needed = self.started + 1;
+        self.everyone = Some(self.everyone.map_or(needed, |held| held.max(needed)));
+        self.missed = true;
+    }
+
+    fn holds(&mut self, author_id: u64) -> bool {
+        let held = self.everyone.is_some() || self.authors.contains_key(&author_id);
+        if held {
+            self.hold(author_id);
+        }
+        held
+    }
+
+    fn begin(&mut self) -> u64 {
+        self.started += 1;
+        self.started
+    }
+
+    fn finish(&mut self, generation: u64, failed: &HashSet<u64>) {
+        if self.everyone.is_some_and(|needed| needed <= generation) {
+            self.everyone = None;
+        }
+        self.authors.retain(|_, needed| *needed > generation);
+        for author_id in failed {
+            self.hold(*author_id);
+        }
+    }
+
+    fn take_missed(&mut self) -> bool {
+        std::mem::take(&mut self.missed)
+    }
+}
 type FollowUps = std::sync::Mutex<HashMap<u64, bool>>;
 
 struct InFlight<'a> {
@@ -608,6 +711,7 @@ pub struct InviteLoungeWatcher {
     clock_millis: Arc<dyn Fn() -> i64 + Send + Sync>,
     locks: UserLocks,
     follow_ups: FollowUps,
+    order: std::sync::Mutex<LiveOrder>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -664,7 +768,14 @@ impl InviteLoungeWatcher {
             clock_millis: Arc::new(|| chrono::Utc::now().timestamp_millis()),
             locks: UserLocks::default(),
             follow_ups: FollowUps::default(),
+            order: std::sync::Mutex::new(LiveOrder::at_start()),
         }
+    }
+
+    fn order(&self) -> MutexGuard<'_, LiveOrder> {
+        self.order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn watches(&self, event: &LoungeMessage) -> bool {
@@ -674,14 +785,27 @@ impl InviteLoungeWatcher {
             && event.channel_id == CHECK_IN_CHANNEL_ID
     }
 
-    async fn serve(&self, event: LoungeMessage) -> Turn {
+    async fn serve_live(&self, event: LoungeMessage) -> Turn {
+        if self.order().holds(event.author_id) {
+            tracing::info!(
+                user_id = event.author_id,
+                message_id = event.message_id,
+                "Invite-Lounge: eine frühere Nachricht des Mitglieds wartet auf den Rückblick, diese folgt dort in Reihenfolge"
+            );
+            return Turn::Failed;
+        }
         let now = (self.clock_millis)() / 1000;
-        self.handle_turn(&event, Context::Fetch, now)
+        let turn = self
+            .handle_turn(&event, Context::Fetch, now)
             .await
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge-Nachricht konnte nicht verarbeitet werden, der Rückblick holt sie nach");
                 Turn::Failed
-            })
+            });
+        if turn == Turn::Failed {
+            self.order().hold(event.author_id);
+        }
+        turn
     }
 
     async fn run_follow_up(self: Arc<Self>, user_id: u64) {
@@ -697,21 +821,18 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn context_page(&self, event: &LoungeMessage) -> Vec<LoungeMessage> {
-        match self
-            .port
+    async fn context_page(&self, event: &LoungeMessage) -> Result<Vec<LoungeMessage>, String> {
+        self.port
             .history(event.channel_id, Some(event.message_id))
             .await
-        {
-            Ok(page) => page,
-            Err(error) => {
-                tracing::warn!(%error, message_id = event.message_id, "Invite-Lounge: Verlauf für den Kontext nicht lesbar");
-                Vec::new()
-            }
-        }
+            .map_err(|error| format!("Verlauf für den Kontext nicht lesbar: {error}"))
     }
 
-    async fn visible(&self, context: Vec<LoungeMessage>, member_id: u64) -> Vec<LoungeMessage> {
+    async fn visible(
+        &self,
+        context: Vec<LoungeMessage>,
+        member_id: u64,
+    ) -> Result<Vec<LoungeMessage>, String> {
         let mut others: Vec<u64> = context
             .iter()
             .filter(|message| !message.is_bot && message.author_id != member_id)
@@ -720,28 +841,31 @@ impl InviteLoungeWatcher {
         others.sort_unstable();
         others.dedup();
         if others.is_empty() {
-            return context;
+            return Ok(context);
         }
-        let hidden = match self.store.hidden_authors(&others).await {
-            Ok(hidden) => hidden,
-            Err(error) => {
-                tracing::warn!(%error, "Invite-Lounge: Datenschutzstand anderer Mitglieder nicht lesbar, ihre Zeilen bleiben weg");
-                others.into_iter().collect()
-            }
-        };
-        context
+        let hidden = self.store.hidden_authors(&others).await.map_err(|error| {
+            format!("Datenschutzstand anderer Mitglieder nicht lesbar: {error}")
+        })?;
+        Ok(context
             .into_iter()
             .filter(|message| !hidden.contains(&message.author_id))
-            .collect()
+            .collect())
     }
 
     async fn follow_up(&self, user_id: u64, now: i64) {
-        if self.store.opted_out(user_id).await {
-            tracing::info!(
-                user_id,
-                "Invite-Lounge handelt nach Datenschutz-Opt-out nicht mehr"
-            );
-            return;
+        match self.store.opted_out(user_id).await {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::info!(
+                    user_id,
+                    "Invite-Lounge handelt nach Datenschutz-Opt-out nicht mehr"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, user_id, "Invite-Lounge: Datenschutzstand nicht lesbar, der Folgeschritt wartet auf den nächsten Takt");
+                return;
+            }
         }
         if let Err(error) = self.dispatch_due(user_id, now).await {
             tracing::warn!(%error, user_id, "Invite-Lounge-Auftrag konnte nicht abgeschlossen werden");
@@ -760,7 +884,7 @@ impl InviteLoungeWatcher {
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
-        match self.accepts(event, bot_id, now).await? {
+        match self.accepts(event, now).await? {
             Admission::Accept => {}
             Admission::Ignore => return Ok(Turn::Skipped),
             Admission::Defer => return Ok(Turn::Failed),
@@ -775,7 +899,7 @@ impl InviteLoungeWatcher {
         {
             return Ok(Turn::Skipped);
         }
-        if self.store.opted_out(user_id).await {
+        if self.store.opted_out(user_id).await? {
             tracing::info!(
                 message_id = event.message_id,
                 "Invite-Lounge überspringt Nachricht nach Datenschutz-Opt-out"
@@ -783,14 +907,14 @@ impl InviteLoungeWatcher {
             return Ok(Turn::Skipped);
         }
         let context = match context {
-            Context::Fetch => self.context_page(event).await,
+            Context::Fetch => self.context_page(event).await?,
             Context::Given(context) => context.to_vec(),
         };
-        let context = self.visible(context, user_id).await;
+        let context = self.visible(context, user_id).await?;
         let last_seen = previous.as_ref().map_or(0, |state| state.last_seen);
         let facts = self
             .member_facts(event, &context, last_seen, previous.as_ref())
-            .await;
+            .await?;
         let member = member_state(previous.as_ref(), &facts);
         let Some(turn) = build_turn(event, &context, bot_id, member) else {
             tracing::info!(
@@ -873,13 +997,8 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn accepts(
-        &self,
-        event: &LoungeMessage,
-        bot_id: u64,
-        now: i64,
-    ) -> Result<Admission, String> {
-        if !self.watches(event) || event.author_id == bot_id {
+    async fn accepts(&self, event: &LoungeMessage, now: i64) -> Result<Admission, String> {
+        if !self.watches(event) {
             return Ok(Admission::Ignore);
         }
         if event.content.trim().is_empty() {
@@ -939,7 +1058,7 @@ impl InviteLoungeWatcher {
         context: &[LoungeMessage],
         last_seen: u64,
         state: Option<&LoungeState>,
-    ) -> MemberFacts {
+    ) -> Result<MemberFacts, String> {
         let message_code = unseen_code(event, context, last_seen);
         let linked_code = match message_code {
             Some(_) => None,
@@ -947,18 +1066,21 @@ impl InviteLoungeWatcher {
                 .store
                 .known_code(event.author_id)
                 .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(%error, user_id = event.author_id, "Invite-Lounge: verknüpfter Steam-Account nicht lesbar");
-                    None
-                }),
+                .map_err(|error| format!("Verknüpfter Steam-Account nicht lesbar: {error}"))?,
         };
         let mut facts = MemberFacts {
             message_code,
             linked_code,
             invited: false,
         };
-        facts.invited = self.invited(facts.code(state).as_deref()).await;
-        facts
+        if let Some(code) = facts.code(state) {
+            facts.invited = self
+                .store
+                .invited(&code)
+                .await
+                .map_err(|error| format!("Einladungsstand nicht lesbar: {error}"))?;
+        }
+        Ok(facts)
     }
 
     async fn invited(&self, code: Option<&str>) -> bool {
@@ -1037,7 +1159,7 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn catch_up(self: &Arc<Self>, now: i64, start_mark: u64) -> Result<(), String> {
+    async fn catch_up(self: &Arc<Self>, now: i64, start_mark: u64) -> Result<HashSet<u64>, String> {
         let mark = match self.store.catch_up_mark().await? {
             Some(mark) => mark,
             None => {
@@ -1046,7 +1168,7 @@ impl InviteLoungeWatcher {
             }
         };
         let mut history = self
-            .recent_history(CHECK_IN_CHANNEL_ID, now - CATCH_UP_SECONDS, mark)
+            .recent_history(CHECK_IN_CHANNEL_ID, now - REQUEST_WINDOW_SECONDS, mark)
             .await?;
         for message in &mut history {
             message.guild_id = Some(self.guild_id);
@@ -1086,14 +1208,7 @@ impl InviteLoungeWatcher {
         if reached > mark {
             self.store.set_catch_up_mark(reached).await?;
         }
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "{} Mitglieder warten auf die nächste Runde des Rückblicks",
-                failed.len()
-            ))
-        }
+        Ok(failed)
     }
 
     async fn recent_history(
@@ -1117,13 +1232,17 @@ impl InviteLoungeWatcher {
             if before.is_some_and(|id| oldest >= id) {
                 return Err("Der Verlauf liefert keine ältere Seite".into());
             }
-            let reached_start =
-                oldest <= mark || page.iter().any(|message| message.created_at < since);
-            history.extend(
-                page.into_iter()
-                    .filter(|message| message.created_at >= since),
-            );
-            if reached_start {
+            let reached_window = page.iter().any(|message| message.created_at < since);
+            history.extend(page);
+            if oldest <= mark {
+                return Ok(history);
+            }
+            if reached_window {
+                tracing::info!(
+                    mark,
+                    oldest,
+                    "Invite-Lounge-Rückblick endet am Anfragefenster, ältere ungelesene Nachrichten bleiben unbewertet"
+                );
                 return Ok(history);
             }
             before = Some(oldest);
@@ -1336,8 +1455,16 @@ impl InviteLoungeWatcher {
         if !check_in_now && !is_due(request, &previous.status) {
             return Ok(());
         }
-        if self.someone_on_it(user_id, &previous, request, &code).await {
-            return self.close_handled(user_id, &previous).await;
+        match self.manual_state(&previous, request, &code).await? {
+            ManualInvite::Invited => return self.close_handled(user_id, &previous).await,
+            ManualInvite::InFlight => {
+                tracing::debug!(
+                    user_id,
+                    "Invite-Lounge: Einladung von Hand läuft noch, die Nachfrage wartet"
+                );
+                return Ok(());
+            }
+            ManualInvite::None => {}
         }
         if check_in_now {
             return self.check_in(user_id, &previous, &code, now).await;
@@ -1345,26 +1472,19 @@ impl InviteLoungeWatcher {
         self.send_invite(user_id, &previous, &code, now).await
     }
 
-    async fn someone_on_it(
+    async fn manual_state(
         &self,
-        user_id: u64,
         state: &LoungeState,
         request: &Request,
         code: &str,
-    ) -> bool {
+    ) -> Result<ManualInvite, String> {
         let dispatched_here = state
             .dispatch_started_at_millis
             .is_some_and(|started| started / 1000 >= request.created_at);
         if request.direct || state.status.invite_now || dispatched_here {
-            return false;
+            return Ok(ManualInvite::None);
         }
-        match self.store.handled_since(code, request.created_at).await {
-            Ok(handled) => handled,
-            Err(err) => {
-                tracing::warn!(user_id, error = %err, "Invite-Lounge: Einladungsprüfung fehlgeschlagen, Bitte läuft weiter");
-                false
-            }
-        }
+        self.store.manual_invite(code, request.created_at).await
     }
 
     async fn recover_dispatch(
@@ -1614,10 +1734,12 @@ impl InviteLoungeWatcher {
         }
     }
 
-    #[cfg(test)]
-    async fn poll_due(&self, now: i64) -> Result<(), String> {
+    async fn poll_due(
+        self: &Arc<Self>,
+        follow_ups: &mut tokio::task::JoinSet<()>,
+    ) -> Result<(), String> {
         for user_id in self.due_users().await? {
-            self.follow_up(user_id, now).await;
+            follow_ups.spawn(self.clone().run_follow_up(user_id));
         }
         Ok(())
     }
@@ -1643,12 +1765,11 @@ pub fn spawn(
         pool, port, invite, brain, guild_id,
     ));
     let messages = dispatcher.subscribe_messages();
-    let start_mark = snowflake_at(chrono::Utc::now().timestamp_millis());
+    let started_at_millis = (watcher.clock_millis)();
     let (queue, inbox) = tokio::sync::mpsc::channel(LIVE_QUEUE);
-    let missed = Arc::new(AtomicBool::new(false));
-    let reader = tokio::spawn(read_live(watcher.clone(), inbox, missed.clone()));
+    let reader = tokio::spawn(read_live(watcher.clone(), inbox));
     tokio::spawn(async move {
-        watch(watcher, messages, queue, missed, start_mark).await;
+        watch(watcher, messages, queue, started_at_millis).await;
         reader.abort();
     })
 }
@@ -1656,7 +1777,6 @@ pub fn spawn(
 async fn read_live(
     watcher: Arc<InviteLoungeWatcher>,
     mut inbox: tokio::sync::mpsc::Receiver<LoungeMessage>,
-    missed: Arc<AtomicBool>,
 ) {
     let mut follow_ups = tokio::task::JoinSet::new();
     loop {
@@ -1665,12 +1785,8 @@ async fn read_live(
                 let Some(message) = message else {
                     break;
                 };
-                match watcher.serve(message).await {
-                    Turn::Stored(user_id) => {
-                        follow_ups.spawn(watcher.clone().run_follow_up(user_id));
-                    }
-                    Turn::Skipped => {}
-                    Turn::Failed => missed.store(true, Ordering::SeqCst),
+                if let Turn::Stored(user_id) = watcher.serve_live(message).await {
+                    follow_ups.spawn(watcher.clone().run_follow_up(user_id));
                 }
             }
             Some(result) = follow_ups.join_next(), if !follow_ups.is_empty() => log_follow_up(result),
@@ -1691,11 +1807,10 @@ async fn watch(
     watcher: Arc<InviteLoungeWatcher>,
     mut messages: tokio::sync::broadcast::Receiver<dl_discord::MessageEvent>,
     queue: tokio::sync::mpsc::Sender<LoungeMessage>,
-    missed: Arc<AtomicBool>,
-    start_mark: u64,
+    started_at_millis: i64,
 ) {
+    let start_mark = snowflake_at(started_at_millis);
     let mut tick = tokio::time::interval(TICK);
-    let mut actions_since_ready = false;
     let mut caught_up = false;
     let mut backoff = TICK;
     let mut next_catch_up = tokio::time::Instant::now();
@@ -1713,44 +1828,50 @@ async fn watch(
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(message)) => {
                             tracing::warn!(message_id = message.message_id, "Invite-Lounge-Warteschlange voll, der Rückblick holt die Nachricht nach");
-                            missed.store(true, Ordering::SeqCst);
+                            watcher.order().hold(message.author_id);
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "Invite-Lounge hat Gateway-Nachrichten verpasst, der Rückblick holt sie nach");
-                    missed.store(true, Ordering::SeqCst);
+                    watcher.order().hold_everyone();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             _ = tick.tick() => {
-                let now = chrono::Utc::now().timestamp();
-                if !actions_since_ready {
-                    match watcher.store.mark_actions_since(now).await {
-                        Ok(()) => actions_since_ready = true,
-                        Err(err) => tracing::warn!(%err, "Invite-Lounge-Startzeit konnte nicht gespeichert werden"),
-                    }
-                }
-                if catch_ups.is_empty() && missed.swap(false, Ordering::SeqCst) {
+                let now = (watcher.clock_millis)() / 1000;
+                if catch_ups.is_empty() && watcher.order().take_missed() {
                     caught_up = false;
                 }
-                if actions_since_ready && !caught_up && catch_ups.is_empty() && tokio::time::Instant::now() >= next_catch_up {
-                    let reader = watcher.clone();
-                    catch_ups.spawn(async move { reader.catch_up(now, start_mark).await });
+                if !caught_up && catch_ups.is_empty() && tokio::time::Instant::now() >= next_catch_up {
+                    match watcher.store.mark_actions_since(started_at_millis / 1000).await {
+                        Ok(()) => {
+                            let reader = watcher.clone();
+                            let generation = watcher.order().begin();
+                            catch_ups.spawn(async move { (generation, reader.catch_up(now, start_mark).await) });
+                        }
+                        Err(err) => tracing::warn!(%err, "Invite-Lounge-Startzeit konnte nicht gespeichert werden, der Rückblick wartet"),
+                    }
                 }
-                match watcher.due_users().await {
-                    Ok(users) => for user_id in users { dispatches.spawn(watcher.clone().run_follow_up(user_id)); },
-                    Err(err) => tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden"),
+                if let Err(err) = watcher.poll_due(&mut dispatches).await {
+                    tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden");
                 }
             }
             Some(result) = catch_ups.join_next(), if !catch_ups.is_empty() => {
                 match result {
-                    Ok(Ok(())) => {
-                        caught_up = true;
-                        backoff = TICK;
+                    Ok((generation, Ok(failed))) => {
+                        watcher.order().finish(generation, &failed);
+                        if failed.is_empty() {
+                            caught_up = true;
+                            backoff = TICK;
+                        } else {
+                            backoff = (backoff * 2).min(MAX_CATCH_UP_BACKOFF);
+                            next_catch_up = tokio::time::Instant::now() + backoff;
+                            tracing::warn!(members = failed.len(), retry_secs = backoff.as_secs(), "Invite-Lounge-Rückblick: Mitglieder warten auf die nächste Runde");
+                        }
                     }
-                    Ok(Err(err)) => {
+                    Ok((_, Err(err))) => {
                         backoff = (backoff * 2).min(MAX_CATCH_UP_BACKOFF);
                         next_catch_up = tokio::time::Instant::now() + backoff;
                         tracing::warn!(%err, retry_secs = backoff.as_secs(), "Invite-Lounge-Rückblick unvollständig, neuer Versuch folgt");
@@ -1768,7 +1889,11 @@ async fn watch(
 }
 
 fn snowflake_at(millis: i64) -> u64 {
-    u64::try_from(millis.saturating_sub(1_420_070_400_000)).map_or(0, |since| since << 22)
+    u64::try_from(millis.saturating_sub(DISCORD_EPOCH_MILLIS)).map_or(0, |since| since << 22)
+}
+
+fn snowflake_millis(id: u64) -> i64 {
+    i64::try_from(id >> 22).map_or(i64::MAX, |since| since.saturating_add(DISCORD_EPOCH_MILLIS))
 }
 
 fn build_turn(
@@ -1904,6 +2029,9 @@ fn apply_turn(
     now: i64,
 ) {
     state.last_seen = event.message_id;
+    if let Some(code) = facts.message_code.clone() {
+        state.friend_code = Some(code);
+    }
     let Some(decision) = decision else {
         return;
     };
@@ -1931,18 +2059,15 @@ fn apply_turn(
     }
 }
 
-fn pending(state: &LoungeState) -> bool {
-    state
-        .request
-        .as_ref()
-        .is_some_and(|request| request.phase == Phase::Pending)
-}
-
 fn open_request(state: &LoungeState) -> Option<&Request> {
     state
         .request
         .as_ref()
         .filter(|request| request.phase.open())
+}
+
+fn coded_request(state: &LoungeState) -> bool {
+    open_request(state).is_some_and(|request| request.phase != Phase::WaitingForCode)
 }
 
 fn start_request(state: &mut LoungeState, event: &LoungeMessage, phase: Phase, direct: bool) {
@@ -1966,7 +2091,7 @@ fn wait_for_community(state: &mut LoungeState, event: &LoungeMessage, code: Opti
         return;
     };
     state.friend_code = Some(code);
-    if !pending(state) {
+    if !coded_request(state) {
         start_request(state, event, Phase::Pending, false);
     }
 }
@@ -1977,7 +2102,7 @@ fn ask_already_invited(
     code: Option<String>,
     now: i64,
 ) -> Option<Claim> {
-    if !pending(state) {
+    if !coded_request(state) {
         state.friend_code = Some(code?);
         start_request(state, event, Phase::Pending, false);
     }
@@ -1994,11 +2119,16 @@ fn invite_now(state: &mut LoungeState, event: &LoungeMessage, code: Option<Strin
     let Some(code) = code else {
         return;
     };
-    state.friend_code = Some(code);
-    if pending(state) {
-        state.status.invite_now = true;
-    } else {
-        start_request(state, event, Phase::Pending, true);
+    match open_request(state).map(|request| request.phase) {
+        Some(Phase::Dispatching) => {}
+        Some(Phase::Pending) => {
+            state.friend_code = Some(code);
+            state.status.invite_now = true;
+        }
+        _ => {
+            state.friend_code = Some(code);
+            start_request(state, event, Phase::Pending, true);
+        }
     }
 }
 

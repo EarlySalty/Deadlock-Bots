@@ -388,6 +388,25 @@ pub(super) fn after_progress(wait: SteamWait, progress: SteamProgress, now: i64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ManualInvite {
+    Invited,
+    InFlight,
+    None,
+}
+
+impl ManualInvite {
+    pub(super) fn from_evidence(invited: bool, in_flight: bool) -> Self {
+        if invited {
+            Self::Invited
+        } else if in_flight {
+            Self::InFlight
+        } else {
+            Self::None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CheckIn {
     AlreadyInvited,
     Ask,

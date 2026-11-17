@@ -1,4 +1,4 @@
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 
 const RAW_EVENT_RETENTION_ERASURE_LOCK_KEY: i64 = 0x5241_5745_5241_5345;
 
@@ -27,21 +27,33 @@ pub async fn lock_user_privacy(
     Ok(())
 }
 
-/// Sperrt den User und prueft den Privacy-Grabstein unter demselben Lock.
+pub const PRIVACY_HIDDEN_PREDICATE: &str = "(opted_out = TRUE OR deleted_at IS NOT NULL)";
+
 pub async fn lock_user_privacy_and_is_opted_out(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
 ) -> Result<bool, sqlx::Error> {
     lock_user_privacy(tx, user_id).await?;
-    sqlx::query_scalar(
-        "SELECT EXISTS(
-             SELECT 1 FROM core.user_privacy
-              WHERE user_id = $1 AND (opted_out = TRUE OR deleted_at IS NOT NULL)
-         )",
-    )
-    .bind(user_id)
-    .fetch_one(&mut **tx)
-    .await
+    let sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND {PRIVACY_HIDDEN_PREDICATE})"
+    );
+    sqlx::query_scalar(&sql)
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await
+}
+
+pub async fn hidden_privacy_users(
+    pool: &PgPool,
+    user_ids: &[i64],
+) -> Result<Vec<i64>, sqlx::Error> {
+    let sql = format!(
+        "SELECT user_id FROM core.user_privacy WHERE user_id = ANY($1) AND {PRIVACY_HIDDEN_PREDICATE}"
+    );
+    sqlx::query_scalar(&sql)
+        .bind(user_ids)
+        .fetch_all(pool)
+        .await
 }
 
 #[cfg(all(test, feature = "testing"))]

@@ -15,7 +15,8 @@ pub use core_users::{get_user, upsert_user, CoreUser};
 pub use dm_optout::{clear_dm_opted_out, is_dm_opted_out, set_dm_opted_out};
 pub use kv::{delete as delete_kv, get as get_kv, set as set_kv};
 pub use locks::{
-    lock_raw_event_retention_erasure, lock_user_privacy, lock_user_privacy_and_is_opted_out,
+    hidden_privacy_users, lock_raw_event_retention_erasure, lock_user_privacy,
+    lock_user_privacy_and_is_opted_out, PRIVACY_HIDDEN_PREDICATE,
 };
 pub use platform_connections::{
     discord_ids_for_twitch_ids, list_twitch_links, twitch_link_for_discord,
