@@ -60,7 +60,6 @@ pub mod supporter_wire {
         super::MASTER_BROKER_TOKEN_NAME,
         super::MAIN_BOT_TOKEN_NAME,
     ];
-    pub const TOKEN_HEADER: &str = "X-Internal-Token";
     pub const CHECKOUT_PATH: &str = "/supporter/v1/checkout";
     pub const TIP_PATH: &str = "/supporter/v1/tip";
     pub const PORTAL_PATH: &str = "/supporter/v1/portal";

@@ -205,7 +205,7 @@ impl HttpSupporterLinks {
         let response = self
             .http
             .post(format!("{base}{path}"))
-            .header(wire::TOKEN_HEADER, token)
+            .header(crate::serversync::TOKEN_HEADER, token)
             .json(&body)
             .send()
             .await
@@ -269,7 +269,7 @@ impl FundingSource for HttpSupporterLinks {
         let response = self
             .http
             .get(format!("{}{FUNDING_PATH}", self.steam_base))
-            .header(wire::TOKEN_HEADER, token)
+            .header(crate::serversync::TOKEN_HEADER, token)
             .send()
             .await
             .map_err(|error| format!("{FUNDING_PATH} nicht erreichbar: {error}"))?;
@@ -938,7 +938,7 @@ mod tests {
                 async move {
                     let path = uri.path().to_string();
                     let token = headers
-                        .get(wire::TOKEN_HEADER)
+                        .get(crate::serversync::TOKEN_HEADER)
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_string);
                     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
