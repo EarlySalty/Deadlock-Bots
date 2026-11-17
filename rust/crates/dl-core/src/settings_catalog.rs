@@ -61,34 +61,143 @@ fn invalid() -> CatalogError {
     CatalogError("Ungültige Einstellung: Typ, Wertebereich und Pflichtfelder prüfen.")
 }
 
-fn range_bounds<T: Copy + TryInto<i64>>(range: &std::ops::RangeInclusive<T>) -> (i64, i64) {
-    (
-        (*range.start()).try_into().unwrap_or(i64::MAX),
-        (*range.end()).try_into().unwrap_or(i64::MAX),
-    )
+type Bounds = (i64, i64);
+
+const fn u64_bounds(range: &std::ops::RangeInclusive<u64>) -> Bounds {
+    assert!(*range.end() <= i64::MAX as u64);
+    (*range.start() as i64, *range.end() as i64)
 }
 
-fn german_number(raw: &str) -> String {
-    let (sign, digits) = raw.strip_prefix('-').map_or(("", raw), |rest| ("-", rest));
-    let (whole, fraction) = digits
-        .split_once('.')
-        .map_or((digits, None), |(w, f)| (w, Some(f)));
-    let grouped = if whole.len() > 3 {
-        let mut out = String::new();
-        for (index, digit) in whole.chars().enumerate() {
-            if index > 0 && (whole.len() - index) % 3 == 0 {
-                out.push('.');
-            }
-            out.push(digit);
-        }
-        out
-    } else {
-        whole.to_owned()
-    };
-    match fraction {
-        Some(fraction) => format!("{sign}{grouped},{fraction}"),
-        None => format!("{sign}{grouped}"),
+const fn usize_bounds(range: &std::ops::RangeInclusive<usize>) -> Bounds {
+    assert!(*range.end() <= i64::MAX as usize);
+    (*range.start() as i64, *range.end() as i64)
+}
+
+const fn i64_bounds(range: &std::ops::RangeInclusive<i64>) -> Bounds {
+    (*range.start(), *range.end())
+}
+
+const DISCORD_ID_BOUNDS: Bounds = u64_bounds(&rc::DISCORD_ID_RANGE);
+const RUNTIME_DELAY_BOUNDS: Bounds = u64_bounds(&rc::RUNTIME_DELAY_SECONDS_RANGE);
+const RUNTIME_SPAN_BOUNDS: Bounds = i64_bounds(&rc::RUNTIME_SPAN_RANGE);
+const BROKER_IDEMPOTENCY_MAX_ENTRIES_BOUNDS: Bounds =
+    usize_bounds(&rc::BROKER_IDEMPOTENCY_MAX_ENTRIES_RANGE);
+const BRAIN_DAILY_USER_LIMIT_BOUNDS: Bounds = usize_bounds(&rc::BRAIN_DAILY_USER_LIMIT_RANGE);
+const BRAIN_MAX_QUESTION_LEN_BOUNDS: Bounds = usize_bounds(&rc::BRAIN_MAX_QUESTION_LEN_RANGE);
+const MATCHER_THRESHOLD_BOUNDS: Bounds = i64_bounds(&rc::MATCHER_THRESHOLD_RANGE);
+const SUPPORTER_MAX_REVOKES_BOUNDS: Bounds = u64_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE);
+const SUPPORTER_SYNC_INTERVAL_BOUNDS: Bounds =
+    u64_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE);
+const SUPPORTER_TIER_BOUNDS: Bounds =
+    u64_bounds(&(rc::SUPPORTER_TIER_MIN_EUR..=rc::SUPPORTER_TIER_MAX_EUR));
+const SUPPORTER_FUNDING_GOAL_BOUNDS: Bounds = i64_bounds(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE);
+
+const DISCORD_ID_PATHS: &[&str] = &[
+    "twitch_invites.excluded_voice_channel_ids",
+    "runtime.start.owner_id",
+    "runtime.start.command_guild_id",
+    "runtime.start.mcp_guild_id",
+    "runtime.start.mcp_verified_role_id",
+    "runtime.start.broker_channels",
+    "runtime.start.broker_guilds",
+    "runtime.start.broker_roles",
+    "runtime.bridges.matcher_guild_id",
+    "runtime.bridges.matcher_notify_channel_id",
+    "runtime.bridges.matcher_role_id",
+    "runtime.dashboard.owner_user_id",
+    "runtime.dashboard.moderator_role_id",
+    "runtime.dashboard.audit_bot_user_id",
+    "runtime.dashboard.insights_guild_id",
+    "runtime.dashboard.auth_guild_ids",
+    "runtime.community.lfg_panel_channel_id",
+    "runtime.community.lfg_forum_channel_id",
+    "runtime.community.lfg_freetext_channel_id",
+    "runtime.community.brain_help_channel_id",
+    "runtime.community.scrim_category_id",
+    "runtime.community.concierge_fallback_category_id",
+    "runtime.community.concierge_pate_category_id",
+    "runtime.community.concierge_pate_channel_id",
+    "runtime.community.concierge_pate_panel_channel_id",
+    "runtime.community.concierge_pate_help_channel_id",
+    "runtime.community.concierge_mod_role_id",
+    "runtime.community.concierge_test_users",
+    "runtime.moderation.channel_id",
+    "runtime.moderation.scan_channel_ids",
+    "runtime.ai.transparency_channel_id",
+    "runtime.ai.brain_channels",
+];
+
+fn loader_bounds(path: &str) -> Option<Bounds> {
+    if DISCORD_ID_PATHS.contains(&path) {
+        return Some(DISCORD_ID_BOUNDS);
     }
+    Some(match path {
+        "runtime.community.router_auto_move_delay_seconds"
+        | "runtime.ai.transparency_error_repeat_seconds"
+        | "runtime.ai.transparency_error_followup_seconds"
+        | "runtime.ai.brain_cooldown_seconds" => RUNTIME_DELAY_BOUNDS,
+        "runtime.dashboard.session_ttl_seconds"
+        | "runtime.dashboard.oauth_state_ttl_seconds"
+        | "runtime.community.survey_interval_days"
+        | "runtime.community.concierge_active_minutes"
+        | "runtime.moderation.timeout_minutes"
+        | "runtime.moderation.behavior_proposal_timeout_minutes" => RUNTIME_SPAN_BOUNDS,
+        "runtime.start.broker_idempotency_max_entries" => BROKER_IDEMPOTENCY_MAX_ENTRIES_BOUNDS,
+        "runtime.ai.brain_daily_user_limit" => BRAIN_DAILY_USER_LIMIT_BOUNDS,
+        "runtime.ai.brain_max_question_len" => BRAIN_MAX_QUESTION_LEN_BOUNDS,
+        "runtime.bridges.matcher_auto_threshold" | "runtime.bridges.matcher_review_threshold" => {
+            MATCHER_THRESHOLD_BOUNDS
+        }
+        "runtime.community.supporter_role_sync_max_revokes" => SUPPORTER_MAX_REVOKES_BOUNDS,
+        "runtime.community.supporter_sync_interval_seconds" => SUPPORTER_SYNC_INTERVAL_BOUNDS,
+        SUPPORTER_TIERS_PATH => SUPPORTER_TIER_BOUNDS,
+        "runtime.community.supporter_funding_goal_cents" => SUPPORTER_FUNDING_GOAL_BOUNDS,
+        _ => return None,
+    })
+}
+
+fn loader_number_bounds(path: &str) -> Option<&'static std::ops::RangeInclusive<f64>> {
+    match path {
+        "runtime.start.broker_idempotency_ttl_seconds"
+        | "runtime.start.broker_inflight_ttl_seconds"
+        | "runtime.start.broker_waiter_timeout_seconds" => Some(&rc::BROKER_SECONDS_RANGE),
+        "runtime.bridges.twitch_timeout_seconds" => Some(&rc::TWITCH_TIMEOUT_SECONDS_RANGE),
+        "runtime.bridges.matcher_fuzzy_floor"
+        | "runtime.moderation.analyze_flag_threshold"
+        | "runtime.moderation.auto_verify_threshold"
+        | "runtime.moderation.propose_verify_threshold" => Some(&rc::UNIT_INTERVAL_RANGE),
+        _ => None,
+    }
+}
+
+fn german_number(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn german_decimal(value: f64) -> String {
+    value.to_string().replace('.', ",")
+}
+
+fn bound_texts(
+    integer: Option<Bounds>,
+    number: Option<&std::ops::RangeInclusive<f64>>,
+) -> Option<(String, String)> {
+    if let Some(range) = number {
+        return Some((german_decimal(*range.start()), german_decimal(*range.end())));
+    }
+    let (min, max) = integer?;
+    Some((
+        german_number(u64::try_from(min).ok()?),
+        german_number(u64::try_from(max).ok()?),
+    ))
 }
 
 /// TSV ist eine explizite, versionierte Erlaubnisliste, keine Reflexion über
@@ -185,30 +294,31 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
             match path.as_str() {
                 "concierge.timeout_seconds" => bounds = Some((1, 110)),
                 "tempvoice.empty_lane_grace_seconds" => bounds = Some((1, 86_400)),
+                "twitch_invites.personal_links_per_channel"
+                | "twitch_invites.guild_invite_reserve" => bounds = Some((0, 1000)),
+                "twitch_invites.evaluation_interval_seconds" => bounds = Some((1, 86_400)),
                 "runtime.bridges.matcher_max_ai_per_scan" => bounds = Some((0, 1000)),
                 "runtime.bridges.matcher_scan_interval_hours" => bounds = Some((1, 8760)),
-                "runtime.ai.brain_max_question_len" => bounds = Some((1, 65_536)),
-                "runtime.community.supporter_role_sync_max_revokes" => {
-                    bounds = Some(range_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE))
-                }
-                "runtime.community.supporter_sync_interval_seconds" => {
-                    bounds = Some(range_bounds(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE))
-                }
-                SUPPORTER_TIERS_PATH => {
-                    bounds = Some(range_bounds(
-                        &(rc::SUPPORTER_TIER_MIN_EUR..=rc::SUPPORTER_TIER_MAX_EUR),
-                    ))
-                }
-                "runtime.community.supporter_funding_goal_cents" => {
-                    bounds = Some(range_bounds(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE))
-                }
                 _ => {}
             }
-            let with_bounds = |text: String| match bounds {
-                Some((min, max)) => text
-                    .replace("{min}", &german_number(&min.to_string()))
-                    .replace("{max}", &german_number(&max.to_string())),
+            if let Some(loader) = loader_bounds(&path) {
+                bounds = Some(loader);
+            }
+            let number_bounds = loader_number_bounds(&path);
+            let texts = bound_texts(bounds, number_bounds);
+            let with_bounds = |text: String| match &texts {
+                Some((min, max)) => text.replace("{min}", min).replace("{max}", max),
                 None => text,
+            };
+            let (min, max) = match number_bounds {
+                Some(range) => (
+                    Some(range.start().to_string()),
+                    Some(range.end().to_string()),
+                ),
+                None => (
+                    bounds.map(|(min, _)| min.to_string()),
+                    bounds.map(|(_, max)| max.to_string()),
+                ),
             };
             result.push(Field {
                 path,
@@ -219,8 +329,8 @@ pub fn fields(spec: &str, accounts: &[i16]) -> Vec<Field> {
                 writable: columns[4] == "edit",
                 restart_required: true,
                 help: with_bounds(replace(columns[5])),
-                min: bounds.map(|(min, _)| min.to_string()),
-                max: bounds.map(|(_, max)| max.to_string()),
+                min,
+                max,
                 length,
                 choices,
             });
@@ -533,16 +643,119 @@ pub fn apply(
 mod tests {
     use super::*;
     use serde_json::json;
+    fn loads_with(path: &str, value: Value) -> Result<(), String> {
+        let fields = crate::admin_settings::fields();
+        let changes = BTreeMap::from([(path.to_owned(), value)]);
+        let normalized =
+            normalize(&fields, &changes).map_err(|err| format!("Katalog lehnt ab: {err}"))?;
+        let mut document: toml_edit::DocumentMut = "schema_version = 1\n"
+            .parse()
+            .map_err(|err| format!("{err}"))?;
+        apply(&mut document, &normalized).map_err(|err| format!("Anwenden: {err}"))?;
+        crate::bot_config::BotConfig::parse(&document.to_string())
+            .map(|_| ())
+            .map_err(|err| format!("Laden lehnt ab: {err}"))
+    }
+    fn catalog_probes(field: &Field) -> Vec<Value> {
+        let bounds = [&field.min, &field.max].into_iter().flatten();
+        match field.kind {
+            Kind::Integer => bounds.map(|bound| Value::String(bound.clone())).collect(),
+            Kind::IntegerList => bounds
+                .map(|bound| {
+                    Value::Array(vec![
+                        Value::String(bound.clone());
+                        field.length.unwrap_or(1)
+                    ])
+                })
+                .collect(),
+            _ => {
+                let bound = |raw: &Option<String>, open: f64| {
+                    raw.as_deref()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or(open)
+                };
+                vec![
+                    json!(bound(&field.min, -1e15)),
+                    json!(bound(&field.max, 1e15)),
+                ]
+            }
+        }
+    }
+    #[test]
+    fn jeder_wert_im_katalogbereich_wird_auch_geladen() {
+        let mut rejected = Vec::new();
+        for field in crate::admin_settings::fields().iter().filter(|field| {
+            field.writable && matches!(field.kind, Kind::Integer | Kind::Number | Kind::IntegerList)
+        }) {
+            for probe in catalog_probes(field) {
+                if let Err(reason) = loads_with(&field.path, probe.clone()) {
+                    rejected.extend([format!("{} = {probe}: {reason}", field.path)]);
+                }
+            }
+        }
+        assert!(rejected.is_empty(), "{rejected:#?}");
+    }
     #[test]
     fn deutsche_zahlen_fuer_grenzen() {
-        assert_eq!(german_number("1000"), "1.000");
-        assert_eq!(german_number("86400"), "86.400");
-        assert_eq!(german_number("120"), "120");
-        assert_eq!(german_number("0.5"), "0,5");
-        assert_eq!(
-            german_number("-9223372036854775808"),
-            "-9.223.372.036.854.775.808"
-        );
+        for (value, text) in [
+            (0, "0"),
+            (120, "120"),
+            (1000, "1.000"),
+            (86_400, "86.400"),
+            (99_999_999, "99.999.999"),
+            (i64::MAX as u64, "9.223.372.036.854.775.807"),
+        ] {
+            assert_eq!(german_number(value), text);
+        }
+        assert_eq!(german_decimal(0.0), "0");
+        assert_eq!(german_decimal(1.0), "1");
+        assert_eq!(german_decimal(0.001), "0,001");
+    }
+    #[test]
+    fn katalogtexte_nennen_grenzen_nur_als_platzhalter() {
+        for field in crate::admin_settings::fields() {
+            for text in [&field.label, &field.help] {
+                assert!(
+                    !text.contains("{min}") && !text.contains("{max}"),
+                    "{}: Platzhalter ohne Grenze",
+                    field.path
+                );
+            }
+        }
+        for line in crate::admin_settings::SPEC
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let columns: Vec<_> = line.split('\t').collect();
+            let fields = crate::admin_settings::fields();
+            let Some(field) = fields.iter().find(|field| field.path == columns[0]) else {
+                continue;
+            };
+            let (Some(min), Some(max)) = (field.min.clone(), field.max.clone()) else {
+                continue;
+            };
+            let readable = |raw: &str| {
+                raw.parse::<u64>()
+                    .map(german_number)
+                    .unwrap_or_else(|_| raw.replace('.', ","))
+            };
+            let literals = [
+                format!("{min}–{max}"),
+                format!("{min} bis {max}"),
+                format!("{}–{}", readable(&min), readable(&max)),
+                format!("{} bis {}", readable(&min), readable(&max)),
+                format!("von {}", readable(&max)),
+            ];
+            for text in [columns[3], columns[5]] {
+                for literal in &literals {
+                    assert!(
+                        !text.contains(literal.as_str()),
+                        "{}: Grenze `{literal}` steht als Zahl im Text",
+                        columns[0]
+                    );
+                }
+            }
+        }
     }
     fn supporter_field(path: &str) -> Field {
         crate::admin_settings::fields()
@@ -558,8 +771,8 @@ mod tests {
                 format!(
                     "Standard ist {}, höchstens {}. Bei {} wird niemandem",
                     rc::SUPPORTER_DEFAULT_MAX_REVOKES,
-                    german_number(&rc::SUPPORTER_MAX_REVOKES_RANGE.end().to_string()),
-                    german_number(&rc::SUPPORTER_MAX_REVOKES_RANGE.start().to_string())
+                    german_number(*rc::SUPPORTER_MAX_REVOKES_RANGE.end()),
+                    german_number(*rc::SUPPORTER_MAX_REVOKES_RANGE.start())
                 ),
                 rc::SUPPORTER_MAX_REVOKES_RANGE.start().to_string(),
                 rc::SUPPORTER_MAX_REVOKES_RANGE.end().to_string(),
@@ -569,8 +782,8 @@ mod tests {
                 format!(
                     "Standard ist {}, mindestens {}, höchstens {}.",
                     rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
-                    german_number(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start().to_string()),
-                    german_number(&rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end().to_string())
+                    german_number(*rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start()),
+                    german_number(*rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end())
                 ),
                 rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start().to_string(),
                 rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end().to_string(),
@@ -581,8 +794,8 @@ mod tests {
                     "Standard ist {}, also {} €. Erlaubt sind {} bis {}.",
                     rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
                     rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100,
-                    german_number(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().to_string()),
-                    german_number(&rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().to_string())
+                    german_number(rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().unsigned_abs()),
+                    german_number(rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().unsigned_abs())
                 ),
                 rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().to_string(),
                 rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().to_string(),
@@ -597,8 +810,8 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(", "),
                     rc::SUPPORTER_MAX_TIERS,
-                    german_number(&rc::SUPPORTER_TIER_MIN_EUR.to_string()),
-                    german_number(&rc::SUPPORTER_TIER_MAX_EUR.to_string())
+                    german_number(rc::SUPPORTER_TIER_MIN_EUR),
+                    german_number(rc::SUPPORTER_TIER_MAX_EUR)
                 ),
                 rc::SUPPORTER_TIER_MIN_EUR.to_string(),
                 rc::SUPPORTER_TIER_MAX_EUR.to_string(),
