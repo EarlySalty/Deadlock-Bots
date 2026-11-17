@@ -1984,17 +1984,29 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         .await
         .unwrap_or_else(|error| panic!("{reference_name}: {error}"));
         let shape = "SELECT am.amname, index.indnatts::int4, index.indisunique,
-                            index.indpred IS NULL, pg_get_indexdef(index.indexrelid, 1, false)
+                            index.indpred IS NULL, pg_get_indexdef(index.indexrelid, 1, false),
+                            (SELECT opcname::text FROM pg_opclass WHERE oid = index.indclass[0]),
+                            (SELECT collname::text FROM pg_collation
+                              WHERE oid = index.indcollation[0])
                        FROM pg_index index
                        JOIN pg_class class ON class.oid = index.indexrelid
                        JOIN pg_am am ON am.oid = class.relam
                       WHERE index.indexrelid = to_regclass($1)";
-        let actual: Option<(String, i32, bool, bool, String)> = sqlx::query_as(shape)
+        type Shape = (
+            String,
+            i32,
+            bool,
+            bool,
+            String,
+            Option<String>,
+            Option<String>,
+        );
+        let actual: Option<Shape> = sqlx::query_as(shape)
             .bind(format!("steam.{index_name}"))
             .fetch_optional(&mut *reference)
             .await
             .expect("read billing index");
-        let expected: (String, i32, bool, bool, String) = sqlx::query_as(shape)
+        let expected: Shape = sqlx::query_as(shape)
             .bind(&reference_name)
             .fetch_one(&mut *reference)
             .await

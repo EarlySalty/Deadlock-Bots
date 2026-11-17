@@ -53,17 +53,6 @@ async fn seed(
     Ok(())
 }
 
-async fn opt_out(pool: &PgPool, discord_id: i64) -> TestResult {
-    sqlx::query(
-        "INSERT INTO core.user_privacy(user_id, opted_out, reason, updated_at)
-         VALUES ($1, true, 'test', now())",
-    )
-    .bind(discord_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 async fn paid_at_matches_updated_at(
     pool: &PgPool,
     source_ref: &str,
@@ -116,7 +105,7 @@ async fn backfill_reaches_every_tip_row_and_only_stripe_tips_carry_paid_at() -> 
     seed(pool, 7102, "stripe", "sub_backfill", true).await?;
     seed(pool, 7103, "stripe", &open_ended, false).await?;
     seed(pool, 7104, "manual", &manual_tip, true).await?;
-    opt_out(pool, 7103).await?;
+    dl_central_db::testing::block_member(pool, 7103, false).await?;
 
     apply(pool, &sql).await?;
     apply(pool, &sql).await?;
@@ -202,5 +191,29 @@ async fn a_tip_written_without_paid_at_gets_it_and_keeps_it() -> TestResult {
         paid_at_matches_updated_at(pool, &tip_ref("boost_like")).await?,
         None
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stripe_tip_without_paid_at_violates_the_check() -> TestResult {
+    let db = test_pool().await?;
+    let pool = db.pool();
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE core.supporter_sources DISABLE TRIGGER supporter_sources_tip_paid_at")
+        .execute(&mut *tx)
+        .await?;
+    let violated = sqlx::query(
+        "INSERT INTO core.supporter_sources
+             (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
+         VALUES (7301, 'stripe', $1, 500, NULL, now())",
+    )
+    .bind(tip_ref("pi_without_paid_at"))
+    .execute(&mut *tx)
+    .await
+    .err()
+    .and_then(|err| err.into_database_error())
+    .and_then(|err| err.constraint().map(str::to_owned));
+    tx.rollback().await?;
+    assert_eq!(violated.as_deref(), Some(CONSTRAINT));
     Ok(())
 }
