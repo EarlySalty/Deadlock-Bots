@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, MutexGuard};
 use std::time::Duration;
 
+use dl_brain::brain_api::bounded_turn;
 use dl_brain::{
     ConversationReply, InviteChatLine, InviteMemberState, InviteRequestPhase, InviteSpeaker,
-    InviteTurn, InviteTurnAction, InviteTurnDecision, MAX_CHAT_LINE_CHARS, MAX_TASK_TEXT_CHARS,
+    InviteTurn, InviteTurnAction, InviteTurnDecision,
 };
 use dl_bridges::steam::STEAM_BOT_FRIEND_CODE;
 use dl_central_db::kv;
@@ -14,6 +15,7 @@ use sqlx::PgPool;
 
 #[path = "invite_lounge_status.rs"]
 mod status;
+pub use status::CHECK_IN_SECONDS;
 use status::{
     after_invite, after_progress, check_in_age, check_in_step, classify_invite_reply,
     steam_outcome, CheckIn, Claim, ManualInvite, Notice, OutboxEntry, RequestStatus, SteamProgress,
@@ -49,7 +51,8 @@ fn user_key(user_id: impl std::fmt::Display) -> String {
 }
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]{6,10}(?-u:\b)").ok());
+    LazyLock::new(|| Regex::new(r"(?-u:\b)[0-9]+(?-u:\b)").ok());
+const MIN_FRIEND_CODE: u64 = 100_000;
 static URL_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"(?i)(?:https?://|www\.|steamcommunity\.com/|s\.team/)\S+").ok());
 static MENTION_RE: LazyLock<Option<Regex>> =
@@ -196,6 +199,8 @@ struct LoungeState {
     last_seen: u64,
     friend_code: Option<String>,
     request: Option<Request>,
+    #[serde(default)]
+    hint_sent: bool,
     last_result: Option<String>,
     dispatch_started_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "RequestStatus::is_empty")]
@@ -572,7 +577,8 @@ fn friend_code_id(code: &str) -> Option<u64> {
         return None;
     }
     code.parse::<u64>().ok().filter(|id| {
-        *id > 0 && *id <= u64::from(u32::MAX) && *id != u64::from(STEAM_BOT_FRIEND_CODE)
+        (MIN_FRIEND_CODE..=u64::from(u32::MAX)).contains(id)
+            && *id != u64::from(STEAM_BOT_FRIEND_CODE)
     })
 }
 
@@ -1902,15 +1908,9 @@ fn build_turn(
     bot_id: u64,
     member: InviteMemberState,
 ) -> Option<InviteTurn> {
-    let message = turn_text(&event.content, event.author_id, bot_id, MAX_TASK_TEXT_CHARS)?;
+    let message = turn_text(&event.content, event.author_id, bot_id)?;
     let line = |message: &LoungeMessage| {
-        turn_text(
-            &message.content,
-            event.author_id,
-            bot_id,
-            MAX_CHAT_LINE_CHARS,
-        )
-        .map(|text| InviteChatLine {
+        turn_text(&message.content, event.author_id, bot_id).map(|text| InviteChatLine {
             speaker: speaker(message, event.author_id, bot_id),
             text,
         })
@@ -1921,8 +1921,7 @@ fn build_turn(
         .collect();
     earlier.sort_by_key(|message| message.message_id);
     earlier.dedup_by_key(|message| message.message_id);
-    let mut recent: Vec<InviteChatLine> = earlier.into_iter().filter_map(line).collect();
-    recent.drain(..recent.len().saturating_sub(dl_brain::MAX_CHAT_LINES));
+    let recent: Vec<InviteChatLine> = earlier.into_iter().filter_map(line).collect();
     let reply_to = event
         .reply_message_id
         .and_then(|id| {
@@ -1931,12 +1930,12 @@ fn build_turn(
                 .find(|message| !message.system && message.message_id == id)
         })
         .and_then(line);
-    Some(InviteTurn {
+    Some(bounded_turn(&InviteTurn {
         message,
         reply_to,
         recent,
         member,
-    })
+    }))
 }
 
 fn speaker(message: &LoungeMessage, member_id: u64, bot_id: u64) -> InviteSpeaker {
@@ -1949,7 +1948,7 @@ fn speaker(message: &LoungeMessage, member_id: u64, bot_id: u64) -> InviteSpeake
     }
 }
 
-fn turn_text(content: &str, member_id: u64, bot_id: u64, max_chars: usize) -> Option<String> {
+fn turn_text(content: &str, member_id: u64, bot_id: u64) -> Option<String> {
     let text = match MENTION_RE.as_ref() {
         Some(regex) => regex
             .replace_all(content, |caps: &Captures| {
@@ -1959,7 +1958,7 @@ fn turn_text(content: &str, member_id: u64, bot_id: u64, max_chars: usize) -> Op
         None => content.to_string(),
     };
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.chars().take(max_chars).collect())
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn mention_label(kind: &str, id: &str, member_id: u64, bot_id: u64) -> &'static str {

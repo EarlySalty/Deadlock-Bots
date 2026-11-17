@@ -2223,6 +2223,8 @@ pub(crate) mod tests {
         RichMessage, RoleMembers,
     };
 
+    const DELETED_REPLY_TARGET: u64 = 404;
+
     struct UnusedDiscordPort {
         message_reactions: Result<Vec<MessageReaction>, PortError>,
         add_reaction_calls: Mutex<Vec<(u64, u64, String)>>,
@@ -2349,6 +2351,9 @@ pub(crate) mod tests {
             reply: &ChannelReply,
             content: &str,
         ) -> Result<u64, PortError> {
+            if reply.message_id == DELETED_REPLY_TARGET {
+                return Err(PortError::MessageNotFound);
+            }
             let mut calls = self
                 .channel_reply_calls
                 .lock()
@@ -2610,6 +2615,15 @@ pub(crate) mod tests {
         assert_eq!(send("stray", stray_mentions).await.status(), 400);
         let denied = r#"{"channel_id":43,"content":"x","reply_to_message_id":55}"#;
         assert_eq!(send("denied", denied).await.status(), 403);
+        let deleted = r#"{"channel_id":42,"content":"<@7> x","reply_to_message_id":404,"allowed_user_ids":[7]}"#;
+        let response = send("invite-lounge:404:reply", deleted).await;
+        assert_eq!(response.status(), 404);
+        let bytes = axum::body::to_bytes(response.into_body(), 10000)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(data["error"]["code"], "not_found");
+        assert_eq!(data["error"]["message"], "reply target not found");
         assert_eq!(
             *port.channel_reply_calls.lock().expect("calls"),
             vec![(

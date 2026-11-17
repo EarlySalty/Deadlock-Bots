@@ -14,7 +14,7 @@ use brain_contracts::bot_tasks::{
     MAX_READABLE_CHANNELS, MAX_TASK_TEXT_CHARS,
 };
 use brain_contracts::image::QueryImage;
-use brain_contracts::invite::{InviteChatLine, InviteTurn};
+use brain_contracts::invite::{InviteChatLine, InviteTurn, InviteTurnAction, InviteTurnDecision};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -246,7 +246,7 @@ fn bounded_chat(entries: &[ChatEntry]) -> Vec<ChatLine> {
     lines
 }
 
-fn bounded_turn(turn: &InviteTurn) -> InviteTurn {
+pub fn bounded_turn(turn: &InviteTurn) -> InviteTurn {
     let line = |line: &InviteChatLine| {
         let text: String = line.text.chars().take(MAX_CHAT_LINE_CHARS).collect();
         (!text.trim().is_empty()).then_some(InviteChatLine {
@@ -358,20 +358,7 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
         BotTaskResult::Conversation {
             reply: BotReply::Decided { decision },
             ..
-        } if decision.valid() && decision.action != crate::InviteTurnAction::Silent => {
-            Ok(ConversationReply::Decided { decision })
-        }
-        BotTaskResult::Conversation {
-            reply: BotReply::Decided { decision },
-            ..
-        } if !decision.valid() => {
-            tracing::warn!(
-                klasse = "vertrag",
-                action = decision.action.as_str(),
-                "Brain-Entscheidung verletzt den Vertrag und wird verworfen"
-            );
-            Ok(ConversationReply::Silent)
-        }
+        } => Ok(decided_reply(decision)),
         BotTaskResult::Conversation { .. } => Ok(ConversationReply::Silent),
         BotTaskResult::Failed {
             failure: TaskFailure::DeliveryRejected,
@@ -380,6 +367,21 @@ fn project_conversation(result: BotTaskResult) -> Result<ConversationReply, Brai
         BotTaskResult::Failed { failure, .. } => Err(classified_backend_error(failure.as_str())),
         _ => Err(classified_backend_error("vertrag")),
     }
+}
+
+pub fn decided_reply(decision: InviteTurnDecision) -> ConversationReply {
+    if !decision.valid() {
+        tracing::warn!(
+            klasse = "vertrag",
+            action = decision.action.as_str(),
+            "Brain-Entscheidung verletzt den Vertrag und wird verworfen"
+        );
+        return ConversationReply::Silent;
+    }
+    if decision.action == InviteTurnAction::Silent {
+        return ConversationReply::Silent;
+    }
+    ConversationReply::Decided { decision }
 }
 
 fn backend_error() -> BrainError {
@@ -1053,7 +1055,10 @@ mod tests {
             text: text.into(),
         };
         let mut recent = vec![line("  ")];
-        recent.extend((0..MAX_CHAT_LINES + 3).map(|index| line(&index.to_string())));
+        recent.extend(
+            (0..MAX_CHAT_LINES + 3)
+                .map(|index| line(&format!("{index}{}", "z".repeat(MAX_CHAT_LINE_CHARS)))),
+        );
         let turn = InviteTurn {
             message: "x".repeat(MAX_TASK_TEXT_CHARS + 5),
             reply_to: Some(line(&"y".repeat(MAX_CHAT_LINE_CHARS + 5))),
@@ -1070,7 +1075,11 @@ mod tests {
         assert!(bounded.valid());
         assert_eq!(bounded.message.chars().count(), MAX_TASK_TEXT_CHARS);
         assert_eq!(bounded.recent.len(), MAX_CHAT_LINES);
-        assert_eq!(bounded.recent[0].text, "3");
+        assert!(bounded.recent[0].text.starts_with('3'));
+        assert!(bounded
+            .recent
+            .iter()
+            .all(|line| line.text.chars().count() == MAX_CHAT_LINE_CHARS));
         assert_eq!(
             bounded
                 .reply_to
@@ -1079,6 +1088,20 @@ mod tests {
             Some(MAX_CHAT_LINE_CHARS)
         );
         assert_eq!(bounded_turn(&bounded), bounded);
+        let request = BotTaskRequest {
+            contract_version: BOT_TASK_VERSION.to_owned(),
+            request_id: "bounds-2".to_owned(),
+            identity: BotIdentity::Discord {
+                guild_id: None,
+                channel_id: 1,
+                user_id: 2,
+            },
+            task: BotTask::Conversation(
+                conversation_task(&DiscordConversation::InviteTurn { turn }, Vec::new())
+                    .expect("Aufgabe"),
+            ),
+        };
+        assert_eq!(request.validate(), Ok(()));
     }
 
     #[test]

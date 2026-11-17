@@ -247,6 +247,7 @@ pub(crate) mod test_brain {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use dl_brain::brain_api::decided_reply;
     use dl_brain::{
         AiAnswerer, BrainError, BrainOutcome, ConversationReply, DialogSpeaker, DiscordAnswerTask,
         DiscordConversation, DiscordConversationRequest, InviteIntent, InviteTurnAction,
@@ -287,6 +288,7 @@ pub(crate) mod test_brain {
         default_reply: Option<ConversationReply>,
         gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
         pub(crate) calls: Arc<AtomicUsize>,
+        unscripted_turns: UnscriptedTurns,
         pub(crate) bodies: Arc<Mutex<Vec<String>>>,
         pub(crate) requests: Mutex<Vec<DiscordConversationRequest>>,
     }
@@ -330,6 +332,17 @@ pub(crate) mod test_brain {
 
         pub(crate) fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Default)]
+    struct UnscriptedTurns(AtomicUsize);
+
+    impl Drop for UnscriptedTurns {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                assert_eq!(self.0.load(Ordering::SeqCst), 0, "Brain-Zug ohne Skript");
+            }
         }
     }
 
@@ -434,12 +447,15 @@ pub(crate) mod test_brain {
                 return scripted.unwrap_or_else(|| Ok(delivered(&notice.target)));
             }
             if matches!(request.task, DiscordConversation::InviteTurn { .. }) {
-                return self
-                    .turns
-                    .lock()
-                    .expect("turns")
-                    .pop_front()
-                    .unwrap_or(Ok(ConversationReply::Silent));
+                let scripted = self.turns.lock().expect("turns").pop_front();
+                let Some(reply) = scripted else {
+                    self.unscripted_turns.0.fetch_add(1, Ordering::SeqCst);
+                    panic!("Brain-Zug ohne Skript: {:?}", request.task);
+                };
+                return reply.map(|reply| match reply {
+                    ConversationReply::Decided { decision } => decided_reply(decision),
+                    other => other,
+                });
             }
             self.replies
                 .lock()

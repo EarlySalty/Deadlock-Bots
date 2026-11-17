@@ -27,5 +27,5 @@ dl-core.workspace = true
 [dev-dependencies]
 anyhow.workspace = true
 dl-central-db = { workspace = true, features = ["testing"] }
-http = "1"
+http.workspace = true
 reqwest.workspace = true

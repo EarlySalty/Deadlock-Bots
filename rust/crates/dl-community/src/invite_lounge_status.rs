@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub(super) const FOLLOW_UP_SECONDS: i64 = 60;
 pub(super) const RETRY_SECONDS: i64 = 5 * 60;
-pub(super) const CHECK_IN_SECONDS: i64 = 30 * 60;
+pub const CHECK_IN_SECONDS: i64 = 30 * 60;
 pub(super) const NOTICE_LEASE_MILLIS: i64 = 120_000;
 pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
 const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
@@ -22,21 +22,27 @@ pub(super) enum Notice {
 }
 
 impl Notice {
-    const ALL: [Self; 8] = [
-        Self::FriendRequest,
-        Self::Invite,
-        Self::AlreadyInvited,
-        Self::InvalidCode,
-        Self::Rejected,
-        Self::NotAccepted,
-        Self::CheckIn,
-        Self::Confirmed,
-    ];
-
     fn of(update: InviteLoungeUpdate) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|notice| notice.update() == update)
+        let notice = match update {
+            InviteLoungeUpdate::Status { status } => match status {
+                InviteStatus::FriendshipMissing => Self::FriendRequest,
+                InviteStatus::Sent => Self::Invite,
+                InviteStatus::AlreadyHasGame => Self::AlreadyInvited,
+                InviteStatus::Pending
+                | InviteStatus::Error
+                | InviteStatus::Unknown
+                | InviteStatus::Unavailable => return None,
+            },
+            InviteLoungeUpdate::Problem { problem } => match problem {
+                InviteProblem::InvalidFriendCode => Self::InvalidCode,
+                InviteProblem::SteamRejected => Self::Rejected,
+                InviteProblem::FriendRequestNotAccepted => Self::NotAccepted,
+            },
+            InviteLoungeUpdate::CheckIn {} => Self::CheckIn,
+            InviteLoungeUpdate::Confirmed {} => Self::Confirmed,
+            InviteLoungeUpdate::Reply {} => return None,
+        };
+        Some(notice)
     }
 
     pub(super) fn update(self) -> InviteLoungeUpdate {
@@ -634,6 +640,40 @@ mod tests {
     #[test]
     fn bestaetigung_meldet_den_eingang() {
         assert_eq!(Notice::Confirmed.update(), InviteLoungeUpdate::Confirmed {});
+    }
+
+    #[test]
+    fn jede_meldung_findet_ueber_ihr_update_zurueck() {
+        let notices = [
+            Notice::FriendRequest,
+            Notice::Invite,
+            Notice::AlreadyInvited,
+            Notice::InvalidCode,
+            Notice::Rejected,
+            Notice::NotAccepted,
+            Notice::CheckIn,
+            Notice::Confirmed,
+        ];
+        for notice in notices {
+            assert_eq!(Notice::of(notice.update()), Some(notice));
+            let entry = OutboxEntry::new("k".into(), 9, None, notice.update(), false);
+            assert_eq!(
+                entry.held_claim(),
+                Some(Claim {
+                    notice,
+                    request_message_id: 9,
+                })
+            );
+        }
+        for status in [
+            InviteStatus::Pending,
+            InviteStatus::Error,
+            InviteStatus::Unknown,
+            InviteStatus::Unavailable,
+        ] {
+            assert_eq!(Notice::of(super::status(status)), None);
+        }
+        assert_eq!(Notice::of(InviteLoungeUpdate::Reply {}), None);
     }
 
     #[test]

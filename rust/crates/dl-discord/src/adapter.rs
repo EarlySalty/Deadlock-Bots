@@ -23,6 +23,12 @@ use serenity::all::{
 };
 use serenity::builder::CreateAttachment;
 
+const INVALID_FORM_BODY_CODE: isize = 50035;
+const UNKNOWN_REPLY_TARGET_CODES: [&str; 2] = [
+    "MESSAGE_REFERENCE_UNKNOWN_MESSAGE",
+    "REPLIES_UNKNOWN_MESSAGE",
+];
+
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
     /// Gateway-Cache. WICHTIG: serenity erlaubt keine Cache-Injektion und legt
@@ -511,16 +517,18 @@ impl DiscordAdapter {
     }
 
     fn is_unknown_reply_target(err: &serenity::Error) -> bool {
-        matches!(
-            err,
-            serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
-                if resp.status_code.as_u16() == 400
-                    && resp
-                        .error
-                        .errors
-                        .iter()
-                        .any(|error| error.path.starts_with("message_reference"))
-        )
+        let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)) = err
+        else {
+            return false;
+        };
+        let errors = &resp.error.errors;
+        resp.status_code.as_u16() == 400
+            && resp.error.code == INVALID_FORM_BODY_CODE
+            && !errors.is_empty()
+            && errors.iter().all(|error| {
+                (error.path == "message_reference" || error.path.starts_with("message_reference."))
+                    && UNKNOWN_REPLY_TARGET_CODES.contains(&error.code.as_str())
+            })
     }
 
     fn is_unknown_channel(err: &serenity::Error) -> bool {
@@ -1475,8 +1483,46 @@ mod tests {
         serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(error))
     }
 
+    fn invalid_form(errors: &str) -> String {
+        format!(r#"{{"code": 50035, "message": "Invalid Form Body", "errors": {errors}}}"#)
+    }
+
     #[tokio::test]
     async fn nur_ein_fehlendes_antwortziel_gilt_als_geloeschte_nachricht() {
+        let current = discord_error(
+            400,
+            &invalid_form(
+                r#"{"message_reference": {"_errors": [{"code": "MESSAGE_REFERENCE_UNKNOWN_MESSAGE", "message": "Unknown message"}]}}"#,
+            ),
+        )
+        .await;
+        assert!(DiscordAdapter::is_unknown_reply_target(&current));
+        let other_reference_error = discord_error(
+            400,
+            &invalid_form(
+                r#"{"message_reference": {"_errors": [{"code": "MESSAGE_REFERENCE_INVALID_CHANNEL", "message": "Invalid channel"}]}}"#,
+            ),
+        )
+        .await;
+        assert!(!DiscordAdapter::is_unknown_reply_target(
+            &other_reference_error
+        ));
+        let mixed = discord_error(
+            400,
+            &invalid_form(
+                r#"{"message_reference": {"_errors": [{"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"}]}, "content": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH", "message": "Must be 2000 or fewer in length."}]}}"#,
+            ),
+        )
+        .await;
+        assert!(!DiscordAdapter::is_unknown_reply_target(&mixed));
+        let wrong_status = discord_error(
+            403,
+            &invalid_form(
+                r#"{"message_reference": {"_errors": [{"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"}]}}"#,
+            ),
+        )
+        .await;
+        assert!(!DiscordAdapter::is_unknown_reply_target(&wrong_status));
         let unknown_target = discord_error(
             400,
             r#"{"code": 50035, "message": "Invalid Form Body", "errors": {"message_reference": {"_errors": [{"code": "REPLIES_UNKNOWN_MESSAGE", "message": "Unknown message"}]}}}"#,
