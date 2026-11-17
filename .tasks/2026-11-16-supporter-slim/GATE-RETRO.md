@@ -77,13 +77,26 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - e05d5e31 claimed to compare each billing lookup index with its reference; `pg_get_indexdef` with a column number leaves out opclass and collation. Fixed in 05d6eb6f. Its optional_file permission test assumed a non-root user; fixed in 6a5b3283.
 - 22a0cc1f claimed that each catalog bound comes from the loader range; the two port keys had none. Fixed in 6a5b3283.
 - 2f6ed231 introduced the placeholder name cap that hid long names; removed in 752ec18c.
+- e85a3ec5 claimed every serversync Discord URL went through `discord_api_url`; the rank guide legacy scan and delete still formatted `discord_api_base`. Fixed in d7bc8422.
+- e85a3ec5 and 8adca784 stated that `discord_call_timeout()` bounds a retry call with its retries; it covered one request plus the wait budget, not five requests. Fixed in 2d237684.
+- 3b941333 and e85a3ec5 capped the history scans by "the last allowed page was full", which reports a complete history of exactly 500 messages as cut short. Fixed in 28effbea.
 
 ### Twin checks of this pass
 
 - B10: `VoiceUxPublishOutput.banners` keeps the loaded Voice UX banners behind `serde(skip)` because `relink_voice_ux_forum_thread` rebuilds the messages after the forum post exists; it is the loaded source, and the attachments copy from it.
 - B1: `discord_pages::fetch_all_guild_members` uses serenity with its rate limiter off and a per-page timeout; it parses no Retry-After value.
 - B21: the trigger `supporter_sources_privacy_gate` waits on `pg_advisory_xact_lock` inside the same transaction, so the transaction-local `lock_timeout` from `lock_gated_table` bounds that wait as well.
-- B2: `DISCORD_REQUEST_TIMEOUT_MS` (15 s) and `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS` (30 s) both sit below `DISCORD_CALL_TIMEOUT_MS` (their sum), so the retry and budget branches stay reachable under the outer bound.
+- B2: the retry helper now runs under `DISCORD_RETRY_CALL_BOUND` (`REGELWERK_DISCORD_MAX_ATTEMPTS` times `DISCORD_REQUEST_TIMEOUT_MS` plus `DISCORD_RATE_LIMIT_WAIT_BUDGET_MS`), so every attempt and the full wait budget fit under the outer bound. The earlier line here compared the bound with one request only; see the corrections below.
+
+### Gate run at 74e6ec79 (no verdict, usage limit)
+
+The reviewer named three BLOCKING findings and two NITs in `serversync.rs` before the run lost its verdict.
+
+- REAL 1 two rank guide URLs built from `discord_api_base` by hand: d7bc8422.
+- REAL 2 history scan cap off by one at exactly 500 messages: 28effbea (shared `scan_message_history` with a probe for one older message, test for 499, 500 and 501).
+- REAL 3 retry call bound derived for one request: 2d237684 (`DISCORD_RETRY_CALL_BOUND`, paused-time tests).
+- NIT live rules channel above the 500-entry cap: FALSE. Read-only GETs on 2026-11-17 returned one message in the channel and no archived public or private threads; the legacy onboarding threads are retired (`LEGACY_ONBOARDING_RETIRED_HINT`).
+- NIT order of the archive cursor check: REAL as read without reviewer detail, 70943ec7 (`archive_next_cursor` reads the cursor only when `has_more` is true and fails when such a page yields none).
 
 ### Open
 
