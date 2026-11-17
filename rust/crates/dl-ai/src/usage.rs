@@ -629,7 +629,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::raw_sql(include_str!(
-            "../../dl-central-db/migrations/20261115120000_llm_usage_refusal_reason_cache_tokens.sql"
+            "../../dl-central-db/migrations/20261117120000_llm_usage_refusal_reason_cache_tokens.sql"
         ))
         .execute(&pool)
         .await

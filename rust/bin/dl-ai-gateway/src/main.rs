@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = GatewayConfig::load(&cli.config)
         .with_context(|| format!("loading {}", cli.config.display()))?;
-    let missing = alarm::readiness(&config.alarm).await;
+    let helper = alarm::sibling_helper().context("locating the notify helper of this release")?;
+    let missing = alarm::readiness(&config.alarm, &helper).await;
     if cli.check_config {
         println!("config ok: {} slots", config.slots.len());
     }
@@ -56,7 +57,7 @@ async fn main() -> Result<()> {
         Arc::new(PostgresLedger),
     )?;
     let refusals = Arc::new(RefusalAlarm::new(
-        Arc::new(alarm::ProcessNotifier::new(config.alarm.clone())),
+        Arc::new(alarm::ProcessNotifier::new(config.alarm.clone(), helper)),
         config.alarm.standing_after_secs,
     ));
     alarm::scan(&refusals, config.alarm.scan_interval())

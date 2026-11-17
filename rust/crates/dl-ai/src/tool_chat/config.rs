@@ -20,7 +20,6 @@ pub struct GatewayConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlarmConfig {
-    pub notify_binary: PathBuf,
     pub notify_config: PathBuf,
     pub credential: PathBuf,
     pub standing_after_secs: u64,
@@ -30,7 +29,7 @@ pub struct AlarmConfig {
 
 impl AlarmConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        if [&self.notify_binary, &self.notify_config, &self.credential]
+        if [&self.notify_config, &self.credential]
             .iter()
             .any(|path| !path.is_absolute())
         {
@@ -341,7 +340,6 @@ max_tokens = 4096
 fallback = [{ provider = "codex_plan", model = "gpt-6-luna", timeout_ms = 30000 }]
 
 [alarm]
-notify_binary = "/bin/notify"
 notify_config = "/etc/notify.json"
 credential = "/run/credential"
 standing_after_secs = 600
@@ -378,7 +376,7 @@ notify_timeout_secs = 75
             SAMPLE.replace("standing_after_secs = 600", "standing_after_secs = 59"),
             SAMPLE.replace("scan_interval_secs = 60", "scan_interval_secs = 601"),
             SAMPLE.replace("scan_interval_secs = 60", "scan_interval_secs = 0"),
-            SAMPLE.replace("\"/bin/notify\"", "\"notify\""),
+            SAMPLE.replace("\"/etc/notify.json\"", "\"notify.json\""),
             SAMPLE.replace("notify_timeout_secs = 75", "notify_timeout_secs = 35"),
             SAMPLE.replace("standing_after_secs = 600\n", ""),
             SAMPLE

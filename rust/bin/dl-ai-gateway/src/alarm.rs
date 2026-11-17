@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,17 +7,28 @@ use dl_ai::tool_chat::{AlarmConfig, Delivery, Refusal, RefusalAlarm, RefusalNoti
 use dl_ai::upstream::{protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT};
 
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+const HELPER: &str = "dl-unit-failure-notify";
+const NO_HELPER: &str = "the release ships no protected dl-unit-failure-notify next to the gateway";
 const ON_FAILURE: &str = "unit-failure-notify@dl-ai-gateway.service.service";
 const SCAN_LIMIT: i64 = 256;
 
 pub struct ProcessNotifier {
     config: AlarmConfig,
+    binary: PathBuf,
 }
 
 impl ProcessNotifier {
-    pub fn new(config: AlarmConfig) -> Self {
-        Self { config }
+    pub fn new(config: AlarmConfig, binary: PathBuf) -> Self {
+        Self { config, binary }
     }
+}
+
+pub fn sibling_helper() -> anyhow::Result<PathBuf> {
+    let gateway = std::env::current_exe()?;
+    gateway
+        .parent()
+        .map(|release| release.join(HELPER))
+        .ok_or_else(|| anyhow::anyhow!("gateway binary {} has no directory", gateway.display()))
 }
 
 impl RefusalNotifier for ProcessNotifier {
@@ -38,7 +49,7 @@ impl RefusalNotifier for ProcessNotifier {
             );
             return;
         };
-        let command = command(&self.config, &refusal);
+        let command = command(&self.config, &self.binary, &refusal);
         runtime.spawn(run(
             command,
             self.config.notify_timeout(),
@@ -48,8 +59,8 @@ impl RefusalNotifier for ProcessNotifier {
     }
 }
 
-fn helper(config: &AlarmConfig) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(&config.notify_binary);
+fn helper(config: &AlarmConfig, binary: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(binary);
     command
         .env_clear()
         .env("PATH", CHILD_PATH)
@@ -69,8 +80,8 @@ fn helper(config: &AlarmConfig) -> tokio::process::Command {
     command
 }
 
-fn command(config: &AlarmConfig, refusal: &Refusal) -> tokio::process::Command {
-    let mut command = helper(config);
+fn command(config: &AlarmConfig, binary: &Path, refusal: &Refusal) -> tokio::process::Command {
+    let mut command = helper(config, binary);
     command
         .arg("--unit")
         .arg(GATEWAY_UNIT)
@@ -140,12 +151,12 @@ async fn run(
     }
 }
 
-pub async fn readiness(config: &AlarmConfig) -> Vec<&'static str> {
+pub async fn readiness(config: &AlarmConfig, binary: &Path) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if protected_path(&config.notify_binary, false).is_err() || !executable(&config.notify_binary) {
-        missing.push("notify_binary is not a protected executable file");
+    if protected_path(binary, false).is_err() || !executable(binary) {
+        missing.push(NO_HELPER);
     }
-    let mut handshake = helper(config);
+    let mut handshake = helper(config, binary);
     handshake.arg("--contract");
     let spoken = output(handshake, config.notify_timeout())
         .await
@@ -235,9 +246,8 @@ mod tests {
     use dl_ai::upstream::{Class, Outcome, RefusalKind};
     use std::ffi::OsStr;
 
-    fn config(binary: &Path, credential: &Path) -> AlarmConfig {
+    fn config(credential: &Path) -> AlarmConfig {
         AlarmConfig {
-            notify_binary: binary.into(),
             notify_config: "/etc/hostname".into(),
             credential: credential.into(),
             standing_after_secs: 600,
@@ -276,9 +286,11 @@ mod tests {
     #[test]
     fn helper_gets_the_refusal_and_its_event_id() {
         let command = command(
-            &config(Path::new("/bin/notify"), Path::new("/run/c")),
+            &config(Path::new("/run/c")),
+            Path::new("/bin/notify"),
             &refusal(),
         );
+        assert_eq!(command.as_std().get_program(), OsStr::new("/bin/notify"));
         let args: Vec<String> = command
             .as_std()
             .get_args()
@@ -301,7 +313,8 @@ mod tests {
         let budget = Duration::from_secs(5);
         let run = |body: &str, name: &str| {
             command(
-                &config(&script(dir.path(), name, body), Path::new("/run/c")),
+                &config(Path::new("/run/c")),
+                &script(dir.path(), name, body),
                 &refusal(),
             )
         };
@@ -356,16 +369,19 @@ mod tests {
     async fn an_unprepared_host_is_reported_not_ready() {
         let dir = tempfile::tempdir().expect("dir");
         let old_helper = script(dir.path(), "old", "exit 2");
-        let missing = readiness(&config(&old_helper, Path::new("/nonexistent/c"))).await;
+        let missing = readiness(&config(Path::new("/nonexistent/c")), &old_helper).await;
         assert!(
             missing.contains(&"notify helper does not accept this config, credential and contract")
         );
-        let missing = readiness(&config(
-            Path::new("/nonexistent/notify"),
-            Path::new("/run/c"),
-        ))
-        .await;
-        assert!(missing.contains(&"notify_binary is not a protected executable file"));
+        let absent = Path::new("/nonexistent/notify");
+        let missing = readiness(&config(Path::new("/run/c")), absent).await;
+        assert!(missing.contains(&NO_HELPER));
+        let shipped = sibling_helper().expect("sibling");
+        assert_eq!(shipped.file_name(), Some(OsStr::new(HELPER)));
+        assert_eq!(
+            shipped.parent(),
+            std::env::current_exe().expect("exe").parent()
+        );
         assert!(unready(&missing).is_some());
         assert!(unready(&[]).is_none());
     }

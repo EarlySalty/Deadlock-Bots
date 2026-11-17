@@ -152,6 +152,8 @@ pub enum ChatProviderError {
     /// ausschliesslich [`ChatProviderError::transparenz_wortlaut`].
     #[error("LLM provider error: {}", statusteil(.0))]
     Provider(String),
+    #[error("LLM provider error: {}", statusteil(.hinweis))]
+    Upstream { status: u16, hinweis: String },
 }
 
 impl ChatProviderError {
@@ -159,11 +161,15 @@ impl ChatProviderError {
         match self {
             Self::Timeout => None,
             Self::RateLimit => Some(429),
-            Self::Auth(status) => Some(*status),
-            Self::Provider(hinweis) => hinweis
-                .strip_prefix("HTTP ")
-                .and_then(|rest| rest.get(..3))
-                .and_then(|digits| digits.parse().ok()),
+            Self::Auth(status) | Self::Upstream { status, .. } => Some(*status),
+            Self::Provider(_) => None,
+        }
+    }
+
+    pub fn upstream(status: u16, rohtext: &str) -> Self {
+        Self::Upstream {
+            status,
+            hinweis: anbieter_hinweis(status, rohtext),
         }
     }
 
@@ -185,7 +191,9 @@ impl ChatProviderError {
     /// Wortlaut ist auch so nur ueber diesen einen Weg erreichbar.
     pub fn transparenz_wortlaut(&self) -> String {
         match self {
-            Self::Provider(hinweis) => format!("LLM provider error: {hinweis}"),
+            Self::Provider(hinweis) | Self::Upstream { hinweis, .. } => {
+                format!("LLM provider error: {hinweis}")
+            }
             andere => andere.to_string(),
         }
     }
@@ -1200,10 +1208,7 @@ async fn send_json_with_retry(
                 Err(ChatProviderError::RateLimit)
             } else {
                 let rohtext = response.text().await.unwrap_or_default();
-                Err(ChatProviderError::Provider(anbieter_hinweis(
-                    status.as_u16(),
-                    &rohtext,
-                )))
+                Err(ChatProviderError::upstream(status.as_u16(), &rohtext))
             };
         }
         if !status.is_success() {
@@ -1223,7 +1228,10 @@ async fn send_json_with_retry(
                 hinweis = %statusteil(&hinweis),
                 "LLM-Provider-API-Fehler"
             );
-            return Err(ChatProviderError::Provider(hinweis));
+            return Err(ChatProviderError::Upstream {
+                status: status.as_u16(),
+                hinweis,
+            });
         }
         let body = match response.json::<Value>().await {
             Ok(body) => body,
@@ -1584,18 +1592,27 @@ mod tests {
     }
 
     #[test]
-    fn upstream_status_reads_back_exactly_the_status_of_the_hint() {
-        for status in [400, 402, 404, 412, 413, 418, 429, 500, 503] {
-            let hinweis = anbieter_hinweis(status, r#"{"error":{"message":"HTTP 999 x"}}"#);
+    fn upstream_status_is_carried_as_a_field_and_never_read_from_the_hint_text() {
+        let body = r#"{"error":{"message":"HTTP 999 x"}}"#;
+        for status in [400, 402, 404, 412, 413, 418, 500, 503] {
+            let error = ChatProviderError::upstream(status, body);
+            assert_eq!(error.upstream_status(), Some(status));
             assert_eq!(
-                ChatProviderError::Provider(hinweis).upstream_status(),
-                Some(status)
+                error.transparenz_wortlaut(),
+                format!("LLM provider error: {}", anbieter_hinweis(status, body))
+            );
+            assert_eq!(
+                error.to_string(),
+                ChatProviderError::Provider(anbieter_hinweis(status, body)).to_string()
             );
         }
         assert_eq!(
-            ChatProviderError::Provider("missing chat response content".into()).upstream_status(),
+            ChatProviderError::Provider(anbieter_hinweis(503, body)).upstream_status(),
             None
         );
+        assert_eq!(ChatProviderError::RateLimit.upstream_status(), Some(429));
+        assert_eq!(ChatProviderError::Auth(403).upstream_status(), Some(403));
+        assert_eq!(ChatProviderError::Timeout.upstream_status(), None);
     }
 
     #[test]
@@ -2471,7 +2488,10 @@ mod tests {
 
         assert_eq!(
             err,
-            ChatProviderError::Provider("HTTP 500: Anbieter sagt: server".to_string())
+            ChatProviderError::Upstream {
+                status: 500,
+                hinweis: "HTTP 500: Anbieter sagt: server".to_string(),
+            }
         );
         assert_eq!(*attempts.lock().expect("lock"), 3);
     }
@@ -2509,10 +2529,13 @@ mod tests {
         // Spur, und lieber ein karger Body im Kanal als ein nacktes "HTTP 400".
         assert_eq!(
             bad_request,
-            ChatProviderError::Provider(format!(
-                "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter.\
-                 {ANBIETER_MARKER}{{\"error\":400}}"
-            ))
+            ChatProviderError::Upstream {
+                status: 400,
+                hinweis: format!(
+                    "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter.\
+                     {ANBIETER_MARKER}{{\"error\":400}}"
+                ),
+            }
         );
         assert_eq!(bad_request_attempts, 1);
 

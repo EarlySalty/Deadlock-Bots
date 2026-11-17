@@ -774,7 +774,6 @@ max_tokens = 10
 fallback = [{ provider = "fake", model = "m2", timeout_ms = 1000 }]
 
 [alarm]
-notify_binary = "/bin/notify"
 notify_config = "/etc/notify.json"
 credential = "/run/credential"
 standing_after_secs = 600

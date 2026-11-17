@@ -165,15 +165,11 @@ mod tests {
             (FailureKind::Unavailable, "http_403", Some(403))
         );
         assert_eq!(
-            mapped(ChatProviderError::Provider(crate::anbieter_hinweis(
-                412, "{}"
-            ))),
+            mapped(ChatProviderError::upstream(412, "{}")),
             (FailureKind::Limit, "billing", Some(412))
         );
         assert_eq!(
-            mapped(ChatProviderError::Provider(crate::anbieter_hinweis(
-                503, ""
-            ))),
+            mapped(ChatProviderError::upstream(503, "")),
             (FailureKind::Unavailable, "http_5xx", Some(503))
         );
         assert_eq!(

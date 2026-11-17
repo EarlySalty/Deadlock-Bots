@@ -26,7 +26,6 @@ workspace_id_env = "ANTHROPIC_WORKSPACE_ID"
 request_timeout_ms = 120000
 
 [alarm]
-notify_binary = "/home/nathanael/.local/bin/dl-unit-failure-notify"
 notify_config = "/home/nathanael/.config/unit-failure-notify/config.json"
 credential = "/home/nathanael/.config/infisical-tokens/infisical-token-bots"
 standing_after_secs = 600
