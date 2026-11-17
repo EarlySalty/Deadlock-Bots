@@ -48,6 +48,7 @@ pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=3600.0;
 pub const UNIT_INTERVAL_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
 pub const DISCORD_ID_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
+pub const PORT_RANGE: RangeInclusive<u16> = 1..=u16::MAX;
 
 pub const MASTER_BROKER_TOKEN_NAME: &str = "MASTER_BROKER_TOKEN";
 pub const MAIN_BOT_TOKEN_NAME: &str = "MAIN_BOT_INTERNAL_TOKEN";
@@ -498,7 +499,7 @@ impl RuntimeConfig {
             .into_iter()
             .flatten()
         {
-            if port == 0 {
+            if !PORT_RANGE.contains(&port) {
                 return Err(invalid());
             }
         }

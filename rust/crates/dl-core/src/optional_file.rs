@@ -128,18 +128,24 @@ mod tests {
         std::fs::create_dir_all(&locked_dir).expect("locked dir");
         std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o000))
             .expect("lock dir");
+        let permissions_enforced = std::fs::read_dir(&locked_dir).is_err();
         let unreadable = read(&locked_file);
         let unchecked = present(&locked_dir.join("datei.txt"));
         std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o700))
             .expect("unlock dir");
-        assert!(
-            matches!(&unreadable, Err(reason) if reason.starts_with("konnte nicht gelesen werden: ")),
-            "{unreadable:?}"
-        );
-        assert!(
-            matches!(&unchecked, Err(reason) if reason.starts_with("konnte nicht geprüft werden: ")),
-            "{unchecked:?}"
-        );
+        if permissions_enforced {
+            assert!(
+                matches!(&unreadable, Err(reason) if reason.starts_with("konnte nicht gelesen werden: ")),
+                "{unreadable:?}"
+            );
+            assert!(
+                matches!(&unchecked, Err(reason) if reason.starts_with("konnte nicht geprüft werden: ")),
+                "{unchecked:?}"
+            );
+        } else {
+            assert_eq!(unreadable, Ok(Some(b"inhalt".to_vec())));
+            assert_eq!(unchecked, Ok(false));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

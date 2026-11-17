@@ -73,11 +73,16 @@ const fn usize_bounds(range: &std::ops::RangeInclusive<usize>) -> Bounds {
     (*range.start() as i64, *range.end() as i64)
 }
 
+const fn u16_bounds(range: &std::ops::RangeInclusive<u16>) -> Bounds {
+    (*range.start() as i64, *range.end() as i64)
+}
+
 const fn i64_bounds(range: &std::ops::RangeInclusive<i64>) -> Bounds {
     (*range.start(), *range.end())
 }
 
 const DISCORD_ID_BOUNDS: Bounds = u64_bounds(&rc::DISCORD_ID_RANGE);
+const PORT_BOUNDS: Bounds = u16_bounds(&rc::PORT_RANGE);
 const RUNTIME_DELAY_BOUNDS: Bounds = u64_bounds(&rc::RUNTIME_DELAY_SECONDS_RANGE);
 const RUNTIME_SPAN_BOUNDS: Bounds = i64_bounds(&rc::RUNTIME_SPAN_RANGE);
 const BROKER_IDEMPOTENCY_MAX_ENTRIES_BOUNDS: Bounds =
@@ -142,6 +147,7 @@ fn loader_bounds(path: &str) -> Option<Bounds> {
         | "runtime.community.concierge_active_minutes"
         | "runtime.moderation.timeout_minutes"
         | "runtime.moderation.behavior_proposal_timeout_minutes" => RUNTIME_SPAN_BOUNDS,
+        "runtime.start.mcp_port" | "runtime.bridges.twitch_port" => PORT_BOUNDS,
         "runtime.start.broker_idempotency_max_entries" => BROKER_IDEMPOTENCY_MAX_ENTRIES_BOUNDS,
         "runtime.ai.brain_daily_user_limit" => BRAIN_DAILY_USER_LIMIT_BOUNDS,
         "runtime.ai.brain_max_question_len" => BRAIN_MAX_QUESTION_LEN_BOUNDS,
