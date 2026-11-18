@@ -9,8 +9,21 @@ pub(super) const NOTICE_MAX_AGE_MILLIS: i64 = 7 * 24 * 60 * 60_000;
 const NOTICE_BACKOFF_MILLIS: i64 = 60_000;
 const NOTICE_MAX_BACKOFF_MILLIS: i64 = 60 * 60_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum Notice {
+macro_rules! listed_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub(super) enum $name {
+            $($variant,)+
+        }
+
+        #[cfg(test)]
+        impl $name {
+            pub(super) const ALL: &'static [Self] = &[$(Self::$variant,)+];
+        }
+    };
+}
+
+listed_enum!(Notice {
     FriendRequest,
     Invite,
     AlreadyInvited,
@@ -19,7 +32,7 @@ pub(super) enum Notice {
     NotAccepted,
     CheckIn,
     Confirmed,
-}
+});
 
 impl Notice {
     fn of(update: InviteLoungeUpdate) -> Option<Self> {
@@ -230,11 +243,7 @@ fn problem(problem: InviteProblem) -> InviteLoungeUpdate {
     InviteLoungeUpdate::Problem { problem }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum SteamWait {
-    Delivery,
-    Retry,
-}
+listed_enum!(SteamWait { Delivery, Retry });
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct RequestStatus {
@@ -535,7 +544,7 @@ mod tests {
             open: true,
             ..SteamProgress::default()
         };
-        for wait in [SteamWait::Delivery, SteamWait::Retry] {
+        for &wait in SteamWait::ALL {
             assert_eq!(
                 after_progress(wait, open, NOW),
                 Step::Wait {
@@ -644,18 +653,18 @@ mod tests {
 
     #[test]
     fn jede_meldung_findet_ueber_ihr_update_zurueck() {
-        let notices = [
-            Notice::FriendRequest,
-            Notice::Invite,
-            Notice::AlreadyInvited,
-            Notice::InvalidCode,
-            Notice::Rejected,
-            Notice::NotAccepted,
-            Notice::CheckIn,
-            Notice::Confirmed,
-        ];
-        for notice in notices {
-            assert_eq!(Notice::of(notice.update()), Some(notice));
+        let reached: Vec<Notice> = InviteLoungeUpdate::ALL
+            .into_iter()
+            .filter_map(|update| {
+                let notice = Notice::of(update);
+                assert_eq!(notice.is_some(), update.in_turn(), "{update:?}");
+                assert_eq!(notice.map(Notice::update), notice.map(|_| update));
+                notice
+            })
+            .collect();
+        assert_eq!(reached.len(), Notice::ALL.len());
+        assert!(Notice::ALL.iter().all(|notice| reached.contains(notice)));
+        for &notice in Notice::ALL {
             let entry = OutboxEntry::new("k".into(), 9, None, notice.update(), false);
             assert_eq!(
                 entry.held_claim(),
@@ -665,15 +674,6 @@ mod tests {
                 })
             );
         }
-        for status in [
-            InviteStatus::Pending,
-            InviteStatus::Error,
-            InviteStatus::Unknown,
-            InviteStatus::Unavailable,
-        ] {
-            assert_eq!(Notice::of(super::status(status)), None);
-        }
-        assert_eq!(Notice::of(InviteLoungeUpdate::Reply {}), None);
     }
 
     #[test]
