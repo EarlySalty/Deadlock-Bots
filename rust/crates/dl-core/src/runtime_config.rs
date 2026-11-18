@@ -44,6 +44,9 @@ pub const BRAIN_API_TIMEOUT_MS_RANGE: RangeInclusive<u64> = 1..=120_000;
 pub const BROKER_IDEMPOTENCY_MAX_ENTRIES_RANGE: RangeInclusive<usize> = 1..=1_000_000;
 pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=i64::MAX as usize;
 pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
+pub const BRAIN_IMAGE_MAX_COUNT_RANGE: RangeInclusive<usize> = 1..=4;
+pub const BRAIN_IMAGE_JPEG_QUALITY_RANGE: RangeInclusive<u64> = 40..=95;
+pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
 pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=3600.0;
 pub const UNIT_INTERVAL_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
@@ -385,6 +388,14 @@ impl RuntimeConfig {
             .ai
             .brain_max_question_len
             .is_some_and(|length| !BRAIN_MAX_QUESTION_LEN_RANGE.contains(&length))
+            || self
+                .ai
+                .brain_image_max_count
+                .is_some_and(|count| !BRAIN_IMAGE_MAX_COUNT_RANGE.contains(&count))
+            || self
+                .ai
+                .brain_image_jpeg_quality
+                .is_some_and(|quality| !BRAIN_IMAGE_JPEG_QUALITY_RANGE.contains(&quality))
         {
             return Err(invalid());
         }
@@ -462,7 +473,7 @@ impl RuntimeConfig {
                 .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
             || self.start.presence_status.as_deref().is_some_and(|value| {
                 value.trim().is_empty()
-                    || value.chars().count() > 128
+                    || value.chars().count() > PRESENCE_STATUS_MAX_CHARS
                     || value.chars().any(char::is_control)
             })
         {
