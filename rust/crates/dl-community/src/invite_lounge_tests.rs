@@ -1240,23 +1240,176 @@ fn gespeicherter_zustand_wird_inhaltlich_verglichen() {
     assert!(!stored_matches(Some("kaputt"), Some(&parsed)));
     let hinted = legacy.replace(r#""last_hint_at":null"#, r#""last_hint_at":1789999000"#);
     assert_ne!(hinted, legacy);
-    assert!(stored_matches(Some(&hinted), Some(&parsed)));
+    assert!(!stored_matches(Some(&hinted), Some(&parsed)));
 }
 
 #[test]
-fn neue_zeile_bleibt_fuer_die_vorige_version_lesbar() {
-    let written = serde_json::to_value(pending(false)).expect("Zustand als JSON");
-    assert_eq!(written["hint_sent"], serde_json::Value::Bool(false));
-    let old_hint = r#"{"last_seen":1,"friend_code":null,"request":null,"hint_sent":true}"#;
-    let kept: LoungeState = serde_json::from_str(old_hint).expect("alte Zeile lesbar");
-    assert_eq!(
-        serde_json::to_value(&kept).expect("Zustand als JSON")["hint_sent"],
-        serde_json::Value::Bool(true)
-    );
+fn zeile_ohne_hinweisfeld_bleibt_lesbar() {
     let without: LoungeState =
         serde_json::from_str(r#"{"last_seen":1,"friend_code":null,"request":null}"#)
             .expect("Zeile ohne Hinweisfeld lesbar");
     assert!(!without.hint_sent);
+    assert_eq!(without.last_hint_at, None);
+    assert_eq!(without.last_dispatch_finished_at_millis, None);
+}
+
+fn old_kind(entry: &OutboxEntry) -> bool {
+    !matches!(
+        entry.update.current(),
+        Some(InviteLoungeUpdate::Confirmed {} | InviteLoungeUpdate::Reply {})
+    )
+}
+
+#[tokio::test]
+async fn vorige_version_schreibt_neue_zeilen_byte_gleich_zurueck() {
+    let mut rows = Vec::new();
+    let direct = setup();
+    direct.direct_request().await;
+    direct.poll(NOW + 3600).await;
+    rows.push(direct.store.state().await);
+    let check_in = setup();
+    check_in.store.put(pending(false)).await;
+    check_in.poll(NOW + CHECK_IN_SECONDS).await;
+    rows.push(check_in.store.state().await);
+    let replied = setup();
+    replied.decide(vec![wants(
+        InviteTurnAction::AskFriendCode,
+        Some("Schick mir kurz deinen Freundescode."),
+    )]);
+    replied
+        .brain
+        .script_notices(vec![Err(BrainError::Backend("weg".into()))]);
+    replied
+        .post(message(1, NOW, "kannst du mich inviten"), NOW)
+        .await;
+    rows.push(replied.store.state().await);
+    let mut every = pending(false);
+    every.hint_sent = true;
+    every.last_hint_at = Some(NOW - 10);
+    every.last_result = Some("Versuch begonnen; Ausgang noch unbekannt".into());
+    every.dispatch_started_at_millis = Some(NOW * 1000);
+    every.last_dispatch_finished_at_millis = Some(NOW * 1000 + 5);
+    every.status.check_in_message_id = Some(9);
+    every.status.check_in_at = Some(NOW);
+    every.status.wait = Some(SteamWait::Retry);
+    every.status.check_at = Some(NOW + 60);
+    every.status.invite_now = true;
+    for &notice in Notice::ALL {
+        let claimed = every.status.claim(Some(notice));
+        queue_notice(&mut every, claimed, notice == Notice::Invite);
+    }
+    if let Some(entry) = every.outbox.first_mut() {
+        entry.claim(NOW * 1000);
+        entry.reschedule(NOW * 1000 + 1);
+    }
+    let mut readable = every.clone();
+    readable.outbox.retain(old_kind);
+    assert_eq!(readable.outbox.len(), Notice::ALL.len() - 1);
+    rows.extend([every, readable, LoungeState::default()]);
+    let mut unreadable = 0;
+    for row in rows {
+        let stored = serde_json::to_string(&row).expect("Zustand als JSON");
+        if row.outbox.iter().all(old_kind) {
+            assert_eq!(
+                merge_base::rewrite(&stored).expect("vorige Version liest die Zeile"),
+                stored
+            );
+        } else {
+            assert!(merge_base::rewrite(&stored).is_err(), "{stored}");
+            unreadable += 1;
+        }
+    }
+    assert_eq!(unreadable, 2);
+}
+
+#[test]
+fn zeilen_der_vorigen_version_bleiben_byte_gleich() {
+    use merge_base as old;
+    let entry = |key: &str, update, answer: Option<&str>| old::OutboxEntry {
+        key: key.into(),
+        request_message_id: 1,
+        channel_id: Some(CHECK_IN_CHANNEL_ID),
+        update,
+        answer: answer.map(Into::into),
+        already_invited: false,
+        attempts: 2,
+        next_at_millis: 5,
+        claimed_at_millis: Some(3),
+        first_attempt_at_millis: Some(1),
+    };
+    let status = |status| old::InviteLoungeUpdate::Status { status };
+    let problem = |problem| old::InviteLoungeUpdate::Problem { problem };
+    let answer = |outcome| old::InviteLoungeUpdate::CheckInAnswer { outcome };
+    let full = old::LoungeState {
+        last_seen: 3,
+        friend_code: Some(CODE.into()),
+        request: Some(old::Request {
+            message_id: 1,
+            created_at: NOW,
+            direct: false,
+            phase: old::Phase::Pending,
+        }),
+        hint_sent: true,
+        last_hint_at: Some(NOW - 5),
+        last_result: Some("Versuch ohne Abschluss; Steam-Stand wird geprüft".into()),
+        dispatch_started_at_millis: Some(NOW * 1000),
+        last_dispatch_finished_at_millis: Some(NOW * 1000 + 5),
+        status: old::RequestStatus {
+            channel_id: Some(CHECK_IN_CHANNEL_ID),
+            notices: vec![
+                old::Notice::FriendRequest,
+                old::Notice::Invite,
+                old::Notice::AlreadyInvited,
+                old::Notice::InvalidCode,
+                old::Notice::Rejected,
+                old::Notice::NotAccepted,
+                old::Notice::CheckIn,
+                old::Notice::Confirmed,
+            ],
+            wait: Some(old::SteamWait::Delivery),
+            check_at: Some(NOW + 60),
+            check_in_at: Some(NOW),
+            check_in_message_id: Some(9),
+            invite_now: true,
+        },
+        outbox: vec![
+            entry("a", status(old::InviteStatus::Sent), None),
+            entry("b", status(old::InviteStatus::FriendshipMissing), None),
+            entry("c", status(old::InviteStatus::AlreadyHasGame), None),
+            entry("d", problem(old::InviteProblem::InvalidFriendCode), None),
+            entry("e", problem(old::InviteProblem::SteamRejected), None),
+            entry(
+                "f",
+                problem(old::InviteProblem::FriendRequestNotAccepted),
+                None,
+            ),
+            entry("g", old::InviteLoungeUpdate::CheckIn, None),
+            entry("h", answer(old::InviteCheckInOutcome::Arrived), Some("ja")),
+            entry(
+                "i",
+                answer(old::InviteCheckInOutcome::NotArrived),
+                Some("nein"),
+            ),
+            entry("j", answer(old::InviteCheckInOutcome::Unclear), Some("hm")),
+        ],
+    };
+    let waiting = old::LoungeState {
+        last_seen: 2,
+        request: Some(old::Request {
+            message_id: 2,
+            created_at: NOW,
+            direct: true,
+            phase: old::Phase::WaitingForCode,
+        }),
+        ..old::LoungeState::default()
+    };
+    for row in [full, waiting, old::LoungeState::default()] {
+        let stored = serde_json::to_string(&row).expect("alte Zeile als JSON");
+        let parsed: LoungeState = serde_json::from_str(&stored).expect("neue Version liest");
+        let written = serde_json::to_string(&parsed).expect("Zustand als JSON");
+        assert_eq!(written, stored);
+        assert!(stored_matches(Some(&stored), Some(&parsed)));
+    }
 }
 
 #[tokio::test]
@@ -2830,4 +2983,145 @@ async fn rueckblick_bewertet_nur_nachrichten_im_anfragefenster() {
         .collect();
     assert_eq!(asked, ["brauche invite"]);
     assert_eq!(*lounge.store.mark.lock().await, Some(2));
+}
+
+mod merge_base {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum InviteStatus {
+        Sent,
+        Pending,
+        FriendshipMissing,
+        AlreadyHasGame,
+        Error,
+        Unknown,
+        Unavailable,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum InviteProblem {
+        InvalidFriendCode,
+        SteamRejected,
+        FriendRequestNotAccepted,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum InviteCheckInOutcome {
+        Arrived,
+        NotArrived,
+        Unclear,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    pub(super) enum InviteLoungeUpdate {
+        Status { status: InviteStatus },
+        Problem { problem: InviteProblem },
+        CheckIn,
+        CheckInAnswer { outcome: InviteCheckInOutcome },
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) enum Notice {
+        FriendRequest,
+        Invite,
+        AlreadyInvited,
+        InvalidCode,
+        Rejected,
+        NotAccepted,
+        CheckIn,
+        Confirmed,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) enum SteamWait {
+        Delivery,
+        Retry,
+    }
+
+    #[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) struct RequestStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) channel_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub(super) notices: Vec<Notice>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) wait: Option<SteamWait>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) check_at: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) check_in_at: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) check_in_message_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub(super) invite_now: bool,
+    }
+
+    impl RequestStatus {
+        fn is_empty(&self) -> bool {
+            *self == Self::default()
+        }
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) struct OutboxEntry {
+        pub(super) key: String,
+        pub(super) request_message_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) channel_id: Option<u64>,
+        pub(super) update: InviteLoungeUpdate,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) answer: Option<String>,
+        pub(super) already_invited: bool,
+        #[serde(default)]
+        pub(super) attempts: u32,
+        #[serde(default)]
+        pub(super) next_at_millis: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) claimed_at_millis: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub(super) first_attempt_at_millis: Option<i64>,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) enum Phase {
+        WaitingForCode,
+        Pending,
+        Dispatching,
+        Attempted,
+        Expired,
+    }
+
+    #[derive(PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) struct Request {
+        pub(super) message_id: u64,
+        pub(super) created_at: i64,
+        pub(super) direct: bool,
+        pub(super) phase: Phase,
+    }
+
+    #[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+    pub(super) struct LoungeState {
+        pub(super) last_seen: u64,
+        pub(super) friend_code: Option<String>,
+        pub(super) request: Option<Request>,
+        pub(super) hint_sent: bool,
+        pub(super) last_hint_at: Option<i64>,
+        pub(super) last_result: Option<String>,
+        pub(super) dispatch_started_at_millis: Option<i64>,
+        pub(super) last_dispatch_finished_at_millis: Option<i64>,
+        #[serde(default, skip_serializing_if = "RequestStatus::is_empty")]
+        pub(super) status: RequestStatus,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub(super) outbox: Vec<OutboxEntry>,
+    }
+
+    pub(super) fn rewrite(stored: &str) -> Result<String, serde_json::Error> {
+        let state: LoungeState = serde_json::from_str(stored)?;
+        serde_json::to_string(&state)
+    }
 }

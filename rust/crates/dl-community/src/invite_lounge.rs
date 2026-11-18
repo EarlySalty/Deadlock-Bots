@@ -201,8 +201,12 @@ struct LoungeState {
     request: Option<Request>,
     #[serde(default)]
     hint_sent: bool,
+    #[serde(default)]
+    last_hint_at: Option<i64>,
     last_result: Option<String>,
     dispatch_started_at_millis: Option<i64>,
+    #[serde(default)]
+    last_dispatch_finished_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "RequestStatus::is_empty")]
     status: RequestStatus,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

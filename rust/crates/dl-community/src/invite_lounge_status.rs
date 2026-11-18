@@ -257,6 +257,8 @@ pub(super) struct RequestStatus {
     pub(super) check_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) check_in_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) check_in_message_id: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) invite_now: bool,
 }
