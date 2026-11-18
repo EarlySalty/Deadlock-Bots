@@ -76,6 +76,36 @@ pub(crate) fn member_fixture(id: u64, roles: &[&str]) -> serde_json::Value {
 }
 
 #[cfg(test)]
+pub(crate) struct ConnectionSink {
+    pub client: reqwest::Client,
+    pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub server: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(test)]
+pub(crate) async fn connection_sink() -> Result<ConnectionSink, Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let accepted = connections.clone();
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.extend([socket]);
+        }
+    });
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(format!("http://{address}"))?)
+        .build()?;
+    Ok(ConnectionSink {
+        client,
+        connections,
+        server,
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
@@ -194,22 +224,9 @@ mod tests {
     #[tokio::test]
     async fn seitenlimit_beendet_eine_wartende_ratelimiter_seite_vor_dem_ersten_request(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let accepted = connections.clone();
-        let server = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((socket, _)) = listener.accept().await {
-                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                held.extend([socket]);
-            }
-        });
-        let client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://{address}"))?)
-            .build()?;
+        let sink = connection_sink().await?;
         let http = serenity::http::HttpBuilder::new("test-only")
-            .client(client)
+            .client(sink.client.clone())
             .build();
         let ratelimiter = http.ratelimiter.as_ref().ok_or("ratelimiter is off")?;
         let route = serenity::http::Route::GuildMembers {
@@ -243,7 +260,7 @@ mod tests {
             fetch_all_guild_members(&http, GuildId::new(1), page_timeout),
         )
         .await;
-        server.abort();
+        sink.server.abort();
         assert_eq!(
             result.map(|members| members.err()),
             Ok(Some(
@@ -251,7 +268,10 @@ mod tests {
             ))
         );
         assert!(started.elapsed() >= page_timeout);
-        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            sink.connections.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         Ok(())
     }
 }

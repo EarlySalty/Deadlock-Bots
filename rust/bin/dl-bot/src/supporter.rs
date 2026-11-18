@@ -161,7 +161,10 @@ impl SupporterSync {
         let mut ticker = self.ticker();
         loop {
             ticker.tick().await;
-            let outcome = self.tick().await.map_err(|error| error.to_string());
+            let outcome = self
+                .tick_within_deadline()
+                .await
+                .map_err(|error| error.to_string());
             last_error = log_role_outcome(last_error, outcome);
         }
     }
@@ -173,6 +176,13 @@ impl SupporterSync {
             ticker.tick().await;
             refresh_state = self.refresh_funding(refresh_state).await;
         }
+    }
+
+    async fn tick_within_deadline(&self) -> Result<(), store::StoreError> {
+        let deadline = self.config.interval;
+        tokio::time::timeout(deadline, self.tick())
+            .await
+            .unwrap_or(Err(store::StoreError::TickDeadline(deadline)))
     }
 
     async fn tick(&self) -> Result<(), store::StoreError> {

@@ -360,28 +360,18 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn rate_limiter_waits_are_bounded() {
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
-        let calls = Arc::new(AtomicUsize::new(0));
-        let seen = calls.clone();
-        let app = axum::Router::new().route(
-            "/api/v10/guilds/{guild}/members/{user}/roles/{role}",
-            axum::routing::put(move || {
-                let seen = seen.clone();
-                async move {
-                    seen.fetch_add(1, Ordering::SeqCst);
-                    axum::http::StatusCode::NO_CONTENT
-                }
-            }),
-        );
-        let (mut http, server) = discord(app).await;
-        let limiter = serenity::http::Ratelimiter::new(reqwest::Client::new(), "test");
+    async fn grants_through_rate_limiter(hold_routes: bool) -> (Result<(), String>, usize) {
+        let sink = crate::discord_pages::connection_sink()
+            .await
+            .expect("connection sink");
+        let limiter = serenity::http::Ratelimiter::new(sink.client.clone(), "test");
         let routes = limiter.routes();
-        let guard = routes.write().await;
+        let guard = if hold_routes {
+            Some(routes.write().await)
+        } else {
+            None
+        };
+        let mut http = serenity::http::HttpBuilder::new("test").build();
         http.ratelimiter = Some(limiter);
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -389,12 +379,125 @@ mod tests {
         )
         .await
         .expect("limiter waits completed");
+        drop(guard);
+        sink.server.abort();
+        let connections = sink.connections.load(std::sync::atomic::Ordering::SeqCst);
+        (outcome, connections)
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_waits_are_bounded() {
+        let (outcome, connections) = grants_through_rate_limiter(true).await;
         assert!(outcome
             .expect_err("bounded waits are failures")
             .starts_with("Rollenvergabe: 2 von 2 fehlgeschlagen, davon 2 mit Zeitlimit"));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        drop(guard);
+        assert_eq!(connections, 0);
+        let (_, connections) = grants_through_rate_limiter(false).await;
+        assert!(
+            connections > 0,
+            "the sink sees requests the limiter lets out"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_endet_an_der_frist_aus_dem_abgleichsintervall() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let db = dl_central_db::testing::test_pool().await.expect("database");
+        sqlx::query(
+            "INSERT INTO core.supporter_sources
+                 (discord_id, source, source_ref, monthly_cents, valid_until)
+             VALUES (5, 'stripe', 'sub_frist', 300, NULL)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("supporter source");
+        let grants = Arc::new(AtomicUsize::new(0));
+        let seen = grants.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/v10/guilds/{guild}/members",
+                axum::routing::get(
+                    |axum::extract::Query(query): axum::extract::Query<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
+                        if query.contains_key("after") {
+                            axum::Json(serde_json::json!([]))
+                        } else {
+                            axum::Json(serde_json::json!([member_fixture(5, &[])]))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/v10/guilds/{guild}/members/{user}/roles/{role}",
+                axum::routing::put(move || {
+                    let seen = seen.clone();
+                    async move {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<axum::http::StatusCode>().await
+                    }
+                }),
+            );
+        let (http, server) = discord(app).await;
+        let interval = Duration::from_secs(2);
+        let outer_guard = Duration::from_secs(10);
+        let mut sync = supporter_sync(&db, http);
+        sync.config.role_grant_apply = true;
+        sync.config.interval = interval;
+        sync.config.discord_timeout = outer_guard * 2;
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(outer_guard, sync.tick_within_deadline())
+            .await
+            .expect("tick returned before the outer guard");
+        let elapsed = started.elapsed();
         server.abort();
+        assert!(
+            matches!(outcome, Err(super::super::store::StoreError::TickDeadline(limit)) if limit == interval),
+            "{outcome:?}"
+        );
+        assert!(elapsed >= interval);
+        assert_eq!(grants.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ein_tick_mit_uebernahme_nimmt_die_tabellensperre_so_oft_wie_eingeplant() {
+        let db = dl_central_db::testing::test_pool().await.expect("database");
+        let app = axum::Router::new().route(
+            "/api/v10/guilds/{guild}/members",
+            axum::routing::get(
+                |axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    if query.contains_key("after") {
+                        axum::Json(serde_json::json!([]))
+                    } else {
+                        axum::Json(serde_json::json!([member_fixture(
+                            8,
+                            &[SUPPORTER_ROLE_ID.to_string().as_str()]
+                        )]))
+                    }
+                },
+            ),
+        );
+        let (http, server) = discord(app).await;
+        let mut sync = supporter_sync(&db, http);
+        sync.config.role_sync_apply = true;
+        let (outcome, taken) = super::super::store::TABLE_LOCKS_TAKEN
+            .scope(std::cell::Cell::new(0), async {
+                let outcome = sync.tick().await;
+                let taken = super::super::store::TABLE_LOCKS_TAKEN.with(std::cell::Cell::get);
+                (outcome, taken)
+            })
+            .await;
+        server.abort();
+        outcome.expect("tick");
+        assert!(super::super::store::manual_import_done(db.pool())
+            .await
+            .expect("import marker"));
+        assert_eq!(taken, super::super::store::TABLE_LOCKS_PER_TICK);
     }
 
     fn member(id: u64, has_role: bool) -> MemberSnapshot {

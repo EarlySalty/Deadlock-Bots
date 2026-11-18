@@ -5,15 +5,26 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 const KV_NS: &str = "supporter";
 const MANUAL_IMPORT_KEY: &str = "manual_import_at";
+const SHORTEST_SYNC_INTERVAL_MS: u64 =
+    *dl_core::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() * 1_000;
+pub(super) const TABLE_LOCKS_PER_TICK: u64 = 3;
+const REST_OF_TICK_SHARES: u64 = 1;
 const TABLE_LOCK_TIMEOUT_MS: u64 =
-    *dl_core::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start() * 1_000 / 4;
+    SHORTEST_SYNC_INTERVAL_MS / (TABLE_LOCKS_PER_TICK + REST_OF_TICK_SHARES);
+const _: () = assert!(TABLE_LOCK_TIMEOUT_MS > 0);
 const LOCK_NOT_AVAILABLE: &str = "55P03";
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static TABLE_LOCKS_TAKEN: std::cell::Cell<u64>;
+}
 
 #[derive(Debug)]
 pub enum StoreError {
     Missing,
     GateDisabled,
     LockTimeout,
+    TickDeadline(std::time::Duration),
     Db(sqlx::Error),
     Discord(String),
 }
@@ -27,7 +38,12 @@ impl fmt::Display for StoreError {
             ),
             Self::LockTimeout => write!(
                 f,
-                "core.supporter_sources bleibt länger als {TABLE_LOCK_TIMEOUT_MS} ms von einer anderen Sitzung gesperrt, Abgleich versucht es beim nächsten Lauf erneut"
+                "eine Datenbanksperre des Unterstützer-Abgleichs bleibt länger als {TABLE_LOCK_TIMEOUT_MS} ms von einer anderen Sitzung belegt, Abgleich versucht es beim nächsten Lauf erneut"
+            ),
+            Self::TickDeadline(deadline) => write!(
+                f,
+                "Abgleich nach {} ms abgebrochen",
+                deadline.as_millis()
             ),
             Self::GateDisabled => write!(
                 f,
@@ -43,14 +59,23 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Db(error) => Some(error),
-            Self::Missing | Self::GateDisabled | Self::LockTimeout | Self::Discord(_) => None,
+            Self::Missing
+            | Self::GateDisabled
+            | Self::LockTimeout
+            | Self::TickDeadline(_)
+            | Self::Discord(_) => None,
         }
     }
 }
 
 impl From<sqlx::Error> for StoreError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Db(error)
+        match &error {
+            sqlx::Error::Database(db) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) => {
+                Self::LockTimeout
+            }
+            _ => Self::Db(error),
+        }
     }
 }
 
@@ -80,15 +105,11 @@ async fn lock_gated_table_within(
         .bind(format!("{lock_timeout_ms}ms"))
         .execute(&mut **tx)
         .await?;
+    #[cfg(test)]
+    let _ = TABLE_LOCKS_TAKEN.try_with(|taken| taken.set(taken.get() + 1));
     sqlx::query("LOCK TABLE core.supporter_sources IN ROW EXCLUSIVE MODE")
         .execute(&mut **tx)
-        .await
-        .map_err(|error| match &error {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) => {
-                StoreError::LockTimeout
-            }
-            _ => StoreError::Db(error),
-        })?;
+        .await?;
     let state: Option<String> = sqlx::query_scalar(
         "SELECT tgenabled::text FROM pg_catalog.pg_trigger
           WHERE tgrelid = 'core.supporter_sources'::regclass
@@ -123,9 +144,17 @@ pub async fn active_supporters(pool: &PgPool) -> Result<HashSet<u64>, StoreError
 }
 
 pub async fn sync_boost_rows(pool: &PgPool, boosters: &[u64]) -> Result<BoostSync, StoreError> {
+    sync_boost_rows_within(pool, boosters, TABLE_LOCK_TIMEOUT_MS).await
+}
+
+async fn sync_boost_rows_within(
+    pool: &PgPool,
+    boosters: &[u64],
+    lock_timeout_ms: u64,
+) -> Result<BoostSync, StoreError> {
     let ids = to_db_ids(boosters);
     let mut tx = pool.begin().await?;
-    lock_gated_table(&mut tx).await?;
+    lock_gated_table_within(&mut tx, lock_timeout_ms).await?;
     sqlx::query(
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
@@ -383,8 +412,41 @@ mod tests {
         Ok(())
     }
 
-    async fn block_member(pool: &PgPool, user_id: i64, deleted: bool) -> TestResult {
-        Ok(dl_central_db::testing::block_member(pool, user_id, deleted).await?)
+    #[tokio::test]
+    async fn gesperrte_datenschutz_sperre_beim_einfuegen_endet_als_sperrfehler() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let mut holder = pool.begin().await?;
+        dl_central_db::lock_user_privacy(&mut holder, 61).await?;
+        let blocked = sync_boost_rows_within(pool, &[61], 100).await;
+        holder.rollback().await?;
+        assert!(
+            matches!(blocked, Err(StoreError::LockTimeout)),
+            "{blocked:?}"
+        );
+        assert_eq!(source_rows(pool, 61).await?, 0);
+        sync_boost_rows(pool, &[61]).await?;
+        assert_eq!(source_rows(pool, 61).await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gesperrte_zeile_beim_loeschen_endet_als_sperrfehler() -> TestResult {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sync_boost_rows(pool, &[62]).await?;
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT 1 FROM core.supporter_sources WHERE discord_id = 62 FOR UPDATE")
+            .fetch_all(&mut *holder)
+            .await?;
+        let blocked = sync_boost_rows_within(pool, &[], 100).await;
+        holder.rollback().await?;
+        assert!(
+            matches!(blocked, Err(StoreError::LockTimeout)),
+            "{blocked:?}"
+        );
+        assert_eq!(source_rows(pool, 62).await?, 1);
+        Ok(())
     }
 
     async fn source_rows(pool: &PgPool, user_id: i64) -> Result<i64, sqlx::Error> {
@@ -398,8 +460,8 @@ mod tests {
     async fn boost_abgleich_legt_abgemeldete_und_geloeschte_nicht_wieder_an() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
-        block_member(pool, 31, false).await?;
-        block_member(pool, 32, true).await?;
+        dl_central_db::testing::block_member(pool, 31, false).await?;
+        dl_central_db::testing::block_member(pool, 32, true).await?;
         sync_boost_rows(pool, &[33, 32, 31, 33]).await?;
         assert_eq!(source_rows(pool, 31).await?, 0);
         assert_eq!(source_rows(pool, 32).await?, 0);
@@ -411,8 +473,8 @@ mod tests {
     async fn manueller_import_legt_abgemeldete_und_geloeschte_nicht_wieder_an() -> TestResult {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
-        block_member(pool, 41, false).await?;
-        block_member(pool, 42, true).await?;
+        dl_central_db::testing::block_member(pool, 41, false).await?;
+        dl_central_db::testing::block_member(pool, 42, true).await?;
         assert_eq!(import_manual(pool, &[43, 42, 41]).await?, 1);
         assert_eq!(source_rows(pool, 41).await?, 0);
         assert_eq!(source_rows(pool, 42).await?, 0);
