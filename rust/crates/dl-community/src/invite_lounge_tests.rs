@@ -1011,7 +1011,7 @@ async fn fehlende_bot_id_bricht_ab_ohne_brain() {
 }
 
 #[test]
-fn turn_text_ersetzt_erwaehnungen_und_haelt_die_grenzen_ein() {
+fn turn_benennt_erwaehnungen_kuerzt_und_waehlt_den_verlauf() {
     let lines = dl_brain::MAX_CHAT_LINES as u64 + 5;
     let mut context: Vec<LoungeMessage> = (1..=lines)
         .map(|id| from(OTHER, message(id, NOW, &format!("Zeile {id}"))))
@@ -1032,7 +1032,8 @@ fn turn_text_ersetzt_erwaehnungen_und_haelt_die_grenzen_ein() {
     );
     event.reply_message_id = Some(3);
     let member = member_state(None, &MemberFacts::default());
-    let turn = build_turn(&event, &context, BOT, member).expect("Nachricht ist nicht leer");
+    let text = turn_text(&event.content, USER, BOT).expect("Nachricht ist nicht leer");
+    let turn = build_turn(&event, text, &context, BOT, member);
     assert!(turn
         .message
         .starts_with("@Bot @Mitglied @jemand @Rolle #kanal y"));
@@ -1048,20 +1049,8 @@ fn turn_text_ersetzt_erwaehnungen_und_haelt_die_grenzen_ein() {
         Some("Zeile 3".to_string())
     );
     assert!(turn.valid());
-    assert!(build_turn(
-        &message(31, NOW, " <@99> "),
-        &[],
-        BOT,
-        member_state(None, &MemberFacts::default())
-    )
-    .is_some_and(|turn| turn.message == "@Bot"));
-    assert!(build_turn(
-        &message(32, NOW, "  "),
-        &[],
-        BOT,
-        member_state(None, &MemberFacts::default())
-    )
-    .is_none());
+    assert_eq!(turn_text(" <@99> ", USER, BOT).as_deref(), Some("@Bot"));
+    assert_eq!(turn_text("  ", USER, BOT), None);
 }
 
 #[test]

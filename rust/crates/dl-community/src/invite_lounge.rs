@@ -253,9 +253,9 @@ impl Cas {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Admission {
-    Accept,
+    Accept(String),
     Ignore,
     Defer,
 }
@@ -921,11 +921,11 @@ impl InviteLoungeWatcher {
         let Some(bot_id) = self.port.bot_id() else {
             return Err("Die Discord-ID des Bots fehlt".into());
         };
-        match self.accepts(event, now).await? {
-            Admission::Accept => {}
+        let message = match self.accepts(event, bot_id, now).await? {
+            Admission::Accept(message) => message,
             Admission::Ignore => return Ok(Turn::Skipped),
             Admission::Defer => return Ok(Turn::Failed),
-        }
+        };
         let user_id = event.author_id;
         let lock = self.user_lock(user_id);
         let _guard = lock.lock().await;
@@ -953,13 +953,7 @@ impl InviteLoungeWatcher {
             .member_facts(event, &context, last_seen, previous.as_ref())
             .await?;
         let member = member_state(previous.as_ref(), &facts);
-        let Some(turn) = build_turn(event, &context, bot_id, member) else {
-            tracing::info!(
-                message_id = event.message_id,
-                "Invite-Lounge: Nachricht ohne lesbaren Text bleibt ohne Antwort"
-            );
-            return Ok(Turn::Skipped);
-        };
+        let turn = build_turn(event, message, &context, bot_id, member);
         let decision = match self.decide(event, &turn).await {
             TurnOutcome::Failed => return Ok(Turn::Failed),
             TurnOutcome::Silent => None,
@@ -1034,17 +1028,22 @@ impl InviteLoungeWatcher {
         }
     }
 
-    async fn accepts(&self, event: &LoungeMessage, now: i64) -> Result<Admission, String> {
+    async fn accepts(
+        &self,
+        event: &LoungeMessage,
+        bot_id: u64,
+        now: i64,
+    ) -> Result<Admission, String> {
         if !self.watches(event) {
             return Ok(Admission::Ignore);
         }
-        if event.content.trim().is_empty() {
+        let Some(message) = turn_text(&event.content, event.author_id, bot_id) else {
             tracing::info!(
                 message_id = event.message_id,
                 "Invite-Lounge: Nachricht ohne Text (Bild, Sticker oder Anhang) geht nicht an den Brain"
             );
             return Ok(Admission::Ignore);
-        }
+        };
         if now.saturating_sub(event.created_at) < -CLOCK_SKEW_SECONDS {
             tracing::warn!(
                 message_id = event.message_id,
@@ -1076,7 +1075,7 @@ impl InviteLoungeWatcher {
                 );
                 Ok(Admission::Ignore)
             }
-            Some(_) => Ok(Admission::Accept),
+            Some(_) => Ok(Admission::Accept(message)),
         }
     }
 
@@ -1962,11 +1961,11 @@ fn snowflake_millis(id: u64) -> i64 {
 
 fn build_turn(
     event: &LoungeMessage,
+    message: String,
     context: &[LoungeMessage],
     bot_id: u64,
     member: InviteMemberState,
-) -> Option<InviteTurn> {
-    let message = turn_text(&event.content, event.author_id, bot_id)?;
+) -> InviteTurn {
     let line = |message: &LoungeMessage| {
         turn_text(&message.content, event.author_id, bot_id).map(|text| InviteChatLine {
             speaker: speaker(message, event.author_id, bot_id),
@@ -1988,12 +1987,12 @@ fn build_turn(
                 .find(|message| !message.system && message.message_id == id)
         })
         .and_then(line);
-    Some(bounded_turn(&InviteTurn {
+    bounded_turn(&InviteTurn {
         message,
         reply_to,
         recent,
         member,
-    }))
+    })
 }
 
 fn speaker(message: &LoungeMessage, member_id: u64, bot_id: u64) -> InviteSpeaker {
