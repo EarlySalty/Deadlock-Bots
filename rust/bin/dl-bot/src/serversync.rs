@@ -1020,6 +1020,19 @@ pub(crate) fn static_v2_message_index(prefix: &str, key: &str) -> Option<usize> 
     (static_v2_message_id_key(prefix, index) == key).then_some(index)
 }
 
+fn stored_discord_id(id: u64) -> String {
+    id.to_string()
+}
+
+fn parse_stored_discord_id(label: &str, raw: &str) -> ServerSyncResult<u64> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0 && stored_discord_id(*id) == raw)
+        .ok_or_else(|| {
+            ServerSyncError::internal(format!("gespeicherter Wert {label} ist keine Discord-ID"))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedBanner<B> {
     pub output: B,
@@ -1378,11 +1391,11 @@ impl ServerSyncService {
             "SELECT k, v
                FROM bot.kv_store
               WHERE ns = $1
-                AND k LIKE $2
+                AND starts_with(k, $2)
               ORDER BY k",
         )
         .bind(SERVERSYNC_KV_NS)
-        .bind(format!("{prefix}%"))
+        .bind(prefix)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1402,7 +1415,7 @@ impl ServerSyncService {
             let Some(message_index) = static_v2_message_index(prefix, &key) else {
                 continue;
             };
-            by_index.insert(message_index, parse_discord_id(&key, &raw)?);
+            by_index.insert(message_index, parse_stored_discord_id(&key, &raw)?);
         }
         Ok(by_index.into_values().collect())
     }
@@ -1433,16 +1446,30 @@ impl ServerSyncService {
         message_ids: &[u64],
         state: &[(&str, &str)],
     ) -> ServerSyncResult<()> {
-        let state_keys: Vec<&str> = state.iter().map(|(key, _)| *key).collect();
         let mut tx = self.pool.begin().await?;
+        let prefixed: Vec<String> = sqlx::query_scalar(
+            "SELECT k FROM bot.kv_store
+              WHERE ns = $1
+                AND starts_with(k, $2)
+              FOR UPDATE",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(message_id_prefix)
+        .fetch_all(&mut *tx)
+        .await?;
+        let replaced_keys: Vec<&str> = prefixed
+            .iter()
+            .map(String::as_str)
+            .filter(|key| static_v2_message_index(message_id_prefix, key).is_some())
+            .chain(state.iter().map(|(key, _)| *key))
+            .collect();
         sqlx::query(
             "DELETE FROM bot.kv_store
               WHERE ns = $1
-                AND (k LIKE $2 OR k = ANY($3::text[]))",
+                AND k = ANY($2::text[])",
         )
         .bind(SERVERSYNC_KV_NS)
-        .bind(format!("{message_id_prefix}%"))
-        .bind(&state_keys)
+        .bind(&replaced_keys)
         .execute(&mut *tx)
         .await?;
 
@@ -1453,7 +1480,7 @@ impl ServerSyncService {
             )
             .bind(SERVERSYNC_KV_NS)
             .bind(static_v2_message_id_key(message_id_prefix, message_index))
-            .bind(message_id.to_string())
+            .bind(stored_discord_id(message_id))
             .execute(&mut *tx)
             .await?;
         }
@@ -1647,12 +1674,12 @@ impl ServerSyncService {
     async fn load_regelwerk_message_id(&self) -> ServerSyncResult<Option<u64>> {
         self.load_serversync_kv(REGELWERK_MESSAGE_ID_KEY)
             .await?
-            .map(|value| parse_discord_id("regelwerk_message_id", &value))
+            .map(|value| parse_stored_discord_id(REGELWERK_MESSAGE_ID_KEY, &value))
             .transpose()
     }
 
     async fn store_regelwerk_message_id(&self, message_id: u64) -> ServerSyncResult<()> {
-        self.store_serversync_kv(REGELWERK_MESSAGE_ID_KEY, &message_id.to_string())
+        self.store_serversync_kv(REGELWERK_MESSAGE_ID_KEY, &stored_discord_id(message_id))
             .await
     }
 
@@ -1741,7 +1768,7 @@ impl ServerSyncService {
             let mut by_index = BTreeMap::<usize, u64>::new();
             let legacy_key = welcome_publish::welcome_legacy_message_id_key(section.id);
             if let Some(raw) = indexed.get(&legacy_key) {
-                by_index.insert(0, parse_discord_id(&legacy_key, raw)?);
+                by_index.insert(0, parse_stored_discord_id(&legacy_key, raw)?);
             }
 
             let prefix = welcome_publish::welcome_message_id_key_prefix(section.id);
@@ -1752,7 +1779,7 @@ impl ServerSyncService {
                 let Some(message_index) = static_v2_message_index(&prefix, key) else {
                     continue;
                 };
-                by_index.insert(message_index, parse_discord_id(key, raw)?);
+                by_index.insert(message_index, parse_stored_discord_id(key, raw)?);
             }
             if !by_index.is_empty() {
                 ids.insert(section.id.to_string(), by_index.into_values().collect());
@@ -1769,7 +1796,7 @@ impl ServerSyncService {
     ) -> ServerSyncResult<()> {
         self.store_serversync_kv(
             &welcome_publish::welcome_message_id_key(section_id, message_index),
-            &message_id.to_string(),
+            &stored_discord_id(message_id),
         )
         .await?;
         if message_index == 0 {
@@ -4759,7 +4786,9 @@ impl ServerSyncOps for ServerSyncService {
     async fn load_voice_ux_lfg_forum_thread_id(&self) -> ServerSyncResult<Option<u64>> {
         self.load_serversync_kv(voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY)
             .await?
-            .map(|value| parse_discord_id("voice_ux_lfg_forum_thread_id", &value))
+            .map(|value| {
+                parse_stored_discord_id(voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY, &value)
+            })
             .transpose()
     }
 
@@ -4952,7 +4981,7 @@ impl ServerSyncOps for ServerSyncService {
         .await
         {
             if let Ok(message_id) =
-                parse_discord_id("tempvoice_router.components_v2_message_id", &raw)
+                parse_stored_discord_id("tempvoice_router.components_v2_message_id", &raw)
             {
                 raw_candidates.push((
                     voice_ux_publish::VOICE_UX_CHANNEL_ID,
@@ -4968,7 +4997,9 @@ impl ServerSyncOps for ServerSyncService {
         )
         .await
         {
-            if let Ok(message_id) = parse_discord_id("lfg_panel.components_v2_message_id", &raw) {
+            if let Ok(message_id) =
+                parse_stored_discord_id("lfg_panel.components_v2_message_id", &raw)
+            {
                 raw_candidates.push((
                     voice_ux_publish::VOICE_UX_CHANNEL_ID,
                     message_id,
@@ -5143,7 +5174,7 @@ impl ServerSyncOps for ServerSyncService {
         self.store_serversync_kv_pairs(&[
             (
                 voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
-                &thread_id.to_string(),
+                &stored_discord_id(thread_id),
             ),
             (
                 voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
@@ -8620,6 +8651,24 @@ mod tests {
             None
         );
         assert_eq!(static_v2_message_index(prefix, "other_message_id_1"), None);
+        for id in [1, 9101, u64::MAX] {
+            assert_eq!(
+                parse_stored_discord_id("k", &stored_discord_id(id)).ok(),
+                Some(id)
+            );
+        }
+        for raw in [
+            "+9101",
+            "09101",
+            " 9101",
+            "9101 ",
+            "0",
+            "",
+            "-1",
+            "18446744073709551616",
+        ] {
+            assert!(parse_stored_discord_id("k", raw).is_err(), "{raw:?}");
+        }
         let welcome_prefix = welcome_publish::welcome_message_id_key_prefix("start");
         assert_eq!(
             static_v2_message_index(
@@ -12510,6 +12559,63 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         dl_central_db::kv::delete(pool, SERVERSYNC_KV_NS, key)
             .await
             .expect("delete kv");
+    }
+
+    #[tokio::test]
+    async fn gespeicherte_panel_ids_lesen_und_ersetzen_nur_was_der_schreiber_erzeugt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            "http://127.0.0.1:9".to_string(),
+            repo.path().to_path_buf(),
+        );
+        let prefix = "stored_id_probe_message_id_";
+        let first = static_v2_message_id_key(prefix, 0);
+        let foreign = [
+            "stored_id_probe_message_id_x",
+            "stored_id_probe_messageXid_0",
+        ];
+        for key in foreign {
+            dl_central_db::kv::set(db.pool(), SERVERSYNC_KV_NS, key, "bleibt")
+                .await
+                .expect("set foreign");
+        }
+        dl_central_db::kv::set(db.pool(), SERVERSYNC_KV_NS, &first, "+9811")
+            .await
+            .expect("set id");
+        assert!(service.load_static_v2_message_ids(prefix).await.is_err());
+
+        service
+            .replace_static_v2_message_ids_and_state(prefix, &[9811, 9812], &[])
+            .await
+            .expect("replace");
+        assert_eq!(
+            service
+                .load_static_v2_message_ids(prefix)
+                .await
+                .expect("ids"),
+            vec![9811, 9812]
+        );
+        for key in foreign {
+            assert_eq!(
+                dl_central_db::kv::get(db.pool(), SERVERSYNC_KV_NS, key)
+                    .await
+                    .expect("get foreign")
+                    .as_deref(),
+                Some("bleibt"),
+                "{key}"
+            );
+        }
+        for key in foreign
+            .into_iter()
+            .map(str::to_string)
+            .chain([first, static_v2_message_id_key(prefix, 1)])
+        {
+            delete_serversync_kv_for_test(db.pool(), &key).await;
+        }
     }
 
     #[tokio::test]

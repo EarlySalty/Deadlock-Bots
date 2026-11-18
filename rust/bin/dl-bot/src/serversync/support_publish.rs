@@ -123,7 +123,7 @@ pub const SUPPORT_TIP_BUTTON_LABEL: &str = "Einmalig unterstützen";
 pub const SUPPORT_MANAGE_BUTTON_LABEL: &str = "Abo verwalten oder kündigen";
 pub const SUPPORT_TWITCH_BUTTON_LABEL: &str = "Twitch verbinden";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct SupportFunding {
     pub raised_cents: i64,
     pub goal_cents: i64,
@@ -143,7 +143,11 @@ impl SupportPanelOptions {
     }
 
     pub fn from_kv(raw: &str) -> Result<Self, String> {
-        serde_json::from_str(raw).map_err(|error| error.to_string())
+        let options: Self = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        if options.to_kv()? != raw {
+            return Err(format!("`{raw}` ist nicht die gespeicherte Schreibweise"));
+        }
+        Ok(options)
     }
 }
 
@@ -2302,11 +2306,24 @@ enabled = false
             ..options()
         };
         let raw = value.to_kv().expect("kv");
-        assert_eq!(SupportPanelOptions::from_kv(&raw), Ok(value));
+        assert_eq!(SupportPanelOptions::from_kv(&raw), Ok(value.clone()));
         assert!(SupportPanelOptions::from_kv("kaputt").is_err());
         assert!(SupportPanelOptions::from_kv(
             r#"{"tiers_eur":[5],"plus_monthly_cents":300,"twitch":false,"role_grant":true}"#
         )
         .is_err());
+        for respelled in [
+            format!(" {raw}"),
+            raw.replace(':', ": "),
+            format!(
+                r#"{{"twitch":true,"tiers_eur":{},"role_grant":true}}"#,
+                serde_json::to_string(&value.tiers_eur).expect("tiers")
+            ),
+        ] {
+            assert!(
+                SupportPanelOptions::from_kv(&respelled).is_err(),
+                "{respelled}"
+            );
+        }
     }
 }
