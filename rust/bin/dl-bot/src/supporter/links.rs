@@ -516,11 +516,10 @@ fn tier_picker(tiers_eur: &[u64]) -> dl_discord::BridgeReply {
 }
 
 fn tier_from_custom_id(custom_id: &str, tiers_eur: &[u64]) -> Option<u64> {
-    custom_id
-        .strip_prefix(SUPPORT_TIER_BUTTON_PREFIX)?
-        .parse::<u64>()
-        .ok()
-        .filter(|eur| tiers_eur.contains(eur))
+    tiers_eur
+        .iter()
+        .copied()
+        .find(|eur| tier_button_id(*eur) == custom_id)
 }
 
 async fn tier_reply(
@@ -833,6 +832,9 @@ mod tests {
             "support:tier:",
             "support:tier:x",
             "support:tier:-5",
+            "support:tier:+50",
+            "support:tier:050",
+            "support:tier:50 ",
         ] {
             let gone = click(links.clone(), stale).await;
             assert_eq!(gone.content.as_deref(), Some(REPLY_TIER_GONE), "{stale}");
@@ -927,6 +929,7 @@ mod tests {
 
     async fn recording_service(
         service: &'static str,
+        expected_token: &'static str,
         seen: Seen,
     ) -> (String, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new().fallback(
@@ -942,7 +945,7 @@ mod tests {
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_string);
                     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    let accepted = token.as_deref() == Some("test-token");
+                    let accepted = token.as_deref() == Some(expected_token);
                     seen.lock().expect("seen").extend([(
                         service,
                         method.to_string(),
@@ -986,23 +989,37 @@ mod tests {
         (base, server)
     }
 
-    fn links_for(steam: &str, twitch: &str, token: &'static str) -> Arc<HttpSupporterLinks> {
+    const STEAM_TEST_TOKEN: &str = "steam-test-token";
+    const TWITCH_TEST_TOKEN: &str = "twitch-test-token";
+    const TEST_GOAL_CENTS: i64 = 31_400;
+    const _: () =
+        assert!(TEST_GOAL_CENTS != dl_core::runtime_config::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS);
+
+    fn links_for(
+        steam: &str,
+        twitch: &str,
+        steam_token: &str,
+        twitch_token: &str,
+    ) -> Arc<HttpSupporterLinks> {
         let community = dl_core::runtime_config::CommunityOptions {
             supporter_twitch_api_base: Some(twitch.to_string()),
             ..Default::default()
         };
-        let config = SupporterConfig::new(&community, steam, |name| {
-            (name == dl_core::runtime_config::TWITCH_TOKEN_NAME).then(|| token.to_string())
-        });
+        let mut config = SupporterConfig::new(&community, steam, |_| None);
+        config.steam_token = Some(steam_token.to_string());
+        config.twitch_token = Some(twitch_token.to_string());
+        config.goal_cents = TEST_GOAL_CENTS;
         test_links(&config)
     }
 
     #[tokio::test]
     async fn jede_methode_ruft_ihren_dienst_und_pfad_mit_token_und_feldern_auf() {
         let seen: Seen = Arc::default();
-        let (steam, steam_server) = recording_service(STEAM_BOT.name, seen.clone()).await;
-        let (twitch, twitch_server) = recording_service(TWITCH_DASHBOARD.name, seen.clone()).await;
-        let links = links_for(&steam, &twitch, "test-token");
+        let (steam, steam_server) =
+            recording_service(STEAM_BOT.name, STEAM_TEST_TOKEN, seen.clone()).await;
+        let (twitch, twitch_server) =
+            recording_service(TWITCH_DASHBOARD.name, TWITCH_TEST_TOKEN, seen.clone()).await;
+        let links = links_for(&steam, &twitch, STEAM_TEST_TOKEN, TWITCH_TEST_TOKEN);
         let url = |text: &str| Ok(LinkOutcome::Url(text.to_string()));
         assert_eq!(
             links.checkout(CLICKER, 20).await,
@@ -1023,15 +1040,19 @@ mod tests {
         let funding = links.funding().await.expect("funding");
         assert_eq!(
             (funding.raised_cents, funding.goal_cents),
-            (1234, links.goal_cents())
+            (1234, TEST_GOAL_CENTS)
         );
-        let token = Some("test-token".to_string());
         let call = |service, method: &str, path: &str, body: Value| {
+            let token = if service == STEAM_BOT.name {
+                STEAM_TEST_TOKEN
+            } else {
+                TWITCH_TEST_TOKEN
+            };
             (
                 service,
                 method.to_string(),
                 path.to_string(),
-                token.clone(),
+                Some(token.to_string()),
                 body,
             )
         };
@@ -1066,7 +1087,7 @@ mod tests {
             ]
         );
 
-        let rejected = links_for(&steam, &twitch, "falscher-token");
+        let rejected = links_for(&steam, &twitch, "falscher-token", TWITCH_TEST_TOKEN);
         let funding = rejected.funding().await;
         assert!(
             funding
