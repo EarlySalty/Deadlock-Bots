@@ -1015,6 +1015,11 @@ pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> St
     format!("{prefix}{message_index}")
 }
 
+pub(crate) fn static_v2_message_index(prefix: &str, key: &str) -> Option<usize> {
+    let index = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
+    (static_v2_message_id_key(prefix, index) == key).then_some(index)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedBanner<B> {
     pub output: B,
@@ -1394,8 +1399,7 @@ impl ServerSyncService {
         let indexed = self.load_serversync_kv_prefix(prefix).await?;
         let mut by_index = BTreeMap::<usize, u64>::new();
         for (key, raw) in indexed {
-            let raw_index = key.trim_start_matches(prefix);
-            let Ok(message_index) = raw_index.parse::<usize>() else {
+            let Some(message_index) = static_v2_message_index(prefix, &key) else {
                 continue;
             };
             by_index.insert(message_index, parse_discord_id(&key, &raw)?);
@@ -1745,8 +1749,7 @@ impl ServerSyncService {
                 .iter()
                 .filter(|(key, _)| key.starts_with(prefix.as_str()))
             {
-                let raw_index = key.trim_start_matches(prefix.as_str());
-                let Ok(message_index) = raw_index.parse::<usize>() else {
+                let Some(message_index) = static_v2_message_index(&prefix, key) else {
                     continue;
                 };
                 by_index.insert(message_index, parse_discord_id(key, raw)?);
@@ -8594,6 +8597,37 @@ mod tests {
         server.abort();
         assert!(model.is_ok(), "{:?}", model.err());
         assert_eq!(calls.load(Ordering::SeqCst), LIVE_GUILD_MODEL_DISCORD_CALLS);
+    }
+
+    #[test]
+    fn panel_id_index_reads_only_what_the_key_writer_produces() {
+        let prefix = "panel_message_id_";
+        for index in [0, 1, 9, 10, usize::MAX] {
+            assert_eq!(
+                static_v2_message_index(prefix, &static_v2_message_id_key(prefix, index)),
+                Some(index)
+            );
+        }
+        for suffix in ["+1", "01", "00", "", " 1", "1 ", "-0", "1a"] {
+            assert_eq!(
+                static_v2_message_index(prefix, &format!("{prefix}{suffix}")),
+                None,
+                "{suffix:?}"
+            );
+        }
+        assert_eq!(
+            static_v2_message_index(prefix, &format!("{prefix}{prefix}1")),
+            None
+        );
+        assert_eq!(static_v2_message_index(prefix, "other_message_id_1"), None);
+        let welcome_prefix = welcome_publish::welcome_message_id_key_prefix("start");
+        assert_eq!(
+            static_v2_message_index(
+                &welcome_prefix,
+                &welcome_publish::welcome_message_id_key("start", 3)
+            ),
+            Some(3)
+        );
     }
 
     #[test]

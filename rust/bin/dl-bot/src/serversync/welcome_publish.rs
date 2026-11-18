@@ -842,7 +842,10 @@ pub fn welcome_legacy_message_id_key(section_id: &str) -> String {
 }
 
 pub fn welcome_message_id_key(section_id: &str, message_index: usize) -> String {
-    format!("welcome_message_id_{section_id}_{message_index}")
+    crate::serversync::static_v2_message_id_key(
+        &welcome_message_id_key_prefix(section_id),
+        message_index,
+    )
 }
 
 pub fn welcome_message_id_key_prefix(section_id: &str) -> String {

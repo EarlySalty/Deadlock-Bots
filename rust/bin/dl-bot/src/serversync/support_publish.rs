@@ -199,9 +199,10 @@ impl SupportFunding {
             .split_once(':')
             .ok_or_else(|| format!("kein Trennzeichen in `{raw}`"))?;
         let cents = |part: &str| {
-            part.trim()
-                .parse::<i64>()
-                .map_err(|error| format!("`{part}` ist kein Centbetrag: {error}"))
+            part.parse::<i64>()
+                .ok()
+                .filter(|cents| cents.to_string() == part)
+                .ok_or_else(|| format!("`{part}` ist kein Centbetrag"))
         };
         Ok(Self {
             raised_cents: cents(raised)?,
@@ -1765,7 +1766,9 @@ enabled = false
     fn funding_kv_rundreise() {
         let value = funding(1234);
         assert_eq!(SupportFunding::from_kv(&value.to_kv()), Ok(value));
-        for broken in ["kaputt", "12:x", "x:12", ""] {
+        for broken in [
+            "kaputt", "12:x", "x:12", "", "+12:34", "012:34", "12:034", " 12:34", "12: 34", "-0:34",
+        ] {
             assert!(SupportFunding::from_kv(broken).is_err(), "{broken}");
         }
     }
