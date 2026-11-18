@@ -13,7 +13,7 @@ BEGIN
     END IF;
 END
 $$;
-COMMENT ON COLUMN public.llm_usage.error_reason IS 'Upstream refusal reason of a failed call, for example billing, http_429 or http_5xx; NULL for successful calls and for rows written before this column existed.';
+COMMENT ON COLUMN public.llm_usage.error_reason IS 'Reason code of a failed call: an account refusal such as billing or usage_limit, a status reason such as http_429 or http_5xx, or a local reason such as slot_timeout or invalid_json; NULL for successful calls, for failed rows without a reason and for rows written before this column existed.';
 COMMENT ON COLUMN public.llm_usage.cache_read_tokens IS 'Input tokens served from the provider prompt cache, a subset of tokens_in; NULL means the provider reported nothing, 0 means it reported zero.';
 COMMENT ON COLUMN public.llm_usage.cache_write_tokens IS 'Input tokens written to the provider prompt cache, a subset of tokens_in; NULL means the provider reported nothing, 0 means it reported zero.';
 RESET lock_timeout;

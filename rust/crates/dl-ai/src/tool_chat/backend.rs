@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use super::types::{ToolChatRequest, ToolChatResponse};
+use crate::upstream::RefusalKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
@@ -14,12 +15,22 @@ pub enum FailureKind {
 }
 
 impl FailureKind {
+    pub const ALL: [Self; 7] = [
+        Self::Limit,
+        Self::Unavailable,
+        Self::Busy,
+        Self::Overloaded,
+        Self::Timeout,
+        Self::InvalidRequest,
+        Self::InvalidOutput,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Limit => "limit",
-            Self::Unavailable => "unavailable",
+            Self::Limit => RefusalKind::Limit.as_str(),
+            Self::Unavailable => RefusalKind::Unavailable.as_str(),
             Self::Busy => "busy",
-            Self::Overloaded => "overloaded",
+            Self::Overloaded => RefusalKind::Overloaded.as_str(),
             Self::Timeout => "timeout",
             Self::InvalidRequest => "invalid_request",
             Self::InvalidOutput => "invalid_output",

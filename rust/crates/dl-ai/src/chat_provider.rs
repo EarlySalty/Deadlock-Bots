@@ -8,6 +8,10 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::time::sleep;
 
+use crate::upstream::{
+    billing_status, refusal_reason, request_error_status, status_reason, Account,
+};
+
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 /// Der Concierge wartet als einziger Anwendungsfall mit einem Menschen am
 /// anderen Ende, der die Verzoegerung sieht und darueber informiert wird. Sein
@@ -120,6 +124,7 @@ pub struct TokenUsage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,30 +151,58 @@ pub enum ChatProviderError {
     #[error("LLM provider rate limited")]
     RateLimit,
     #[error("LLM provider authentication failed")]
-    Auth(u16),
-    /// Der volle Hinweis, Wortlaut des Anbieters eingeschlossen. `Display`
-    /// gibt davon nur den Statusteil her, siehe unten; an den Wortlaut kommt
-    /// ausschliesslich [`ChatProviderError::transparenz_wortlaut`].
+    Auth { status: u16, reason: &'static str },
     #[error("LLM provider error: {}", statusteil(.0))]
     Provider(String),
     #[error("LLM provider error: {}", statusteil(.hinweis))]
-    Upstream { status: u16, hinweis: String },
+    Upstream {
+        status: u16,
+        hinweis: String,
+        reason: &'static str,
+    },
 }
+
+pub(crate) const PROVIDER_ERROR: &str = "provider_error";
 
 impl ChatProviderError {
     pub fn upstream_status(&self) -> Option<u16> {
         match self {
-            Self::Timeout => None,
-            Self::RateLimit => Some(429),
-            Self::Auth(status) | Self::Upstream { status, .. } => Some(*status),
-            Self::Provider(_) => None,
+            Self::Timeout | Self::Provider(_) => None,
+            Self::RateLimit => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+            Self::Auth { status, .. } | Self::Upstream { status, .. } => Some(*status),
         }
     }
 
-    pub fn upstream(status: u16, rohtext: &str) -> Self {
-        Self::Upstream {
-            status,
-            hinweis: anbieter_hinweis(status, rohtext),
+    pub fn upstream_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Timeout | Self::Provider(_) => None,
+            Self::RateLimit => self.upstream_status().map(status_reason),
+            Self::Auth { reason, .. } | Self::Upstream { reason, .. } => Some(reason),
+        }
+    }
+
+    pub fn upstream(status: u16, rohtext: &str, account: Account) -> Self {
+        let words = crate::usage::error_words(rohtext.as_bytes());
+        let reason = refusal_reason(status, &words, account);
+        match StatusCode::from_u16(status) {
+            Ok(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => Self::Auth { status, reason },
+            Ok(StatusCode::TOO_MANY_REQUESTS) => Self::RateLimit,
+            _ => Self::Upstream {
+                status,
+                hinweis: anbieter_hinweis(status, rohtext),
+                reason,
+            },
+        }
+    }
+
+    fn answered(self, status: u16) -> Self {
+        match self {
+            Self::Provider(hinweis) => Self::Upstream {
+                status,
+                hinweis,
+                reason: PROVIDER_ERROR,
+            },
+            other => other,
         }
     }
 
@@ -206,6 +239,14 @@ pub trait ChatProvider: Send + Sync {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError>;
+
+    async fn chat_with_status(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
+        Ok((self.chat(messages, params).await?, None))
+    }
 
     /// Das Modell, unter dem dieser Aufruf tatsaechlich laeuft, bevor er
     /// laeuft.
@@ -766,6 +807,14 @@ impl ChatProvider for OpenAiChatProvider {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError> {
+        Ok(self.chat_with_status(messages, params).await?.0)
+    }
+
+    async fn chat_with_status(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
         let model = params
             .model
             .clone()
@@ -797,21 +846,22 @@ impl ChatProvider for OpenAiChatProvider {
         }
 
         let url = format!("{}/chat/completions", self.base_url);
-        let result = send_json_with_retry(self.provider_label, &self.retry, || {
-            self.http
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&payload)
-        })
-        .await?;
-        let response = parse_openai_chat_response(&result.body)?;
+        let result =
+            send_json_with_retry(self.provider_label, Account::Metered, &self.retry, || {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .json(&payload)
+            })
+            .await?;
+        let (response, status) = result.answer(parse_openai_chat_response)?;
         log_chat_success(
             self.provider_label,
             result.status,
             result.elapsed,
             &response.usage,
         );
-        Ok(response)
+        Ok((response, status))
     }
 }
 
@@ -881,6 +931,14 @@ impl ChatProvider for MistralChatProvider {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError> {
+        Ok(self.chat_with_status(messages, params).await?.0)
+    }
+
+    async fn chat_with_status(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
         let model = params
             .model
             .clone()
@@ -894,16 +952,16 @@ impl ChatProvider for MistralChatProvider {
         payload["max_tokens"] = json!(params.max_tokens.unwrap_or(DEFAULT_CHAT_MAX_TOKENS));
 
         let url = format!("{}/chat/completions", self.base_url);
-        let result = send_json_with_retry("mistral", &self.retry, || {
+        let result = send_json_with_retry("mistral", Account::Metered, &self.retry, || {
             self.http
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .json(&payload)
         })
         .await?;
-        let response = parse_openai_chat_response(&result.body)?;
+        let (response, status) = result.answer(parse_openai_chat_response)?;
         log_chat_success("mistral", result.status, result.elapsed, &response.usage);
-        Ok(response)
+        Ok((response, status))
     }
 }
 
@@ -1007,6 +1065,14 @@ impl ChatProvider for MiniMaxChatProvider {
         messages: &[ChatMessage],
         params: ChatParams,
     ) -> Result<ChatResponse, ChatProviderError> {
+        Ok(self.chat_with_status(messages, params).await?.0)
+    }
+
+    async fn chat_with_status(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
         let model = Self::normalize_model(
             params
                 .model
@@ -1042,7 +1108,13 @@ impl ChatProvider for MiniMaxChatProvider {
             )
         };
 
-        let result = send_json_with_retry("minimax", &self.retry, || {
+        let (account, parse): (_, fn(&Value) -> Result<ChatResponse, ChatProviderError>) =
+            if self.token_plan {
+                (Account::Plan, parse_anthropic_chat_response)
+            } else {
+                (Account::Metered, parse_openai_chat_response)
+            };
+        let result = send_json_with_retry("minimax", account, &self.retry, || {
             let request = self.http.post(&url).json(&payload);
             match auth_header {
                 MiniMaxAuthHeader::TokenPlan => request
@@ -1055,13 +1127,9 @@ impl ChatProvider for MiniMaxChatProvider {
         })
         .await?;
 
-        let response = if self.token_plan {
-            parse_anthropic_chat_response(&result.body)?
-        } else {
-            parse_openai_chat_response(&result.body)?
-        };
+        let (response, status) = result.answer(parse)?;
         log_chat_success("minimax", result.status, result.elapsed, &response.usage);
-        Ok(response)
+        Ok((response, status))
     }
 }
 
@@ -1109,8 +1177,22 @@ struct HttpJsonResult {
     elapsed: Duration,
 }
 
+impl HttpJsonResult {
+    fn answer(
+        &self,
+        parse: fn(&Value) -> Result<ChatResponse, ChatProviderError>,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
+        let status = self.status.as_u16();
+        match parse(&self.body) {
+            Ok(response) => Ok((response, Some(status))),
+            Err(error) => Err(error.answered(status)),
+        }
+    }
+}
+
 async fn send_json_with_retry(
     provider: &'static str,
+    account: Account,
     retry: &RetryConfig,
     make_request: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<HttpJsonResult, ChatProviderError> {
@@ -1169,23 +1251,19 @@ async fn send_json_with_retry(
         }
         let status = response.status();
         if !status.is_success() {
+            let retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            let retrying = retryable && attempt < retry.max_retries;
+            let rohtext = if retrying {
+                String::new()
+            } else {
+                response.text().await.unwrap_or_default()
+            };
             if let Some(tracked) = tracked.take() {
                 tracked
-                    .finish_before(None, Some("http_error"), deadline)
+                    .finish_refused_before(rohtext.as_bytes(), account, deadline)
                     .await;
             }
-        }
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            tracing::warn!(
-                provider = provider,
-                status = status.as_u16(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "LLM-Provider-Auth-Fehler"
-            );
-            return Err(ChatProviderError::Auth(status.as_u16()));
-        }
-        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            if attempt < retry.max_retries {
+            if retrying {
                 let backoff = retry.backoff_for_attempt(attempt);
                 tracing::warn!(
                     provider = provider,
@@ -1198,40 +1276,29 @@ async fn send_json_with_retry(
                 sleep(backoff).await;
                 continue;
             }
-            tracing::warn!(
-                provider = provider,
-                status = status.as_u16(),
-                elapsed_ms = started.elapsed().as_millis(),
-                "LLM-Provider-Request nach Retries fehlgeschlagen"
-            );
-            return if status == StatusCode::TOO_MANY_REQUESTS {
-                Err(ChatProviderError::RateLimit)
-            } else {
-                let rohtext = response.text().await.unwrap_or_default();
-                Err(ChatProviderError::upstream(status.as_u16(), &rohtext))
-            };
-        }
-        if !status.is_success() {
-            // Der Fehlertext landet im Transparenz-Kanal. "HTTP 412" schickt
-            // den Leser auf die Suche, obwohl der Anbieter im Body genau
-            // sagt, was los ist.
-            let rohtext = response.text().await.unwrap_or_default();
-            let hinweis = anbieter_hinweis(status.as_u16(), &rohtext);
-            tracing::warn!(
-                provider = provider,
-                status = status.as_u16(),
-                elapsed_ms = started.elapsed().as_millis(),
-                // Nur die Deutung, nie der Wortlaut des Anbieters: manche
-                // spiegeln bei 400 den beanstandeten Nachrichteninhalt
-                // zurueck, und Nutzertext gehoert nicht ins Anwendungslog.
-                // Den vollen Wortlaut bekommt der Transparenz-Kanal.
-                hinweis = %statusteil(&hinweis),
-                "LLM-Provider-API-Fehler"
-            );
-            return Err(ChatProviderError::Upstream {
-                status: status.as_u16(),
-                hinweis,
-            });
+            let error = ChatProviderError::upstream(status.as_u16(), &rohtext, account);
+            match &error {
+                ChatProviderError::Auth { .. } => tracing::warn!(
+                    provider = provider,
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "LLM-Provider-Auth-Fehler"
+                ),
+                ChatProviderError::Upstream { hinweis, .. } if !retryable => tracing::warn!(
+                    provider = provider,
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    hinweis = %statusteil(hinweis),
+                    "LLM-Provider-API-Fehler"
+                ),
+                _ => tracing::warn!(
+                    provider = provider,
+                    status = status.as_u16(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "LLM-Provider-Request nach Retries fehlgeschlagen"
+                ),
+            }
+            return Err(error);
         }
         let body = match response.json::<Value>().await {
             Ok(body) => body,
@@ -1241,7 +1308,8 @@ async fn send_json_with_retry(
                         .finish_before(None, Some("invalid_json"), deadline)
                         .await;
                 }
-                return Err(ChatProviderError::Provider("invalid JSON response".into()));
+                return Err(ChatProviderError::Provider("invalid JSON response".into())
+                    .answered(status.as_u16()));
             }
         };
         if let Some(tracked) = tracked.take() {
@@ -1287,12 +1355,14 @@ pub fn statusteil(hinweis: &str) -> &str {
 pub fn anbieter_hinweis(status: u16, rohtext: &str) -> String {
     let meldung = anbieter_meldung(rohtext);
     let deutung = match status {
-        400 => Some("Anfrage abgelehnt, meist ein ungueltiger Parameter"),
-        402 | 412 => {
-            Some("Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen")
-        }
         404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
         413 => Some("Anfrage zu gross"),
+        _ if billing_status(status) => {
+            Some("Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen")
+        }
+        _ if request_error_status(status) => {
+            Some("Anfrage abgelehnt, meist ein ungueltiger Parameter")
+        }
         _ => None,
     };
     match (deutung, meldung) {
@@ -1509,6 +1579,7 @@ fn parse_usage(data: &Value) -> TokenUsage {
         total_tokens: usage
             .and_then(|usage| usage.get("total_tokens"))
             .and_then(Value::as_u64),
+        cached_tokens: crate::usage::cached_tokens(data),
     }
 }
 
@@ -1595,7 +1666,7 @@ mod tests {
     fn upstream_status_is_carried_as_a_field_and_never_read_from_the_hint_text() {
         let body = r#"{"error":{"message":"HTTP 999 x"}}"#;
         for status in [400, 402, 404, 412, 413, 418, 500, 503] {
-            let error = ChatProviderError::upstream(status, body);
+            let error = ChatProviderError::upstream(status, body, Account::Metered);
             assert_eq!(error.upstream_status(), Some(status));
             assert_eq!(
                 error.transparenz_wortlaut(),
@@ -1611,7 +1682,10 @@ mod tests {
             None
         );
         assert_eq!(ChatProviderError::RateLimit.upstream_status(), Some(429));
-        assert_eq!(ChatProviderError::Auth(403).upstream_status(), Some(403));
+        assert_eq!(
+            ChatProviderError::upstream(403, body, Account::Metered).upstream_status(),
+            Some(403)
+        );
         assert_eq!(ChatProviderError::Timeout.upstream_status(), None);
     }
 
@@ -1698,7 +1772,7 @@ mod tests {
         for fehler in [
             ChatProviderError::Timeout,
             ChatProviderError::RateLimit,
-            ChatProviderError::Auth(401),
+            ChatProviderError::upstream(401, "", Account::Metered),
         ] {
             assert_eq!(fehler.transparenz_wortlaut(), fehler.to_string());
         }
@@ -1736,7 +1810,7 @@ mod tests {
                 .next()
                 .expect("warn-Aufruf der Logstelle");
             assert!(
-                block.contains("hinweis = %statusteil(&hinweis)"),
+                block.contains("hinweis = %statusteil(hinweis)"),
                 "die Logstelle muss kuerzen, sonst steht Anbieter- und damit \
                  Nutzertext im Anwendungslog: {block}"
             );
@@ -2491,6 +2565,7 @@ mod tests {
             ChatProviderError::Upstream {
                 status: 500,
                 hinweis: "HTTP 500: Anbieter sagt: server".to_string(),
+                reason: "http_5xx",
             }
         );
         assert_eq!(*attempts.lock().expect("lock"), 3);
@@ -2535,12 +2610,19 @@ mod tests {
                     "HTTP 400: Anfrage abgelehnt, meist ein ungueltiger Parameter.\
                      {ANBIETER_MARKER}{{\"error\":400}}"
                 ),
+                reason: "http_4xx",
             }
         );
         assert_eq!(bad_request_attempts, 1);
 
         let (auth, auth_attempts) = error_for_status(axum::http::StatusCode::UNAUTHORIZED).await;
-        assert_eq!(auth, ChatProviderError::Auth(401));
+        assert_eq!(
+            auth,
+            ChatProviderError::Auth {
+                status: 401,
+                reason: "http_401"
+            }
+        );
         assert_eq!(auth_attempts, 1);
     }
 
@@ -2563,7 +2645,13 @@ mod tests {
             .chat(&[ChatMessage::user("synthetisch")], ChatParams::default())
             .await
             .expect_err("auth error");
-        assert_eq!(err, ChatProviderError::Auth(401));
+        assert_eq!(
+            err,
+            ChatProviderError::Auth {
+                status: 401,
+                reason: "http_401"
+            }
+        );
 
         let rate_app = Router::new().route(
             "/chat/completions",
@@ -2582,6 +2670,202 @@ mod tests {
             .await
             .expect_err("rate limit");
         assert_eq!(err, ChatProviderError::RateLimit);
+    }
+
+    const CREDIT_BODY: &str =
+        r#"{"error":{"message":"Your credit balance is too low to access the API."}}"#;
+    const USAGE_BODY: &str = r#"{"error":{"message":"The usage limit has been reached."}}"#;
+
+    async fn answering(route: &'static str, status: u16, body: &'static str) -> String {
+        use axum::{routing::post, Router};
+        let status = axum::http::StatusCode::from_u16(status).expect("status");
+        spawn_json_server(Router::new().route(route, post(move || async move { (status, body) })))
+            .await
+    }
+
+    async fn metered(status: u16, body: &'static str) -> Arc<dyn ChatProvider> {
+        let base = answering("/chat/completions", status, body).await;
+        MistralChatProvider::new_with_retry(base, "key", "model", fast_retry(0))
+    }
+
+    async fn token_plan(status: u16, body: &'static str) -> Arc<dyn ChatProvider> {
+        let base = answering("/messages", status, body).await;
+        MiniMaxChatProvider::new_with_retry(base, "key", true, "model", fast_retry(0))
+    }
+
+    async fn refused(provider: Arc<dyn ChatProvider>) -> ChatProviderError {
+        provider
+            .chat(&[ChatMessage::user("synthetisch")], ChatParams::default())
+            .await
+            .expect_err("refused")
+    }
+
+    #[tokio::test]
+    async fn refusals_carry_the_reason_decided_from_status_body_and_account() {
+        let upstream = |status, body, reason| ChatProviderError::Upstream {
+            status,
+            hinweis: anbieter_hinweis(status, body),
+            reason,
+        };
+        let billed = refused(metered(403, CREDIT_BODY).await).await;
+        assert_eq!(
+            billed,
+            ChatProviderError::Auth {
+                status: 403,
+                reason: "billing"
+            }
+        );
+        assert_eq!(billed.to_string(), "LLM provider authentication failed");
+        assert_eq!(
+            refused(metered(403, "").await).await,
+            ChatProviderError::Auth {
+                status: 403,
+                reason: "http_403"
+            }
+        );
+        for body in [CREDIT_BODY, USAGE_BODY] {
+            assert_eq!(
+                refused(metered(400, body).await).await,
+                upstream(400, body, "billing")
+            );
+        }
+        assert_eq!(
+            refused(metered(429, USAGE_BODY).await).await,
+            ChatProviderError::RateLimit
+        );
+        assert_eq!(
+            refused(token_plan(400, USAGE_BODY).await).await,
+            upstream(400, USAGE_BODY, "usage_limit")
+        );
+        assert_eq!(
+            refused(token_plan(400, CREDIT_BODY).await).await,
+            upstream(400, CREDIT_BODY, "billing")
+        );
+        assert_eq!(
+            refused(token_plan(429, USAGE_BODY).await).await,
+            ChatProviderError::RateLimit
+        );
+        assert_eq!(
+            refused(token_plan(429, "").await).await,
+            ChatProviderError::RateLimit
+        );
+        assert_eq!(
+            refused(token_plan(403, USAGE_BODY).await).await,
+            ChatProviderError::Auth {
+                status: 403,
+                reason: "usage_limit"
+            }
+        );
+        assert_eq!(
+            ChatProviderError::RateLimit.upstream_reason(),
+            Some("http_429")
+        );
+        assert_eq!(billed.upstream_reason(), Some("billing"));
+        assert_eq!(
+            upstream(503, "", "http_5xx").upstream_reason(),
+            Some("http_5xx")
+        );
+        assert_eq!(ChatProviderError::Timeout.upstream_reason(), None);
+        assert_eq!(
+            ChatProviderError::Provider("connect".into()).upstream_reason(),
+            None
+        );
+        for status in [0, 200, 302, 418, 600, 999] {
+            assert_eq!(
+                ChatProviderError::upstream(status, "", Account::Metered),
+                upstream(status, "", "http_status")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failures_and_answers_after_a_2xx_keep_the_upstream_status() {
+        let unusable = |status, text: &str| ChatProviderError::Upstream {
+            status,
+            hinweis: text.to_string(),
+            reason: PROVIDER_ERROR,
+        };
+        let no_json = refused(metered(200, "no json").await).await;
+        assert_eq!(no_json, unusable(200, "invalid JSON response"));
+        assert_eq!(no_json.upstream_status(), Some(200));
+        assert_eq!(
+            no_json.to_string(),
+            ChatProviderError::Provider("invalid JSON response".into()).to_string()
+        );
+        assert_eq!(
+            refused(metered(201, r#"{"choices":[]}"#).await).await,
+            unusable(201, "missing chat response content")
+        );
+        assert_eq!(
+            refused(
+                metered(
+                    200,
+                    r#"{"choices":[{"finish_reason":"length","message":{"content":"x"}}]}"#
+                )
+                .await
+            )
+            .await,
+            unusable(200, "response truncated (max_tokens)")
+        );
+        assert_eq!(
+            refused(token_plan(200, r#"{"content":[]}"#).await).await,
+            unusable(200, "missing chat response content")
+        );
+        let served = metered(
+            201,
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":60}}}"#,
+        )
+        .await
+        .chat_with_status(&[ChatMessage::user("synthetisch")], ChatParams::default())
+        .await
+        .expect("served");
+        assert_eq!(served.1, Some(201));
+        assert_eq!(served.0.usage.cached_tokens, Some(60));
+        let unreported = MockChatProvider::single("ok")
+            .chat_with_status(&[ChatMessage::user("synthetisch")], ChatParams::default())
+            .await
+            .expect("mock");
+        assert_eq!(unreported.1, None);
+    }
+
+    #[test]
+    fn cached_tokens_are_read_once_and_keep_unreported_apart_from_zero() {
+        let cached = |details: Value| {
+            parse_usage(&json!({"usage": {"prompt_tokens": 9, "prompt_tokens_details": details}}))
+                .cached_tokens
+        };
+        assert_eq!(cached(json!({"cached_tokens": 4})), Some(4));
+        assert_eq!(cached(json!({"cached_tokens": 0})), Some(0));
+        assert_eq!(cached(json!({})), None);
+        assert_eq!(cached(json!({"cached_tokens": -1})), None);
+        assert_eq!(cached(json!({"cached_tokens": "4"})), None);
+        assert_eq!(cached(Value::Null), None);
+        assert_eq!(parse_usage(&json!({})).cached_tokens, None);
+    }
+
+    #[test]
+    fn the_hint_takes_its_status_classes_from_the_shared_table() {
+        for status in 0..=999u16 {
+            let hinweis = anbieter_hinweis(status, "");
+            assert_eq!(
+                hinweis.contains("Abrechnung beim Anbieter pruefen"),
+                billing_status(status),
+                "{status}"
+            );
+            assert_eq!(
+                hinweis != format!("HTTP {status}"),
+                billing_status(status) || request_error_status(status),
+                "{status}"
+            );
+        }
+        for status in [400, 422] {
+            assert_eq!(
+                anbieter_hinweis(status, ""),
+                format!("HTTP {status}: Anfrage abgelehnt, meist ein ungueltiger Parameter")
+            );
+        }
+        assert!(anbieter_hinweis(404, "").contains("Modellnamen pruefen"));
+        assert!(anbieter_hinweis(413, "").contains("Anfrage zu gross"));
     }
 
     #[tokio::test]

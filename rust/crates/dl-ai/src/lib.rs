@@ -504,8 +504,11 @@ impl FireworksClient {
         };
         attempt.response(&response);
         if !response.status().is_success() {
+            let refusal = bounded_response(response, MAX_API_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
             attempt
-                .finish_before(None, Some("http_error"), deadline)
+                .finish_refused_before(&refusal, upstream::Account::Metered, deadline)
                 .await;
             return None;
         }

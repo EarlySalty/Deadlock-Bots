@@ -7,7 +7,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
 
-use crate::upstream::{safe_code, status_reason};
+use crate::tool_chat::FailureKind;
+use crate::upstream::{refusal_reason, safe_code, Account};
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse};
 
 static LEDGER: OnceCell<(PgPool, &'static str)> = OnceCell::const_new();
@@ -313,19 +314,12 @@ impl Attempt {
                 i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
             completion.success = error_code.is_none();
             completion.error_code = error_code.map(str::to_owned);
-            completion.error_reason = error_code
-                .filter(|code| *code == "http_error")
-                .and(completion.http_status)
-                .and_then(|status| u16::try_from(status).ok())
-                .map(|status| status_reason(status).to_owned());
             if let Some(body) = body {
                 completion.tokens_in = count(body, "prompt_tokens");
                 completion.tokens_out = count(body, "completion_tokens");
                 completion.total = count(body, "total_tokens");
-                completion.cache_read_tokens = body["usage"]["prompt_tokens_details"]
-                    ["cached_tokens"]
-                    .as_i64()
-                    .filter(|value| *value >= 0);
+                completion.cache_read_tokens =
+                    cached_tokens(body).and_then(|value| i64::try_from(value).ok());
                 if completion.request_id.is_none() {
                     completion.request_id = body["id"]
                         .as_str()
@@ -387,6 +381,20 @@ impl Attempt {
         )
         .await;
     }
+
+    pub async fn finish_refused_before(mut self, body: &[u8], account: Account, deadline: Instant) {
+        self.refuse(body, account);
+        self.finish_before(None, Some("http_error"), deadline).await;
+    }
+
+    fn refuse(&mut self, body: &[u8], account: Account) {
+        if let Some(completion) = &mut self.completion {
+            completion.error_reason = completion
+                .http_status
+                .and_then(|status| u16::try_from(status).ok())
+                .map(|status| refusal_reason(status, &error_words(body), account).to_owned());
+        }
+    }
 }
 
 impl Drop for Attempt {
@@ -417,6 +425,19 @@ fn safe_id(value: &str) -> bool {
 }
 fn count(body: &Value, name: &str) -> Option<i64> {
     body["usage"][name].as_i64().filter(|value| *value >= 0)
+}
+pub(crate) fn cached_tokens(body: &Value) -> Option<u64> {
+    body["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64()
+}
+pub(crate) fn error_words(body: &[u8]) -> String {
+    let Ok(body) = serde_json::from_slice::<Value>(body) else {
+        return String::new();
+    };
+    ["type", "message"]
+        .iter()
+        .filter_map(|field| body["error"][*field].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 fn recovery_log(completion: &Completion) {
     if let Ok(recovery) = serde_json::to_string(completion) {
@@ -452,18 +473,10 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
         || completion.error_code.as_deref().is_some_and(|value| {
             !matches!(
                 value,
-                "cancelled"
-                    | "timeout"
-                    | "transport"
-                    | "http_error"
-                    | "invalid_json"
-                    | "response_body"
-                    | "invalid_output"
-                    | "rate_limited"
-                    | "busy"
-                    | "overloaded"
-                    | "invalid_request"
-            )
+                "cancelled" | "http_error" | "invalid_json" | "response_body"
+            ) && !FailureKind::ALL
+                .iter()
+                .any(|kind| kind.ledger_code() == value)
         })
     {
         return Err(sqlx::Error::Protocol(
@@ -554,6 +567,104 @@ mod tests {
         assert!(
             recovery_from_journal(&json!({"MESSAGE":"kein Verbrauchsbeleg"}).to_string()).is_none()
         );
+    }
+
+    #[test]
+    fn a_refused_attempt_stores_the_reason_of_status_body_and_account() {
+        let stored = |http_status: Option<i32>, text: &str, account| {
+            let mut attempt = Attempt {
+                completion: Some(Completion {
+                    project: "Deadlock-Bots".into(),
+                    service: "dl-bot".into(),
+                    id: 7,
+                    tokens_in: None,
+                    tokens_out: None,
+                    total: None,
+                    request_id: None,
+                    success: false,
+                    error_code: Some("cancelled".into()),
+                    http_status,
+                    latency_ms: 0,
+                    error_reason: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                }),
+                started: Instant::now(),
+            };
+            attempt.refuse(text.as_bytes(), account);
+            attempt
+                .completion
+                .take()
+                .and_then(|completion| completion.error_reason)
+        };
+        let credit = r#"{"error":{"message":"Your credit balance is too low."}}"#;
+        let usage = r#"{"error":{"type":"invalid_request_error","message":"usage limit reached"}}"#;
+        let typed = r#"{"error":{"type":"billing_error","message":"x"}}"#;
+        let echoed = r#"{"error":{"type":"invalid_request_error","message":"bad field"},"input":"my billing budget"}"#;
+        for (status, text, account, reason) in [
+            (Some(400), credit, Account::Metered, Some("billing")),
+            (Some(403), credit, Account::Metered, Some("billing")),
+            (Some(400), typed, Account::Metered, Some("billing")),
+            (Some(400), usage, Account::Metered, Some("billing")),
+            (Some(400), usage, Account::Plan, Some("usage_limit")),
+            (Some(412), "", Account::Metered, Some("billing")),
+            (Some(400), "", Account::Metered, Some("http_4xx")),
+            (Some(400), echoed, Account::Metered, Some("http_4xx")),
+            (
+                Some(400),
+                "credit balance too low",
+                Account::Metered,
+                Some("http_4xx"),
+            ),
+            (
+                Some(400),
+                r#"{"error":"credit balance too low"}"#,
+                Account::Plan,
+                Some("http_4xx"),
+            ),
+            (Some(429), credit, Account::Metered, Some("http_429")),
+            (Some(500), "", Account::Metered, Some("http_5xx")),
+            (Some(0), credit, Account::Metered, Some("http_status")),
+            (Some(-1), credit, Account::Metered, None),
+            (Some(70_000), credit, Account::Metered, None),
+            (None, credit, Account::Metered, None),
+        ] {
+            assert_eq!(
+                stored(status, text, account).as_deref(),
+                reason,
+                "{status:?} {text}"
+            );
+        }
+        assert_eq!(
+            cached_tokens(&json!({"usage":{"prompt_tokens_details":{"cached_tokens":0}}})),
+            Some(0)
+        );
+        assert_eq!(error_words(typed.as_bytes()), "billing_error\nx");
+        assert_eq!(
+            error_words(credit.as_bytes()),
+            "Your credit balance is too low."
+        );
+        for body in [&b""[..], b"null", b"[1]", b"\xff", br#"{"error":"flat"}"#] {
+            assert_eq!(error_words(body), "");
+        }
+        assert_eq!(cached_tokens(&json!({"usage":{}})), None);
+        assert_eq!(
+            cached_tokens(&json!({"usage":{"prompt_tokens_details":{"cached_tokens":-3}}})),
+            None
+        );
+    }
+
+    #[test]
+    fn the_migration_checks_reasons_with_the_shared_code_shape() {
+        let migration = include_str!(
+            "../../dl-central-db/migrations/20261117120000_llm_usage_refusal_reason_cache_tokens.sql"
+        );
+        let check = format!(
+            "CHECK (error_reason ~ '{}')",
+            crate::upstream::code_pattern()
+        );
+        assert_eq!(migration.matches(&check).count(), 1, "{check}");
+        assert_eq!(migration.matches("error_reason ~").count(), 1);
     }
 
     #[test]
@@ -975,6 +1086,18 @@ impl ChatProvider for UsageProvider {
     ) -> Result<ChatResponse, ChatProviderError> {
         PURPOSE
             .scope(self.purpose.clone(), self.inner.chat(messages, params))
+            .await
+    }
+    async fn chat_with_status(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
+        PURPOSE
+            .scope(
+                self.purpose.clone(),
+                self.inner.chat_with_status(messages, params),
+            )
             .await
     }
     fn effective_model(&self, params: &ChatParams) -> Option<String> {

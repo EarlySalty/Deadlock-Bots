@@ -11,7 +11,7 @@ use tokio::process::Command;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
-use crate::upstream::status_reason;
+use crate::upstream::{account_refusal, status_reason, Account, USAGE_LIMIT};
 
 const PASSED_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"];
 const ENVELOPE_TOKENS: u32 = 512;
@@ -246,12 +246,16 @@ fn usage(result: &Value) -> Usage {
 }
 
 fn result_failure(status: Option<u16>, text: &str) -> (FailureKind, &'static str) {
-    if status == Some(529) || mentions(text, &["overloaded"]) {
+    if let Some(code @ 529) = status {
+        (FailureKind::Overloaded, status_reason(code))
+    } else if mentions(text, &["overloaded"]) {
         (FailureKind::Overloaded, "upstream_overloaded")
-    } else if mentions(text, &["usage limit", "limit reached"]) {
-        (FailureKind::Limit, "usage_limit")
-    } else if status == Some(429) {
-        (FailureKind::Limit, "http_429")
+    } else if mentions(text, &["limit reached"]) {
+        (FailureKind::Limit, USAGE_LIMIT)
+    } else if let Some(reason) = account_refusal(status, text, Account::Plan) {
+        (FailureKind::Limit, reason)
+    } else if let Some(code @ 429) = status {
+        (FailureKind::Limit, status_reason(code))
     } else if mentions(text, &["rate limit", "rate_limit"]) {
         (FailureKind::Limit, "rate_limit")
     } else if text.contains("output token maximum") {
@@ -387,6 +391,51 @@ mod tests {
         assert_eq!(
             failure(429, "API Error: Overloaded"),
             Some((FailureKind::Overloaded, "upstream_overloaded", Some(429)))
+        );
+        assert_eq!(
+            failure(529, ""),
+            Some((FailureKind::Overloaded, "http_529", Some(529)))
+        );
+        assert_eq!(
+            failure(529, "Your credit balance is too low"),
+            Some((FailureKind::Overloaded, "http_529", Some(529)))
+        );
+        for status in [402, 412] {
+            assert_eq!(
+                failure(status, "boom"),
+                Some((FailureKind::Limit, "billing", Some(status)))
+            );
+        }
+        for status in [400, 403] {
+            assert_eq!(
+                failure(status, "API Error: Your credit balance is too low"),
+                Some((FailureKind::Limit, "billing", Some(status)))
+            );
+            assert_eq!(
+                failure(status, "You have reached your usage limit"),
+                Some((FailureKind::Limit, "usage_limit", Some(status)))
+            );
+        }
+        assert_eq!(
+            failure(500, "Your credit balance is too low"),
+            Some((FailureKind::Unavailable, "http_5xx", Some(500)))
+        );
+        assert_eq!(
+            failure(403, "forbidden"),
+            Some((FailureKind::Unavailable, "http_403", Some(403)))
+        );
+        assert_eq!(
+            failure(429, "5-hour limit reached"),
+            Some((FailureKind::Limit, "usage_limit", Some(429)))
+        );
+        assert_eq!(
+            parse_result(
+                &json!({"type": "result", "is_error": true, "result": "Your credit balance is too low"}),
+                MODEL
+            )
+            .and_then(Result::err)
+            .map(|e| (e.kind, e.reason, e.status)),
+            Some((FailureKind::Unavailable, "result_error", None))
         );
         assert_eq!(
             failure(500, "Claude AI usage limit reached"),

@@ -8,7 +8,7 @@ use reqwest::header::HeaderValue;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::config::ConfigError;
 use super::types::{ContentBlock, StopReason, ToolChatRequest, ToolChatResponse, Usage};
-use crate::upstream::{billing_status, request_error_status, status_reason, BILLING};
+use crate::upstream::{account_refusal, request_error_status, status_reason, Account};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -18,6 +18,7 @@ pub struct AnthropicHttpBackend {
     api_key: Option<HeaderValue>,
     workspace_id: Option<HeaderValue>,
     prompt_cache: bool,
+    account: Account,
 }
 
 impl AnthropicHttpBackend {
@@ -53,6 +54,11 @@ impl AnthropicHttpBackend {
             http,
             messages_url: format!("{}/messages", base_url.trim_end_matches('/')),
             prompt_cache: api_key.is_some(),
+            account: if api_key.is_some() {
+                Account::Metered
+            } else {
+                Account::Plan
+            },
             api_key,
             workspace_id,
         }
@@ -160,13 +166,11 @@ pub fn parse_response(body: &Value) -> Result<ToolChatResponse, BackendError> {
     })
 }
 
-fn status_error(status: reqwest::StatusCode, body: &[u8]) -> BackendError {
+fn status_error(status: reqwest::StatusCode, body: &[u8], account: Account) -> BackendError {
     let code = status.as_u16();
-    let billed = billing_status(code)
-        || (matches!(code, 400 | 403)
-            && upstream_error(body).as_ref().is_some_and(is_billing_error));
-    if billed {
-        return BackendError::upstream(FailureKind::Limit, BILLING, code);
+    let words = crate::usage::error_words(body);
+    if let Some(reason) = account_refusal(Some(code), &words, account) {
+        return BackendError::upstream(FailureKind::Limit, reason, code);
     }
     let kind = match code {
         429 => FailureKind::Limit,
@@ -174,33 +178,6 @@ fn status_error(status: reqwest::StatusCode, body: &[u8]) -> BackendError {
         _ => FailureKind::Unavailable,
     };
     BackendError::upstream(kind, status_reason(code), code)
-}
-
-fn upstream_error(body: &[u8]) -> Option<Value> {
-    serde_json::from_slice::<Value>(body)
-        .ok()?
-        .get("error")
-        .filter(|error| error.is_object())
-        .cloned()
-}
-
-fn is_billing_error(error: &Value) -> bool {
-    if error["type"].as_str() == Some("billing_error") {
-        return true;
-    }
-    let message = error["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    [
-        "credit balance",
-        "billing",
-        "spend limit",
-        "usage limit",
-        "budget",
-    ]
-    .iter()
-    .any(|marker| message.contains(marker))
 }
 
 async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, BackendError> {
@@ -242,7 +219,7 @@ impl ToolBackend for AnthropicHttpBackend {
         let status = response.status();
         if !status.is_success() {
             let body = bounded_body(response).await.unwrap_or_default();
-            return Err(status_error(status, &body));
+            return Err(status_error(status, &body, self.account));
         }
         let code = status.as_u16();
         let answered = |error: BackendError| BackendError {
@@ -294,68 +271,142 @@ mod tests {
         ] {
             let status = reqwest::StatusCode::from_u16(status).expect("status");
             assert!(
-                status_error(status, body).kind.allows_fallback(),
+                status_error(status, body, Account::Metered)
+                    .kind
+                    .allows_fallback(),
                 "{status}"
             );
         }
         let invalid =
             br#"{"error":{"type":"invalid_request_error","message":"max_tokens too large"}}"#;
         assert_eq!(
-            status_error(reqwest::StatusCode::BAD_REQUEST, invalid).kind,
+            status_error(reqwest::StatusCode::BAD_REQUEST, invalid, Account::Metered).kind,
             FailureKind::InvalidRequest
         );
     }
 
-    #[test]
-    fn billing_and_rate_limit_refusals_keep_distinct_reasons_and_upstream_status() {
-        let billing = status_error(
-            reqwest::StatusCode::BAD_REQUEST,
-            br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#,
-        );
-        let limited = status_error(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            br#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
-        );
-        let bare = status_error(reqwest::StatusCode::TOO_MANY_REQUESTS, b"");
-        let auth = status_error(
-            reqwest::StatusCode::UNAUTHORIZED,
-            br#"{"error":{"type":"authentication_error","message":"x"}}"#,
-        );
-        assert_eq!(
-            (billing.kind, billing.reason, billing.status),
-            (FailureKind::Limit, "billing", Some(400))
-        );
-        assert_eq!(
-            (limited.kind, limited.reason, limited.status),
-            (FailureKind::Limit, "http_429", Some(429))
-        );
-        assert_eq!((bare.reason, bare.status), ("http_429", Some(429)));
-        assert_eq!(
-            (auth.kind, auth.reason, auth.status),
-            (FailureKind::Unavailable, "http_401", Some(401))
-        );
+    fn refused(status: u16, body: &[u8], account: Account) -> (FailureKind, &'static str, u16) {
+        let status = reqwest::StatusCode::from_u16(status).expect("status");
+        let failure = status_error(status, body, account);
+        assert_eq!(failure.status, Some(status.as_u16()));
+        (failure.kind, failure.reason, status.as_u16())
     }
 
     #[test]
-    fn error_bodies_that_are_not_objects_fall_back_to_the_status_reason() {
-        for body in [
-            &b"[1,2]"[..],
-            b"\"text\"",
-            b"{\"error\":\"flat\"}",
-            b"null",
-            b"<html>",
-        ] {
-            let failure = status_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, body);
+    fn billing_and_rate_limit_refusals_keep_distinct_reasons_and_upstream_status() {
+        let credit = br#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+        let limited =
+            br#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
+        let auth = br#"{"error":{"type":"authentication_error","message":"x"}}"#;
+        for account in [Account::Metered, Account::Plan] {
+            for status in [400, 403] {
+                assert_eq!(
+                    refused(status, credit, account),
+                    (FailureKind::Limit, "billing", status)
+                );
+            }
+            for status in [402, 412] {
+                assert_eq!(
+                    refused(status, b"", account),
+                    (FailureKind::Limit, "billing", status)
+                );
+            }
             assert_eq!(
-                (failure.kind, failure.reason, failure.status),
-                (FailureKind::Unavailable, "http_5xx", Some(503))
+                refused(429, limited, account),
+                (FailureKind::Limit, "http_429", 429)
+            );
+            assert_eq!(
+                refused(429, b"", account),
+                (FailureKind::Limit, "http_429", 429)
+            );
+            assert_eq!(
+                refused(401, auth, account),
+                (FailureKind::Unavailable, "http_401", 401)
+            );
+            assert_eq!(
+                refused(529, credit, account),
+                (FailureKind::Unavailable, "http_529", 529)
             );
         }
-        let unknown = status_error(
-            reqwest::StatusCode::UNAUTHORIZED,
-            br#"{"error":{"type":"new_kind","message":"x"}}"#,
+    }
+
+    #[test]
+    fn the_usage_limit_is_billing_on_a_key_and_plan_quota_without_one() {
+        let usage = br#"{"error":{"type":"invalid_request_error","message":"You have reached your specified API usage limits."}}"#;
+        for status in [400, 403] {
+            assert_eq!(
+                refused(status, usage, Account::Metered),
+                (FailureKind::Limit, "billing", status)
+            );
+        }
+        assert_eq!(
+            refused(429, usage, Account::Metered),
+            (FailureKind::Limit, "http_429", 429)
         );
-        assert_eq!((unknown.reason, unknown.status), ("http_401", Some(401)));
+        assert_eq!(
+            refused(500, usage, Account::Metered),
+            (FailureKind::Unavailable, "http_5xx", 500)
+        );
+        for status in [400, 403, 404, 429, 500] {
+            assert_eq!(
+                refused(status, usage, Account::Plan),
+                (FailureKind::Limit, "usage_limit", status)
+            );
+        }
+        let keyed = AnthropicHttpBackend::with_api_key(
+            "https://api.example/v1",
+            Duration::ZERO,
+            "sk-test",
+            None,
+        )
+        .expect("backend");
+        assert_eq!(keyed.account, Account::Metered);
+        let plan = AnthropicHttpBackend::new("http://127.0.0.1:1/v1", Duration::ZERO);
+        assert_eq!(plan.account, Account::Plan);
+    }
+
+    #[test]
+    fn error_bodies_without_a_billing_error_object_fall_back_to_the_status_reason() {
+        for account in [Account::Metered, Account::Plan] {
+            for body in [
+                &b""[..],
+                b"[1,2]",
+                b"\"text\"",
+                b"{\"error\":\"flat\"}",
+                b"null",
+                b"<html>",
+                b"\xff\xfe",
+                br#"{"error":{"type":"new_kind","message":"x"}}"#,
+                b"{\"error\":\"credit balance too low\"}",
+                b"credit balance too low, usage limit reached",
+                br#"{"error":{"type":"new_kind","message":"x"},"input":"billing budget usage limit"}"#,
+            ] {
+                assert_eq!(
+                    refused(400, body, account),
+                    (FailureKind::InvalidRequest, "http_4xx", 400)
+                );
+                assert_eq!(
+                    refused(403, body, account),
+                    (FailureKind::Unavailable, "http_403", 403)
+                );
+                assert_eq!(
+                    refused(401, body, account),
+                    (FailureKind::Unavailable, "http_401", 401)
+                );
+                assert_eq!(
+                    refused(503, body, account),
+                    (FailureKind::Unavailable, "http_5xx", 503)
+                );
+            }
+            assert_eq!(
+                refused(
+                    400,
+                    br#"{"error":{"type":"billing_error","message":"x"}}"#,
+                    account
+                ),
+                (FailureKind::Limit, "billing", 400)
+            );
+        }
     }
 
     #[test]
