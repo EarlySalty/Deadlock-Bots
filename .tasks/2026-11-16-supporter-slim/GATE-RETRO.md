@@ -59,7 +59,7 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 | B21 LOCK TABLE without lock_timeout | #337 | 426e53a5 |
 | B22 trigger test never drove import_manual without the trigger | #338 #339 | 426e53a5 |
 | B12 optional_file permission test fails as root | #272 #306 #360 #393 | 5404b9eb |
-| B26 port check by literal, port keys without catalog bounds | #367 #373 | 5404b9eb |
+| B26 port check by literal, port keys without catalog bounds | #367 #373 | 5404b9eb (validate through `PORT_RANGE`); its catalog port bounds were removed again in 08470994, see the 06b51ebb corrections |
 | B23 index comparison blind to opclass and collation | #348 | 604c69ca |
 | B24 third copy of the opt-out insert | #349 | 604c69ca |
 | B25 CHECK on paid_at untested without the trigger | #350 | 604c69ca |
@@ -67,15 +67,15 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - FALSE #271 #276 #283 #288-291 #296 #305 #310 #314-319 #361 #394 (0-byte banner attached): `read_banner_file` in `serversync.rs` returns an error for an empty file, its test asserts "ist leer", and the welcome banner and divider readers go through it.
 - FALSE #346 #347: `steam.rs` is restored to origin/main.
 - FALSE #368: the runtime_config test asserts through `TWITCH_TOKEN_NAME`.
-- FALSE #358 #365 #370 #371 #375 (`presence_status` text row, Brain image rows): `git diff origin/main...HEAD` has no hunk with these rows; they are origin/main lines outside this feature.
+- FALSE #358 #365 #370 #371 #375 (`presence_status` text row, Brain image rows): `git diff origin/main...HEAD` had no hunk with these rows when this line was written. Stale since 08470994, which changes TSV lines 23, 159 and 162; see the 06b51ebb section.
 
 ### Corrections to earlier commit messages
 
 - 765f5fb0 added a second `TOKEN_HEADER` constant; 5d037d4a removed it again.
 - b6cd2b4b claimed one upload mapping without extra copies; it cloned each file into the tuple list and again per attempt. bae09016 keeps one copy per attempt, which `reqwest::multipart::Part` needs without a direct `bytes` dependency.
-- 756dad7f claimed panel banners are read once; the bytes stayed in the banner output next to the attachment. Fixed in bae09016.
+- 756dad7f claimed panel banners are read once; the bytes stayed in the banner output next to the attachment. Fixed in bae09016 for the FAQ, Regelwerk, Support, Rang guide and welcome banners, not for Voice UX (see the bae09016 correction in the 06b51ebb section).
 - e05d5e31 claimed to compare each billing lookup index with its reference; `pg_get_indexdef` with a column number leaves out opclass and collation. Fixed in 604c69ca. Its optional_file permission test assumed a non-root user; fixed in 5404b9eb.
-- 22a0cc1f claimed that each catalog bound comes from the loader range; the two port keys had none. Fixed in 5404b9eb.
+- 22a0cc1f claimed that each catalog bound comes from the loader range; the two port keys had none. 5404b9eb gave them catalog bounds from `PORT_RANGE`; 08470994 removed those again because both port rows are protected (see the 06b51ebb section).
 - 2f6ed231 introduced the placeholder name cap that hid long names; removed in 76e263bf.
 - e85a3ec5 claimed every serversync Discord URL went through `discord_api_url`; the rank guide legacy scan and delete still formatted `discord_api_base`. Fixed in d7bc8422.
 - e85a3ec5 and 8adca784 stated that `discord_call_timeout()` bounds a retry call with its retries; it covered one request plus the wait budget, not five requests. Fixed in 2d237684.
@@ -117,3 +117,41 @@ The reviewer named three BLOCKING findings and two NITs in `serversync.rs` befor
 ### Resolved
 
 - Hook findings 1-3 of round 5 (Ursache blocks of 127d1968, 33a0614e and da38bb50 without a twins layer): resolved by the message reword, all three now carry "Twins fixed here".
+
+### Gate runs on 06b51ebb (no verdict, usage limit)
+
+Two runs lost their verdict to the reviewer usage limit after the reviewers had named their findings. The settings catalog answer of the second run names its fifth finding ("several commit messages make claims about HEAD that are false") without the commits; that reviewer detail is lost. The corrections below are the false claims checked against HEAD, not the reviewer's own list.
+
+- REAL 1 the static panel and welcome id loaders parsed the index suffix with `usize::from_str` (the reviewer called the welcome loader at `serversync.rs:1748` the Voice UX loader): e7bef533.
+- REAL 2 TSV lines 23, 159 and 162 stated bounds as literal numbers: 08470994.
+- REAL 3 the twitch_invites ranges twice and a one-way probe: 08470994.
+- REAL 4 the placeholder test could not see a stale literal: 08470994.
+- REAL 5 bounds on protected rows: 08470994.
+- REAL 6 `TABLE_LOCK_TIMEOUT_MS` without a derivation, README read as a bound for the whole sync: a4d8882a.
+- REAL 7 only `LOCK TABLE` mapped 55P03 to `LockTimeout`: a4d8882a.
+- REAL 8 the zero-call assert of `rate_limiter_waits_are_bounded` could not fail: a4d8882a.
+- REAL 9 the ratelimiter claims of 65fcb08a and 5e24d534: corrected below.
+- REAL 10 nothing bounded one role sync tick: a4d8882a.
+- REAL 11 false commit claims without a correction here: corrected below.
+- NIT the `block_member` test wrapper: removed in a4d8882a.
+
+Corrections to earlier commit messages:
+
+- 65fcb08a said the roles.rs tests build Http with `ratelimiter_disabled(true)` and make no ratelimiter claim. At that commit `rate_limiter_waits_are_bounded` in roles.rs already installed `serenity::http::Ratelimiter` (`git show 65fcb08a:rust/bin/dl-bot/src/supporter/roles.rs`, line 382), and it claims that ratelimiter waits are bounded.
+- 5e24d534 said every Discord test in dl-bot built Http with `ratelimiter_disabled(true)`. The same roles.rs test turned the ratelimiter on at that commit (line 382).
+- e7bef533 recorded a twin search that only matched a parse within three lines after `strip_prefix(` or `split_once(`. The class search is every integer or text parse in the touched Rust files: `git diff --name-only origin/main...HEAD | grep '\.rs$' | xargs grep -nE '\.parse(::<[^>]*>)?\(\)|from_str(_radix)?\('`, 63 hits at a4d8882a:
+  - Readers of strings the bot writes and stores: `serversync.rs:1019` (`static_v2_message_index`, the owner) and `support_publish.rs:202` (`SupportFunding::from_kv`), both strict since e7bef533.
+  - Whole documents through serde, toml, `PgConnectOptions` or `IpAddr`: `serversync.rs:2995 7006 7060`, `support_publish.rs:146`, `privacy.rs:3488`, `bot_config.rs:280 344`, `runtime_config.rs:708`, `testing.rs:190 262`.
+  - Discord rate limit headers: `serversync.rs:5808 5816 5849`.
+  - Channel and role ids from the server-as-code config and the live onboarding: `serversync.rs:6102 6130 6184 6523 6542 6640 6687 6702`.
+  - Environment and config values written by people: `main.rs:110 138 161 167 255 1084 1857`, `bot_config.rs:219 233 245 249`, `runtime_config.rs:466`.
+  - Settings catalog: `settings_catalog.rs:408` (TSV type column), `492` and `768` (paths from the TSV and the admin request), `540` (admin form value, already strict by its round trip), `548 553 596 601` (the catalog's own in-memory bound strings, no stored copy).
+  - Privacy erasure matching of user ids in other bots' data, lenient on purpose so an erasure finds every spelling: `privacy.rs:1711 1725 1732 1884 1911`.
+  - Test code: `serversync.rs:9067 9137 9141 11155`, `settings_catalog.rs:805 813 834 869 885 886 1170 1176 1183 1202 1205`.
+  Backlog outside the touched files: `rust/bin/dl-bot/src/mcp/public.rs:897` and `:912`.
+- 8dea0d4c checked its class (a reader that accepts more spellings than the bot writes) only in `supporter/links.rs` and `supporter.rs`. `load_static_v2_message_ids` and the welcome id loader in `serversync.rs` and `SupportFunding::from_kv` had the same shape; fixed in e7bef533.
+- bae09016 said the Voice UX banner outputs are metadata only and the bytes stay in the payload attachment only. `VoiceUxPublishOutput.banners` (`voice_ux_publish.rs:82`) keeps the `LoadedBanner` bytes behind `serde(skip)`, and `voice_ux_publish.rs:812` clones them into each attachment. The B10 twin check above states this HEAD state.
+- 507582ff said `RuntimeConfig::validate` enforces `matcher_max_ai_per_scan` and `matcher_scan_interval_hours` and that bot_config, operating_config and runtime_config share the new ranges. 3ccdf17d reverted that to origin/main. At HEAD both matcher rows have no loader check and keep catalog-only bounds (`CATALOG_ONLY_BOUNDS` in `settings_catalog.rs`), `operating_config.rs` is origin/main, and the bot_config ranges are named again since 08470994.
+- 22a0cc1f said its named ranges, `MATCHER_SCAN_INTERVAL_HOURS_RANGE` starting at 0, the u64 matcher reader, `DISCORD_STRING_OPTION_MAX_LENGTH` for the /brain question length and the admin_settings probe test are in place. 3ccdf17d reverted all of them: `MATCHER_SCAN_INTERVAL_HOURS_RANGE`, `RUNTIME_POSITIVE_SPAN_RANGE` and `DISCORD_STRING_OPTION_MAX_LENGTH` do not exist at HEAD, `admin_settings.rs`, `modglue.rs` and `dl-bridges` `matcher.rs` are origin/main, and `BRAIN_MAX_QUESTION_LEN_RANGE` ends at 65 536. The catalog probe test lives in `settings_catalog.rs` since 02a96cd0.
+- 02a96cd0 said the rows that `BotConfig::validate` checks keep literal catalog bounds, `bot_config.rs` is not touched and keeps its literal id rule, `presence_status` is outside the class, the Brain image rows have no loader rule, and its placeholder test rejects bound literals in texts. Since 08470994 the bot_config rows use named consts in `bot_config.rs` for validate and the catalog, the id rule uses `DISCORD_ID_RANGE`, `PRESENCE_STATUS_MAX_CHARS` bounds `presence_status` in the loader and the catalog, and `BRAIN_IMAGE_MAX_COUNT_RANGE` and `BRAIN_IMAGE_JPEG_QUALITY_RANGE` are loader rules. The 02a96cd0 placeholder test let TSV lines 23, 159 and 162 keep their literal bounds.
+- 5404b9eb and the B26 row: 08470994 removed the catalog bounds of `runtime.start.mcp_port` and `runtime.bridges.twitch_port`, because both rows are protected and the admin form cannot write them. At HEAD only `RuntimeConfig::validate` checks the two ports against `PORT_RANGE` (`runtime_config.rs:513`).
