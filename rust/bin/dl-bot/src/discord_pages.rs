@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seitenlimit_beendet_den_ganzen_serenity_aufruf_mit_aktivem_ratelimiter(
+    async fn seitenlimit_beendet_eine_wartende_ratelimiter_seite_vor_dem_ersten_request(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -211,7 +211,31 @@ mod tests {
         let http = serenity::http::HttpBuilder::new("test-only")
             .client(client)
             .build();
-        assert!(http.ratelimiter.is_some());
+        let ratelimiter = http.ratelimiter.as_ref().ok_or("ratelimiter is off")?;
+        let route = serenity::http::Route::GuildMembers {
+            guild_id: GuildId::new(1),
+        };
+        let bucket = std::sync::Arc::clone(
+            ratelimiter
+                .routes()
+                .write()
+                .await
+                .entry(route.ratelimiting_bucket())
+                .or_default(),
+        );
+        let exhausted = reqwest::Response::from(
+            axum::http::Response::builder()
+                .header("x-ratelimit-limit", "1")
+                .header("x-ratelimit-remaining", "0")
+                .header("x-ratelimit-reset-after", "60")
+                .body(String::new())?,
+        );
+        let request = serenity::http::Request::new(route, serenity::http::LightMethod::Get);
+        bucket
+            .lock()
+            .await
+            .post_hook(&exhausted, &request, &|_| {}, false)
+            .await?;
         let page_timeout = std::time::Duration::from_millis(300);
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(
@@ -227,7 +251,7 @@ mod tests {
             ))
         );
         assert!(started.elapsed() >= page_timeout);
-        assert!(connections.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
         Ok(())
     }
 }
