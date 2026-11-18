@@ -1,5 +1,7 @@
-use dl_ai::upstream::{GATEWAY_UNIT, HEALTH_PATH, HELPER_BINARY};
+use dl_ai::tool_chat::GatewayConfig;
+use dl_ai::upstream::{GATEWAY_BINARY, GATEWAY_UNIT, HEALTH_PATH, HELPER_BINARY, SYSTEMCTL};
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs::{self, File, OpenOptions},
     net::SocketAddr,
@@ -11,15 +13,62 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+macro_rules! owner_home {
+    () => {
+        "/home/nathanael"
+    };
+}
+
 const ROOT: &str = "/opt/deadlock/bots";
-const GATEWAY_CONFIG: &str = "/home/nathanael/.config/deadlock-bots/dl-ai-gateway.toml";
-const UNIT_DIRECTORY: &str = "/home/nathanael/.config/systemd/user";
+const RELEASES: &str = "releases";
+const CURRENT: &str = "current";
+const OWNER: &str = "nathanael";
+const WORKTREES: &str = concat!(owner_home!(), "/.worktrees");
+const CONFIG_DIRECTORY: &str = concat!(owner_home!(), "/.config/deadlock-bots");
+const UNIT_DIRECTORY: &str = concat!(owner_home!(), "/.config/systemd/user");
+const SOURCE_CONFIG_DIRECTORY: &str = "config";
+const SOURCE_UNIT_DIRECTORY: &str = "service/systemd";
 const UNITS: [&str; 2] = [GATEWAY_UNIT, "dl-community-points-sync.service"];
 const OWNER_UID: u32 = 1000;
-const REBUILT: [&str; 3] = ["dl-bot", "dl-ai-gateway", HELPER_BINARY];
-const SERVE_ATTEMPTS: u32 = 60;
+const BOT_BINARY: &str = "dl-bot";
+const LAUNCHER: &str = "dl-infisical-env";
+const REBUILT: [&str; 3] = [BOT_BINARY, GATEWAY_BINARY, HELPER_BINARY];
+const COMPANIONS: [&str; 2] = ["dl-web", LAUNCHER];
+const PROVENANCE_STEM: &str = "BUILD-PROVENANCE";
+const MANIFEST_SUFFIX: &str = ".toml";
+const SERVE_MARGIN_SECS: u64 = 30;
 const SERVE_PAUSE_MILLIS: u64 = 1_000;
-const SERVE_PROBE_SECS: &str = "2";
+const SERVE_PROBE_SECS: u64 = 2;
+const INVALID_TARGET: &str = "Ungültiger Zielpfad";
+const CANDIDATE_MISMATCH: &str = "Der vorhandene Release passt nicht zum geprüften Artefakt";
+
+fn gateway_config_name() -> String {
+    format!("{GATEWAY_BINARY}{MANIFEST_SUFFIX}")
+}
+
+fn gateway_config() -> PathBuf {
+    Path::new(CONFIG_DIRECTORY).join(gateway_config_name())
+}
+
+fn provenance_file() -> String {
+    format!("{PROVENANCE_STEM}{MANIFEST_SUFFIX}")
+}
+
+fn base_provenance_name(previous_sha: &str) -> String {
+    format!("BASE-{PROVENANCE_STEM}-{previous_sha}{MANIFEST_SUFFIX}")
+}
+
+fn checksum_key(binary: &str) -> String {
+    format!("{}_sha256", binary.replace('-', "_"))
+}
+
+fn carried_over() -> Vec<String> {
+    COMPANIONS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .chain([provenance_file()])
+        .collect()
+}
 
 fn run(program: &str, arguments: &[&str]) -> Result<String> {
     let output = Command::new(program)
@@ -64,7 +113,7 @@ fn owned(path: &Path, directory: bool, uid: u32) -> Result<()> {
 fn source_matches(source: &Path, sha: &str) -> Result<()> {
     let source = text(source)?;
     let git = |arguments: &[&str]| {
-        let mut command = vec!["-u", "nathanael", "--", "/usr/bin/git", "-C", source];
+        let mut command = vec!["-u", OWNER, "--", "/usr/bin/git", "-C", source];
         command.extend_from_slice(arguments);
         run("/usr/sbin/runuser", &command)
     };
@@ -92,13 +141,15 @@ fn hash(path: &Path) -> Result<String> {
 }
 
 fn as_owner(command: &[&str]) -> Result<String> {
+    let runtime = format!("XDG_RUNTIME_DIR=/run/user/{OWNER_UID}");
+    let bus = format!("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{OWNER_UID}/bus");
     let mut arguments = vec![
         "-u",
-        "nathanael",
+        OWNER,
         "--",
         "/usr/bin/env",
-        "XDG_RUNTIME_DIR=/run/user/1000",
-        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+        runtime.as_str(),
+        bus.as_str(),
     ];
     arguments.extend_from_slice(command);
     run("/usr/sbin/runuser", &arguments)
@@ -106,8 +157,8 @@ fn as_owner(command: &[&str]) -> Result<String> {
 
 fn restart() -> Result<()> {
     every(vec![
-        as_owner(&["/usr/local/bin/bot-restart", "dl-bot"]).map(drop),
-        as_owner(&["/usr/bin/systemctl", "--user", "restart", GATEWAY_UNIT]).map(drop),
+        as_owner(&["/usr/local/bin/bot-restart", BOT_BINARY]).map(drop),
+        as_owner(&[SYSTEMCTL, "--user", "restart", GATEWAY_UNIT]).map(drop),
     ])
 }
 
@@ -131,44 +182,69 @@ fn with_rollback(error: Box<dyn Error>, rollback: Result<()>) -> Box<dyn Error> 
     }
 }
 
-#[derive(serde::Deserialize)]
-struct Listen {
-    listen: SocketAddr,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Proof {
+    address: SocketAddr,
+    window: Duration,
 }
 
-fn listen_address(config: &str) -> Result<SocketAddr> {
-    Ok(toml::from_str::<Listen>(config)?.listen)
+fn proof(config: &Path) -> Result<Proof> {
+    let config = GatewayConfig::load(config)?;
+    Ok(Proof {
+        address: config.listen,
+        window: config.alarm.start_budget() + Duration::from_secs(SERVE_MARGIN_SECS),
+    })
 }
 
-fn serves(address: SocketAddr, attempts: u32, pause: Duration) -> Result<()> {
-    let url = format!("http://{address}{HEALTH_PATH}");
-    let mut last = String::new();
-    for attempt in 0..attempts {
-        if attempt > 0 {
-            std::thread::sleep(pause);
-        }
-        let probe = [
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--max-time",
-            SERVE_PROBE_SECS,
-            url.as_str(),
-        ];
-        match run("/usr/bin/curl", &probe) {
-            Ok(_) => return Ok(()),
-            Err(error) => last = error.to_string(),
+fn previous_proof(config: &Path, failed: &Proof) -> Result<Proof> {
+    proof(config).or_else(|_| {
+        Ok(Proof {
+            address: GatewayConfig::listen_address(config)?,
+            window: failed.window,
+        })
+    })
+}
+
+fn answers(url: &str) -> Result<()> {
+    let limit = SERVE_PROBE_SECS.to_string();
+    let probe = [
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--max-time",
+        limit.as_str(),
+        url,
+    ];
+    run("/usr/bin/curl", &probe).map(drop)
+}
+
+fn serves(proof: &Proof, pause: Duration) -> Result<()> {
+    let url = format!("http://{}{HEALTH_PATH}", proof.address);
+    let deadline = Instant::now() + proof.window;
+    loop {
+        match answers(&url) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "Das KI-Gateway antwortet {} s nach dem Neustart nicht auf {url}: {error}",
+                    proof.window.as_secs()
+                )
+                .into())
+            }
+            Err(_) => std::thread::sleep(pause),
         }
     }
-    Err(format!("Das KI-Gateway antwortet nach dem Neustart nicht auf {url}: {last}").into())
 }
 
-fn restart_and_prove() -> Result<()> {
+fn restart_and_prove(proof: &Proof) -> Result<()> {
     restart()?;
-    let address = listen_address(&fs::read_to_string(GATEWAY_CONFIG)?)?;
+    serves(proof, Duration::from_millis(SERVE_PAUSE_MILLIS))
+}
+
+fn restart_and_prove_previous(config: &Path, failed: &Proof) -> Result<()> {
+    restart()?;
     serves(
-        address,
-        SERVE_ATTEMPTS,
+        &previous_proof(config, failed)?,
         Duration::from_millis(SERVE_PAUSE_MILLIS),
     )
 }
@@ -177,8 +253,8 @@ fn backup_of(target: &Path) -> Result<PathBuf> {
     let name = target
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or("Ungültiger Zielpfad")?;
-    let directory = target.parent().ok_or("Ungültiger Zielpfad")?;
+        .ok_or(INVALID_TARGET)?;
+    let directory = target.parent().ok_or(INVALID_TARGET)?;
     Ok(directory.join(format!(".{name}.previous")))
 }
 
@@ -186,7 +262,7 @@ fn stage_owner_file(origin: &Path, target: &Path, mode: &str) -> Result<PathBuf>
     if !fs::symlink_metadata(origin)?.is_file() {
         return Err(format!("Im Quellstand fehlt {}", origin.display()).into());
     }
-    let directory = target.parent().ok_or("Ungültiger Zielpfad")?;
+    let directory = target.parent().ok_or(INVALID_TARGET)?;
     owned(directory, true, OWNER_UID)?;
     if fs::symlink_metadata(target).is_ok() {
         owned(target, false, OWNER_UID)?;
@@ -196,9 +272,9 @@ fn stage_owner_file(origin: &Path, target: &Path, mode: &str) -> Result<PathBuf>
         "/usr/bin/install",
         &[
             "-o",
-            "nathanael",
+            OWNER,
             "-g",
-            "nathanael",
+            OWNER,
             "-m",
             mode,
             text(origin)?,
@@ -239,7 +315,7 @@ fn discard_backup(target: &Path) -> Result<()> {
 }
 
 fn reload_units() -> Result<()> {
-    as_owner(&["/usr/bin/systemctl", "--user", "daemon-reload"]).map(drop)
+    as_owner(&[SYSTEMCTL, "--user", "daemon-reload"]).map(drop)
 }
 
 fn restore_units(installed: &[(PathBuf, bool)]) -> Result<()> {
@@ -255,7 +331,7 @@ fn replace_units(source: &Path, directory: &Path) -> Result<Vec<(PathBuf, bool)>
     let mut installed = Vec::new();
     for name in UNITS {
         let target = directory.join(name);
-        let origin = source.join("service/systemd").join(name);
+        let origin = source.join(SOURCE_UNIT_DIRECTORY).join(name);
         let replaced = stage_owner_file(&origin, &target, "0644")
             .and_then(|staged| replace_owner_file(&staged, &target));
         match replaced {
@@ -276,7 +352,10 @@ fn install_units(source: &Path) -> Result<Vec<(PathBuf, bool)>> {
 }
 
 fn install_gateway_config(source: &Path, gateway: &Path, target: &Path) -> Result<bool> {
-    let staged = stage_owner_file(&source.join("config/dl-ai-gateway.toml"), target, "0600")?;
+    let origin = source
+        .join(SOURCE_CONFIG_DIRECTORY)
+        .join(gateway_config_name());
+    let staged = stage_owner_file(&origin, target, "0600")?;
     if let Err(error) = as_owner(&[text(gateway)?, "--check-config", "--config", text(&staged)?]) {
         let cleanup = fs::remove_file(&staged).map_err(Into::into);
         return Err(with_rollback(error, cleanup));
@@ -292,7 +371,7 @@ struct HostFiles {
 impl HostFiles {
     fn install(source: &Path, gateway: &Path) -> Result<Self> {
         let units = install_units(source)?;
-        match install_gateway_config(source, gateway, Path::new(GATEWAY_CONFIG)) {
+        match install_gateway_config(source, gateway, &gateway_config()) {
             Ok(config_existed) => Ok(Self {
                 units,
                 config_existed,
@@ -306,14 +385,14 @@ impl HostFiles {
 
     fn restore(&self) -> Result<()> {
         every(vec![
-            restore_owner_file(self.config_existed, Path::new(GATEWAY_CONFIG)),
+            restore_owner_file(self.config_existed, &gateway_config()),
             restore_units(&self.units),
             reload_units(),
         ])
     }
 
     fn keep(&self) -> Result<()> {
-        discard_backup(Path::new(GATEWAY_CONFIG))?;
+        discard_backup(&gateway_config())?;
         self.units
             .iter()
             .try_for_each(|(target, _)| discard_backup(target))
@@ -325,9 +404,13 @@ fn provenance(sha: &str, checksums: [&str; 3], previous_sha: &str, base_name: &s
     let units = UNITS
         .map(|unit| unit.trim_end_matches(".service"))
         .join(" und ");
+    let sums: String = REBUILT
+        .iter()
+        .zip(checksums)
+        .map(|(name, checksum)| format!("{} = \"{checksum}\"\n", checksum_key(name)))
+        .collect();
     format!(
-        "source_sha = \"{sha}\"\nrebuilt_binaries = [{rebuilt}]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\ndl_unit_failure_notify_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot, KI-Gateway und dessen Ausfallmelder aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration und die Units {units} aus dem Repository; dieser Release wendet keine Migrationen an, Schemaänderungen laufen getrennt über dl-central-migrate\"\n",
-        checksums[0], checksums[1], checksums[2]
+        "source_sha = \"{sha}\"\nrebuilt_binaries = [{rebuilt}]\n{sums}retained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot, KI-Gateway und dessen Ausfallmelder aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration und die Units {units} aus dem Repository; dieser Release wendet keine Migrationen an, Schemaänderungen laufen getrennt über dl-central-migrate\"\n"
     )
 }
 
@@ -353,7 +436,7 @@ impl Drop for TemporaryDirectory {
 }
 
 fn activate(current: &Path, target: &Path, switch: &Path) -> Result<()> {
-    let temporary = switch.join("current");
+    let temporary = switch.join(CURRENT);
     symlink(target, &temporary)?;
     fs::rename(&temporary, current)?;
     Ok(())
@@ -363,11 +446,28 @@ fn activate(current: &Path, target: &Path, switch: &Path) -> Result<()> {
 struct Provenance {
     source_sha: String,
     rebuilt_binaries: Vec<String>,
-    dl_bot_sha256: String,
-    dl_ai_gateway_sha256: String,
-    dl_unit_failure_notify_sha256: String,
     retained_from_release: String,
     retained_provenance: String,
+    #[serde(flatten)]
+    further: BTreeMap<String, toml::Value>,
+}
+
+impl Provenance {
+    fn records(&self, expected: &[(&str, &str); 3]) -> bool {
+        expected.iter().all(|(name, checksum)| {
+            self.further
+                .get(&checksum_key(name))
+                .and_then(toml::Value::as_str)
+                == Some(*checksum)
+        })
+    }
+}
+
+fn unchanged(current: &Path, previous: &Path, previous_link: &Path) -> Result<()> {
+    if current.canonicalize()? != previous || fs::read_link(current)? != previous_link {
+        return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
+    }
+    Ok(())
 }
 
 fn reusable_candidate(
@@ -378,30 +478,25 @@ fn reusable_candidate(
     uid: u32,
 ) -> Result<()> {
     owned(candidate, true, uid)?;
-    let retained = ["dl-web", "dl-infisical-env", "BUILD-PROVENANCE.toml"];
-    for name in REBUILT.into_iter().chain(retained) {
+    for name in REBUILT {
         owned(&candidate.join(name), false, uid)?;
     }
-    let manifest: Provenance = toml::from_str(&fs::read_to_string(
-        candidate.join("BUILD-PROVENANCE.toml"),
-    )?)?;
+    for name in carried_over() {
+        owned(&candidate.join(name), false, uid)?;
+    }
+    let manifest: Provenance =
+        toml::from_str(&fs::read_to_string(candidate.join(provenance_file()))?)?;
     if manifest.source_sha != sha
-        || manifest.dl_bot_sha256 != expected[0].1
-        || manifest.dl_ai_gateway_sha256 != expected[1].1
-        || manifest.dl_unit_failure_notify_sha256 != expected[2].1
+        || !manifest.records(expected)
         || manifest.rebuilt_binaries != REBUILT
         || !valid_hex(&manifest.retained_from_release, 40)
-        || manifest.retained_provenance
-            != format!(
-                "BASE-BUILD-PROVENANCE-{}.toml",
-                manifest.retained_from_release
-            )
+        || manifest.retained_provenance != base_provenance_name(&manifest.retained_from_release)
     {
-        return Err("Der vorhandene Release passt nicht zum geprüften Artefakt".into());
+        return Err(CANDIDATE_MISMATCH.into());
     }
     for (name, checksum) in expected {
         if hash(&candidate.join(name))? != *checksum {
-            return Err("Der vorhandene Release passt nicht zum geprüften Artefakt".into());
+            return Err(CANDIDATE_MISMATCH.into());
         }
     }
     owned(&candidate.join(&manifest.retained_provenance), false, uid)?;
@@ -413,7 +508,7 @@ fn reusable_candidate(
             "Der vorhandene Release wurde für einen anderen Ausgangsstand vorbereitet".into(),
         );
     }
-    for name in ["dl-web", "dl-infisical-env"] {
+    for name in COMPANIONS {
         owned(&previous.join(name), false, uid)?;
         if hash(&candidate.join(name))? != hash(&previous.join(name))? {
             return Err(
@@ -455,7 +550,7 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
         return Err("Ungültiger Commit oder Dateihash".into());
     }
     let source = source.canonicalize()?;
-    if !source.starts_with("/home/nathanael/.worktrees") {
+    if !source.starts_with(WORKTREES) {
         return Err("Die Quelle muss ein eigener Worktree sein".into());
     }
     for (artifact, _) in artifacts {
@@ -463,15 +558,13 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
             return Err("Das Artefakt muss eine reguläre Datei sein".into());
         }
     }
-    let expected = [
-        (REBUILT[0], artifacts[0].1),
-        (REBUILT[1], artifacts[1].1),
-        (REBUILT[2], artifacts[2].1),
-    ];
-    for path in ["/opt", "/opt/deadlock", ROOT, "/opt/deadlock/bots/releases"] {
-        owned(Path::new(path), true, 0)?;
-    }
+    let expected = [0, 1, 2].map(|index| (REBUILT[index], artifacts[index].1));
     let root = Path::new(ROOT);
+    let releases = root.join(RELEASES);
+    for path in root.ancestors().filter(|path| path.parent().is_some()) {
+        owned(path, true, 0)?;
+    }
+    owned(&releases, true, 0)?;
     let lock_path = root.join(".deploy.lock");
     owned(&lock_path, false, 0)?;
     let lock: File = OpenOptions::new().read(true).write(true).open(&lock_path)?;
@@ -488,14 +581,14 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
         }
     }
     source_matches(&source, sha)?;
-    let current = root.join("current");
+    let current = root.join(CURRENT);
     let metadata = fs::symlink_metadata(&current)?;
     if !metadata.file_type().is_symlink() || metadata.uid() != 0 {
         return Err("Unsicherer aktueller Releasezeiger".into());
     }
     let previous_link = fs::read_link(&current)?;
     let previous = current.canonicalize()?;
-    if previous.parent() != Some(root.join("releases").as_path())
+    if previous.parent() != Some(releases.as_path())
         || !previous
             .file_name()
             .and_then(|name| name.to_str())
@@ -504,43 +597,35 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
         return Err("Der aktuelle Release liegt nicht im geschützten Releaseordner".into());
     }
     owned(&previous, true, 0)?;
-    for name in [
-        "dl-bot",
-        "dl-web",
-        "dl-infisical-env",
-        "BUILD-PROVENANCE.toml",
-    ] {
+    owned(&previous.join(BOT_BINARY), false, 0)?;
+    for name in carried_over() {
         owned(&previous.join(name), false, 0)?;
     }
-    let candidate = root.join("releases").join(sha);
+    let candidate = releases.join(sha);
     let switch = TemporaryDirectory::new(&format!("{ROOT}/.switch-discord-XXXXXXXX"))?;
     if candidate.try_exists()? || fs::symlink_metadata(&candidate).is_ok() {
         reusable_candidate(&candidate, &previous, sha, &expected, 0)?;
     } else {
         let stage =
-            TemporaryDirectory::new(&format!("{ROOT}/releases/.stage-discord-{sha}-XXXXXXXX"))?;
+            TemporaryDirectory::new(&format!("{ROOT}/{RELEASES}/.stage-discord-{sha}-XXXXXXXX"))?;
         run(
             "/usr/bin/cp",
             &["-a", text(&previous.join("."))?, text(&stage.0)?],
         )?;
-        for name in [
-            "dl-bot",
-            "dl-web",
-            "dl-infisical-env",
-            "BUILD-PROVENANCE.toml",
-        ] {
+        owned(&stage.0.join(BOT_BINARY), false, 0)?;
+        for name in carried_over() {
             owned(&stage.0.join(name), false, 0)?;
         }
         let previous_sha = previous
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("Ungültiger Ausgangsrelease")?;
-        let base_name = format!("BASE-BUILD-PROVENANCE-{previous_sha}.toml");
+        let base_name = base_provenance_name(previous_sha);
         let base = stage.0.join(&base_name);
         if fs::symlink_metadata(&base).is_ok() {
             return Err("Der Herkunftsnachweis des Ausgangsreleases existiert bereits".into());
         }
-        fs::copy(stage.0.join("BUILD-PROVENANCE.toml"), &base)?;
+        fs::copy(stage.0.join(provenance_file()), &base)?;
         for ((artifact, checksum), name) in artifacts.iter().zip(REBUILT) {
             run(
                 "/usr/bin/install",
@@ -562,48 +647,54 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
             }
         }
         refresh_assets(&source, &stage.0)?;
-        for name in ["dl-web", "dl-infisical-env"] {
+        for name in COMPANIONS {
             if hash(&previous.join(name))? != hash(&stage.0.join(name))? {
                 return Err("Ein beibehaltenes Begleitbinary wurde verändert".into());
             }
         }
         fs::write(
-            stage.0.join("BUILD-PROVENANCE.toml"),
+            stage.0.join(provenance_file()),
             provenance(
                 sha,
-                [artifacts[0].1, artifacts[1].1, artifacts[2].1],
+                expected.map(|(_, checksum)| checksum),
                 previous_sha,
                 &base_name,
             ),
         )?;
         source_matches(&source, sha)?;
-        if current.canonicalize()? != previous || fs::read_link(&current)? != previous_link {
-            return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
-        }
+        unchanged(&current, &previous, &previous_link)?;
         fs::rename(&stage.0, &candidate)?;
     }
     source_matches(&source, sha)?;
-    if current.canonicalize()? != previous || fs::read_link(&current)? != previous_link {
-        return Err("Der Ausgangsrelease hat sich vor dem Wechsel verändert".into());
-    }
-    let host = HostFiles::install(&source, &candidate.join(REBUILT[1]))?;
-    if let Err(error) = activate(&current, &Path::new("releases").join(sha), &switch.0) {
+    unchanged(&current, &previous, &previous_link)?;
+    let host = HostFiles::install(&source, &candidate.join(GATEWAY_BINARY))?;
+    let installed = match proof(&gateway_config()) {
+        Ok(installed) => installed,
+        Err(error) => return Err(with_rollback(error, host.restore())),
+    };
+    if let Err(error) = activate(&current, &Path::new(RELEASES).join(sha), &switch.0) {
         return Err(with_rollback(error, host.restore()));
     }
-    if let Err(error) = restart_and_prove() {
+    if let Err(error) = restart_and_prove(&installed) {
         let rollback = every(vec![
             host.restore(),
             activate(&current, &previous_link, &switch.0),
-            restart_and_prove(),
+            restart_and_prove_previous(&gateway_config(), &installed),
         ]);
         return Err(with_rollback(error, rollback));
     }
     host.keep()?;
     println!(
-        "Discord-Release aktiviert: {sha}; dl-bot SHA256 {}; dl-ai-gateway SHA256 {}; dl-unit-failure-notify SHA256 {}",
-        artifacts[0].1, artifacts[1].1, artifacts[2].1
+        "Discord-Release aktiviert: {sha}; {}",
+        checksum_report(&expected)
     );
     Ok(())
+}
+
+fn checksum_report(expected: &[(&str, &str); 3]) -> String {
+    expected
+        .map(|(name, checksum)| format!("{name} SHA256 {checksum}"))
+        .join("; ")
 }
 
 fn main() -> Result<()> {
@@ -684,7 +775,7 @@ mod tests {
         for path in [&previous, &candidate] {
             fs::create_dir(path)?;
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-            for name in REBUILT.into_iter().chain(["dl-web", "dl-infisical-env"]) {
+            for name in REBUILT.into_iter().chain(COMPANIONS) {
                 fs::write(path.join(name), name.as_bytes())?;
                 fs::set_permissions(path.join(name), fs::Permissions::from_mode(0o600))?;
             }
@@ -694,14 +785,14 @@ mod tests {
             hash(&candidate.join(REBUILT[1]))?,
             hash(&candidate.join(REBUILT[2]))?,
         ];
-        let base_name = format!("BASE-BUILD-PROVENANCE-{previous_sha}.toml");
+        let base_name = base_provenance_name(&previous_sha);
         fs::write(candidate.join(&base_name), "source_sha = 'fixture'\n")?;
         fs::set_permissions(
             candidate.join(&base_name),
             fs::Permissions::from_mode(0o600),
         )?;
         fs::write(
-            candidate.join("BUILD-PROVENANCE.toml"),
+            candidate.join(provenance_file()),
             provenance(
                 &sha,
                 [0, 1, 2].map(|index| checksums[index].as_str()),
@@ -710,7 +801,7 @@ mod tests {
             ),
         )?;
         fs::set_permissions(
-            candidate.join("BUILD-PROVENANCE.toml"),
+            candidate.join(provenance_file()),
             fs::Permissions::from_mode(0o600),
         )?;
         let uid = fs::metadata(&candidate)?.uid();
@@ -727,7 +818,7 @@ mod tests {
     #[test]
     fn failed_candidate_is_reusable_after_rollback() -> Result<()> {
         let fixture = candidate_fixture()?;
-        let current = fixture.directory.path().join("current");
+        let current = fixture.directory.path().join(CURRENT);
         let switch = fixture.directory.path().join("switch");
         fs::create_dir(&switch)?;
         symlink(&fixture.previous, &current)?;
@@ -753,48 +844,28 @@ mod tests {
     #[test]
     fn changed_binaries_are_not_reusable() -> Result<()> {
         let fixture = candidate_fixture()?;
-        fs::write(fixture.candidate.join("dl-bot"), b"changed")?;
-        assert!(reusable_candidate(
-            &fixture.candidate,
-            &fixture.previous,
-            &fixture.sha,
-            &fixture.expected(),
-            fixture.uid
-        )
-        .is_err());
-        fs::write(fixture.candidate.join("dl-bot"), b"dl-bot")?;
-        fs::write(fixture.candidate.join("dl-ai-gateway"), b"changed")?;
-        assert!(reusable_candidate(
-            &fixture.candidate,
-            &fixture.previous,
-            &fixture.sha,
-            &fixture.expected(),
-            fixture.uid
-        )
-        .is_err());
-        fs::write(fixture.candidate.join("dl-ai-gateway"), b"dl-ai-gateway")?;
-        fs::write(fixture.candidate.join("dl-unit-failure-notify"), b"changed")?;
-        assert!(reusable_candidate(
-            &fixture.candidate,
-            &fixture.previous,
-            &fixture.sha,
-            &fixture.expected(),
-            fixture.uid
-        )
-        .is_err());
-        fs::write(
-            fixture.candidate.join("dl-unit-failure-notify"),
-            b"dl-unit-failure-notify",
-        )?;
-        fs::write(fixture.candidate.join("dl-web"), b"changed")?;
-        assert!(reusable_candidate(
-            &fixture.candidate,
-            &fixture.previous,
-            &fixture.sha,
-            &fixture.expected(),
-            fixture.uid
-        )
-        .is_err());
+        for name in REBUILT.into_iter().chain(COMPANIONS) {
+            fs::write(fixture.candidate.join(name), b"changed")?;
+            assert!(
+                reusable_candidate(
+                    &fixture.candidate,
+                    &fixture.previous,
+                    &fixture.sha,
+                    &fixture.expected(),
+                    fixture.uid
+                )
+                .is_err(),
+                "{name}"
+            );
+            fs::write(fixture.candidate.join(name), name.as_bytes())?;
+            reusable_candidate(
+                &fixture.candidate,
+                &fixture.previous,
+                &fixture.sha,
+                &fixture.expected(),
+                fixture.uid,
+            )?;
+        }
         Ok(())
     }
 
@@ -820,22 +891,24 @@ mod tests {
     #[test]
     fn activation_replaces_the_pointer_atomically() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let current = directory.path().join("current");
+        let current = directory.path().join(CURRENT);
         let switch = directory.path().join("switch");
         fs::create_dir(&switch)?;
-        symlink("releases/old", &current)?;
-        activate(&current, Path::new("releases/new"), &switch)?;
-        assert_eq!(fs::read_link(&current)?, PathBuf::from("releases/new"));
-        activate(&current, Path::new("releases/old"), &switch)?;
-        assert_eq!(fs::read_link(&current)?, PathBuf::from("releases/old"));
+        let old = Path::new(RELEASES).join("old");
+        let new = Path::new(RELEASES).join("new");
+        symlink(&old, &current)?;
+        activate(&current, &new, &switch)?;
+        assert_eq!(fs::read_link(&current)?, new);
+        activate(&current, &old, &switch)?;
+        assert_eq!(fs::read_link(&current)?, old);
         Ok(())
     }
 
     #[test]
     fn rollback_restores_or_removes_the_gateway_config_and_unit() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        for name in ["dl-ai-gateway.toml", "dl-ai-gateway.service"] {
-            let target = directory.path().join(name);
+        for name in [gateway_config_name(), GATEWAY_UNIT.to_owned()] {
+            let target = directory.path().join(&name);
             fs::write(&target, b"old")?;
             fs::write(directory.path().join("new"), b"new")?;
             assert!(replace_owner_file(&directory.path().join("new"), &target)?);
@@ -882,33 +955,143 @@ mod tests {
         Ok(())
     }
 
+    fn repository() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
     #[test]
-    fn the_probe_targets_the_listen_address_of_the_shipped_config() -> Result<()> {
-        let shipped = include_str!("../../../../config/dl-ai-gateway.toml");
-        assert!(listen_address(shipped)?.ip().is_loopback());
-        assert!(listen_address("slots = []").is_err());
+    fn the_proof_takes_address_and_window_from_the_shipped_config() -> Result<()> {
+        let shipped = repository()
+            .join(SOURCE_CONFIG_DIRECTORY)
+            .join(gateway_config_name());
+        let written: SocketAddr = fs::read_to_string(&shipped)?
+            .lines()
+            .find_map(|line| line.strip_prefix("listen = "))
+            .ok_or("listen fehlt")?
+            .trim_matches('"')
+            .parse()?;
+        let config = GatewayConfig::load(&shipped)?;
+        let planned = proof(&shipped)?;
+        assert_eq!(planned.address, written);
+        assert_eq!(
+            planned.window,
+            config.alarm.start_budget() + Duration::from_secs(SERVE_MARGIN_SECS)
+        );
+        assert!(planned.window > config.alarm.start_budget());
+        assert_eq!(previous_proof(&shipped, &planned)?, planned);
         Ok(())
     }
 
     #[test]
-    fn a_gateway_that_never_binds_fails_the_release() -> Result<()> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let address = listener.local_addr()?;
-        drop(listener);
-        let refused = serves(address, 2, Duration::ZERO);
-        assert!(refused.is_err_and(|error| error.to_string().contains(HEALTH_PATH)));
+    fn a_rollback_to_a_config_without_alarm_section_still_finds_the_old_listener() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let older = directory.path().join(gateway_config_name());
+        let shipped = fs::read_to_string(
+            repository()
+                .join(SOURCE_CONFIG_DIRECTORY)
+                .join(gateway_config_name()),
+        )?;
+        let (before_alarm, after_alarm) = shipped.split_once("[alarm]").ok_or("alarm fehlt")?;
+        let (_, slots) = after_alarm.split_once("[slots.").ok_or("slots fehlen")?;
+        fs::write(&older, format!("{before_alarm}[slots.{slots}"))?;
+        assert!(proof(&older).is_err());
+        let failed = Proof {
+            address: "127.0.0.1:1".parse()?,
+            window: Duration::from_secs(SERVE_MARGIN_SECS),
+        };
+        let previous = previous_proof(&older, &failed)?;
+        assert_eq!(previous.address, GatewayConfig::listen_address(&older)?);
+        assert_ne!(previous.address, failed.address);
+        assert_eq!(previous.window, failed.window);
+        fs::write(&older, "slots = []")?;
+        assert!(previous_proof(&older, &failed).is_err());
+        assert!(previous_proof(&directory.path().join("absent"), &failed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_shipped_gateway_unit_starts_the_release_binary_through_the_launcher_with_the_installed_config(
+    ) -> Result<()> {
+        let unit = fs::read_to_string(repository().join(SOURCE_UNIT_DIRECTORY).join(GATEWAY_UNIT))?;
+        let starts: Vec<&str> = unit
+            .lines()
+            .filter_map(|line| line.strip_prefix("ExecStart="))
+            .collect();
+        let [start] = starts.as_slice() else {
+            return Err("genau ein ExecStart erwartet".into());
+        };
+        let release = Path::new(ROOT).join(CURRENT);
+        let words: Vec<&str> = start.split(' ').collect();
+        let launcher = release.join(LAUNCHER);
+        let gateway = release.join(GATEWAY_BINARY);
+        let config = gateway_config();
+        assert_eq!(words.get(2).copied(), Some(text(&launcher)?));
+        assert_eq!(
+            words.rchunks(3).next(),
+            Some(&[text(&gateway)?, "--config", text(&config)?][..])
+        );
+        assert_eq!(
+            words.iter().filter(|word| **word == "--").count(),
+            1,
+            "{start}"
+        );
+        let working: Vec<&str> = unit
+            .lines()
+            .filter_map(|line| line.strip_prefix("WorkingDirectory="))
+            .collect();
+        assert_eq!(working, [text(&release)?]);
+        Ok(())
+    }
+
+    type Answering = std::thread::JoinHandle<std::io::Result<()>>;
+
+    fn answered(answer: Answering) -> Result<()> {
+        Ok(answer.join().map_err(|_| "Antwortfaden abgebrochen")??)
+    }
+
+    fn answering_health_only() -> Result<(SocketAddr, Answering)> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let answer = std::thread::spawn(move || -> std::io::Result<()> {
             use std::io::{Read, Write};
             let (mut stream, _) = listener.accept()?;
             let mut request = [0_u8; 512];
-            let _ = stream.read(&mut request)?;
-            stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+            let read = stream.read(&mut request)?;
+            let asked = String::from_utf8_lossy(&request[..read]).into_owned();
+            let status = if asked.starts_with(&format!("GET {HEALTH_PATH} ")) {
+                "200 OK"
+            } else {
+                "404 Not Found"
+            };
+            stream.write_all(
+                format!("HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                    .as_bytes(),
+            )
         });
-        serves(address, 1, Duration::ZERO)?;
-        answer.join().map_err(|_| "Antwortfaden abgebrochen")??;
-        Ok(())
+        Ok((address, answer))
+    }
+
+    #[test]
+    fn the_probe_fails_on_a_closed_port_and_passes_only_on_the_health_path() -> Result<()> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let closed = Proof {
+            address,
+            window: Duration::ZERO,
+        };
+        let refused = serves(&closed, Duration::ZERO);
+        assert!(refused.is_err_and(|error| error.to_string().contains(HEALTH_PATH)));
+        let (address, answer) = answering_health_only()?;
+        let open = Proof {
+            address,
+            window: Duration::ZERO,
+        };
+        serves(&open, Duration::ZERO)?;
+        answered(answer)?;
+        let (address, answer) = answering_health_only()?;
+        assert!(answers(&format!("http://{address}/")).is_err());
+        answered(answer)
     }
 
     #[test]
@@ -921,15 +1104,18 @@ mod tests {
         );
         let manifest: Provenance = toml::from_str(&written)?;
         assert_eq!(manifest.rebuilt_binaries, REBUILT);
-        assert_eq!(
-            [
-                manifest.dl_bot_sha256.as_str(),
-                manifest.dl_ai_gateway_sha256.as_str(),
-                manifest.dl_unit_failure_notify_sha256.as_str(),
-            ],
-            ["1", "2", "3"]
-        );
+        let expected = [0, 1, 2].map(|index| (REBUILT[index], ["1", "2", "3"][index]));
+        assert!(manifest.records(&expected));
+        let swapped = [0, 1, 2].map(|index| (REBUILT[index], ["2", "1", "3"][index]));
+        assert!(!manifest.records(&swapped));
         assert_eq!(manifest.retained_provenance, "BASE.toml");
+        assert_eq!(
+            checksum_report(&expected),
+            format!(
+                "{} SHA256 1; {} SHA256 2; {} SHA256 3",
+                REBUILT[0], REBUILT[1], REBUILT[2]
+            )
+        );
         Ok(())
     }
 }

@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::backend::FailureKind;
 use crate::upstream::{
-    is_account_refusal, refusal_status, safe_code, status_reason, Answer, Class, RefusalKind,
-    FAILED_RUN_PAUSE_SECS, WEEK_SECS,
+    limit_refusal, refusal_status, safe_code, status_reason, Answer, Class, RefusalKind,
+    FAILED_RUN_PAUSE_SECS, OVERLOADED, WEEK_SECS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,32 +161,30 @@ fn refusal(row: &LedgerFailure) -> Option<Refusal> {
         .http_status
         .and_then(|status| u16::try_from(status).ok());
     let code = row.error_code.as_deref();
-    let stored = row
+    let reason = row
         .error_reason
         .as_deref()
-        .filter(|reason| safe_code(reason));
-    let account = stored.is_some_and(is_account_refusal);
-    let limited = code == Some(FailureKind::Limit.ledger_code());
-    let overloaded = code == Some(FailureKind::Overloaded.ledger_code());
-    if !account && !limited && !overloaded && !status.is_some_and(refusal_status) {
+        .filter(|reason| safe_code(reason))
+        .or_else(|| status.map(status_reason))
+        .or(code.filter(|code| safe_code(code)))?;
+    let limited = limit_refusal(status, reason) || code == Some(FailureKind::Limit.ledger_code());
+    let overloaded =
+        status == Some(OVERLOADED) || code == Some(FailureKind::Overloaded.ledger_code());
+    if !limited && !overloaded && !status.is_some_and(refusal_status) {
         return None;
     }
-    let kind = match status {
-        _ if account || limited => RefusalKind::Limit,
-        Some(429) => RefusalKind::Limit,
-        _ if overloaded => RefusalKind::Overloaded,
-        Some(529) => RefusalKind::Overloaded,
-        _ => RefusalKind::Unavailable,
+    let kind = if limited {
+        RefusalKind::Limit
+    } else if overloaded {
+        RefusalKind::Overloaded
+    } else {
+        RefusalKind::Unavailable
     };
-    let reason = stored
-        .or_else(|| status.map(status_reason))
-        .or(code.filter(|code| safe_code(code)))?
-        .to_owned();
     Some(Refusal {
         provider: row.provider.clone(),
-        class: Class::of(&reason),
+        class: Class::of(reason),
         kind,
-        reason,
+        reason: reason.to_owned(),
         status,
         first_at: row.first_at,
         last_at: row.last_at,
@@ -196,6 +194,7 @@ fn refusal(row: &LedgerFailure) -> Option<Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::code::HTTP_ERROR;
 
     #[derive(Default)]
     struct Recorder {
@@ -277,7 +276,7 @@ mod tests {
             },
         ];
         assert!(standing_refusals(&rows, 600).is_empty());
-        let auth = row("http_error", None, Some(401), (0, 600));
+        let auth = row(HTTP_ERROR, None, Some(401), (0, 600));
         let fired = standing_refusals(&[auth], 600);
         assert_eq!(
             (fired[0].kind, fired[0].reason.as_str()),
@@ -287,28 +286,39 @@ mod tests {
 
     #[test]
     fn account_refusals_count_by_their_reason_whatever_code_and_status_say() {
-        let billed = row("http_error", Some("billing"), Some(400), (100, 100));
+        let billed = row(HTTP_ERROR, Some("billing"), Some(400), (100, 100));
         let fired = standing_refusals(&[billed], 600);
         assert_eq!(fired.len(), 1);
         assert_eq!(
             (fired[0].class, fired[0].kind, fired[0].reason.as_str()),
             (Class::Billing, RefusalKind::Limit, "billing")
         );
-        let quota = [row(
-            "http_error",
-            Some("usage_limit"),
-            Some(400),
-            (100, 699),
-        )];
+        let quota = [row(HTTP_ERROR, Some("usage_limit"), Some(400), (100, 699))];
         assert!(standing_refusals(&quota, 601).is_empty());
         let fired = standing_refusals(&quota, 599);
         assert_eq!(
             (fired[0].class, fired[0].kind, fired[0].reason.as_str()),
             (Class::Other, RefusalKind::Limit, "usage_limit")
         );
-        let plain = row("http_error", Some("http_4xx"), Some(400), (0, 10_000));
-        let unsafe_reason = row("http_error", Some("Billing"), Some(400), (0, 10_000));
-        let missing = row("http_error", None, Some(400), (0, 10_000));
+        for status in [402, 412] {
+            let unexplained = row(HTTP_ERROR, None, Some(status), (100, 100));
+            let fired = standing_refusals(&[unexplained], 600);
+            assert_eq!(fired.len(), 1, "{status}");
+            assert_eq!(
+                (fired[0].class, fired[0].kind, fired[0].reason.as_str()),
+                (Class::Billing, RefusalKind::Limit, "billing"),
+                "{status}"
+            );
+        }
+        let throttled = row(HTTP_ERROR, None, Some(429), (0, 600));
+        let fired = standing_refusals(&[throttled], 600);
+        assert_eq!(
+            (fired[0].class, fired[0].kind, fired[0].reason.as_str()),
+            (Class::Other, RefusalKind::Limit, "http_429")
+        );
+        let plain = row(HTTP_ERROR, Some("http_4xx"), Some(400), (0, 10_000));
+        let unsafe_reason = row(HTTP_ERROR, Some("Billing"), Some(400), (0, 10_000));
+        let missing = row(HTTP_ERROR, None, Some(400), (0, 10_000));
         assert!(standing_refusals(&[plain, unsafe_reason, missing], 600).is_empty());
     }
 

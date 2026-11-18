@@ -535,7 +535,7 @@ impl FireworksClient {
         };
         let error = Self::complete_text(&data)
             .is_none()
-            .then_some("invalid_output");
+            .then_some(tool_chat::FailureKind::InvalidOutput.ledger_code());
         attempt.finish_before(Some(&data), error, deadline).await;
         Some(data)
     }

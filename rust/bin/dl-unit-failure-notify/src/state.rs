@@ -13,6 +13,7 @@ use dl_provider_refusal::{DAY_SECS as DAY, WEEK_SECS as WEEK};
 const MAX_STATE_BYTES: u64 = 32_768;
 const WEEKLY_SENDS: usize = 2;
 const MAX_RECENT_INVOCATIONS: usize = 256;
+const NOT_WRITABLE: &str = "Zustandsverzeichnis ist für den Dienstnutzer nicht beschreibbar.";
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,7 +128,7 @@ pub fn budget_note() -> String {
 
 impl Store {
     pub fn open(directory: &Path, unit_key: &str) -> Result<Self> {
-        Self::ready(directory)?;
+        Self::private(directory)?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -146,6 +147,19 @@ impl Store {
     }
 
     pub fn ready(directory: &Path) -> Result<()> {
+        Self::private(directory)?;
+        let probe = directory.join(format!(".ready-{}", std::process::id()));
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&probe)
+            .context(NOT_WRITABLE)?;
+        fs::remove_file(&probe).context(NOT_WRITABLE)
+    }
+
+    fn private(directory: &Path) -> Result<()> {
         if !directory.is_absolute() {
             bail!("Das Zustandsverzeichnis muss ein absoluter Pfad sein.");
         }

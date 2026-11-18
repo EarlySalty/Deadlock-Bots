@@ -527,9 +527,39 @@ mod tests {
             contract_ready(&config, &args)
         };
         prepared(BOTLOGS_CHANNEL, "state", &credential).unwrap();
+        assert!(fs::read_dir(root.path().join("state"))
+            .unwrap()
+            .next()
+            .is_none());
         assert!(prepared(BOTLOGS_CHANNEL + 1, "state", &credential).is_err());
         assert!(prepared(BOTLOGS_CHANNEL, "credential", &credential).is_err());
         assert!(prepared(BOTLOGS_CHANNEL, "state", &root.path().join("absent")).is_err());
+        for (name, content) in [
+            ("empty", &b""[..]),
+            ("blank", b"\n"),
+            ("spaced", b"fix ture"),
+            ("binary", b"\xff\xfe"),
+        ] {
+            let unusable = root.path().join(name);
+            fs::write(&unusable, content).unwrap();
+            fs::set_permissions(&unusable, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(protected_path(&unusable, false).is_ok(), "{name}");
+            assert!(
+                prepared(BOTLOGS_CHANNEL, "state", &unusable).is_err(),
+                "{name}"
+            );
+        }
+        let padded = root.path().join("padded");
+        fs::write(&padded, b"fixture\n").unwrap();
+        fs::set_permissions(&padded, fs::Permissions::from_mode(0o600)).unwrap();
+        prepared(BOTLOGS_CHANNEL, "state", &padded).unwrap();
+        let sealed = root.path().join("sealed");
+        fs::create_dir(&sealed).unwrap();
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(protected_path(&sealed, true).is_ok());
+        assert!(prepared(BOTLOGS_CHANNEL, "sealed", &credential).is_err());
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        prepared(BOTLOGS_CHANNEL, "sealed", &credential).unwrap();
         assert_eq!(
             state::budget_note(),
             "Weitere Meldungen: höchstens eine in 24 Stunden und 2 in 7 Tagen."

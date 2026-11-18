@@ -3,40 +3,20 @@ use async_trait::async_trait;
 use super::types::{ToolChatRequest, ToolChatResponse};
 use crate::upstream::RefusalKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureKind {
-    Limit,
-    Unavailable,
-    Busy,
-    Overloaded,
-    Timeout,
-    InvalidRequest,
-    InvalidOutput,
+crate::upstream::worded_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FailureKind {
+        Limit => RefusalKind::Limit.as_str(),
+        Unavailable => RefusalKind::Unavailable.as_str(),
+        Busy => "busy",
+        Overloaded => RefusalKind::Overloaded.as_str(),
+        Timeout => "timeout",
+        InvalidRequest => "invalid_request",
+        InvalidOutput => "invalid_output",
+    }
 }
 
 impl FailureKind {
-    pub const ALL: [Self; 7] = [
-        Self::Limit,
-        Self::Unavailable,
-        Self::Busy,
-        Self::Overloaded,
-        Self::Timeout,
-        Self::InvalidRequest,
-        Self::InvalidOutput,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Limit => RefusalKind::Limit.as_str(),
-            Self::Unavailable => RefusalKind::Unavailable.as_str(),
-            Self::Busy => "busy",
-            Self::Overloaded => RefusalKind::Overloaded.as_str(),
-            Self::Timeout => "timeout",
-            Self::InvalidRequest => "invalid_request",
-            Self::InvalidOutput => "invalid_output",
-        }
-    }
-
     pub fn retryable(self) -> bool {
         matches!(self, Self::Overloaded)
     }
@@ -49,11 +29,11 @@ impl FailureKind {
         match self {
             Self::Limit => "rate_limited",
             Self::Unavailable => "transport",
-            Self::Busy => "busy",
-            Self::Overloaded => "overloaded",
-            Self::Timeout => "timeout",
-            Self::InvalidRequest => "invalid_request",
-            Self::InvalidOutput => "invalid_output",
+            Self::Busy
+            | Self::Overloaded
+            | Self::Timeout
+            | Self::InvalidRequest
+            | Self::InvalidOutput => self.as_str(),
         }
     }
 }

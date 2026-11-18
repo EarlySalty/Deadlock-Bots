@@ -4,13 +4,43 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub const GATEWAY_UNIT: &str = "dl-ai-gateway.service";
+macro_rules! gateway_binary {
+    () => {
+        "dl-ai-gateway"
+    };
+}
+
+#[macro_export]
+macro_rules! worded_enum {
+    ($(#[$meta:meta])* $visibility:vis enum $name:ident { $($variant:ident => $word:expr),+ $(,)? }) => {
+        $(#[$meta])*
+        $visibility enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $word),+
+                }
+            }
+        }
+    };
+}
+
+pub const GATEWAY_BINARY: &str = gateway_binary!();
+pub const GATEWAY_UNIT: &str = concat!(gateway_binary!(), ".service");
 pub const HELPER_BINARY: &str = "dl-unit-failure-notify";
 pub const HEALTH_PATH: &str = "/healthz";
+pub const SYSTEMCTL: &str = "/usr/bin/systemctl";
 pub const CONTRACT: &str = "dl-provider-refusal/1";
 pub const BILLING: &str = "billing";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const MAX_CODE_LEN: usize = 64;
+pub const RATE_LIMITED: u16 = 429;
+pub const OVERLOADED: u16 = 529;
 pub const INFISICAL_TIMEOUT_SECS: u64 = 15;
 pub const BROKER_CONNECT_TIMEOUT_SECS: u64 = 3;
 pub const BROKER_TIMEOUT_SECS: u64 = 20;
@@ -20,8 +50,10 @@ pub const DAY_SECS: u64 = 86_400;
 pub const WEEK_SECS: u64 = 7 * DAY_SECS;
 
 const CODE_BYTES: [(u8, u8); 3] = [(b'a', b'z'), (b'0', b'9'), (b'_', b'_')];
-const BILLING_TEXTS: [&str; 4] = ["credit balance", "billing", "spend limit", "budget"];
+const BILLING_TEXTS: [&str; 3] = ["credit balance", "billing", "spend limit"];
 const USAGE_LIMIT_TEXT: &str = "usage limit";
+const LIMIT_REACHED_TEXT: &str = "limit reached";
+const RATE_LIMIT_TEXTS: [&str; 2] = ["rate limit", "rate_limit"];
 
 pub fn safe_code(value: &str) -> bool {
     !value.is_empty()
@@ -59,8 +91,8 @@ pub fn status_reason(status: u16) -> &'static str {
     match status {
         status if billing_status(status) => BILLING,
         status if request_error_status(status) => "http_4xx",
-        429 => "http_429",
-        529 => "http_529",
+        RATE_LIMITED => "http_429",
+        OVERLOADED => "http_529",
         401 => "http_401",
         403 => "http_403",
         500..=599 => "http_5xx",
@@ -69,7 +101,7 @@ pub fn status_reason(status: u16) -> &'static str {
 }
 
 pub fn refusal_status(status: u16) -> bool {
-    billing_status(status) || matches!(status, 401 | 403 | 429 | 500..=599)
+    billing_status(status) || matches!(status, 401 | 403 | RATE_LIMITED | 500..=599)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,13 +110,25 @@ pub enum Account {
     Plan,
 }
 
+fn names_rate_limit(lowered: &str) -> bool {
+    RATE_LIMIT_TEXTS
+        .iter()
+        .any(|marker| lowered.contains(marker))
+}
+
+pub fn rate_limit_text(text: &str) -> bool {
+    names_rate_limit(&text.to_ascii_lowercase())
+}
+
 pub fn account_refusal(status: Option<u16>, text: &str, account: Account) -> Option<&'static str> {
     let text = text.to_ascii_lowercase();
+    let billing_named = BILLING_TEXTS.iter().any(|marker| text.contains(marker));
     let usage_limit = text.contains(USAGE_LIMIT_TEXT);
-    if usage_limit && account == Account::Plan {
+    let plan_quota = usage_limit || (text.contains(LIMIT_REACHED_TEXT) && !names_rate_limit(&text));
+    if account == Account::Plan && plan_quota && !billing_named {
         return Some(USAGE_LIMIT);
     }
-    let named = usage_limit || BILLING_TEXTS.iter().any(|marker| text.contains(marker));
+    let named = billing_named || usage_limit;
     status
         .is_some_and(|status| billing_status(status) || (named && matches!(status, 400 | 403)))
         .then_some(BILLING)
@@ -98,38 +142,38 @@ pub fn is_account_refusal(reason: &str) -> bool {
     reason == BILLING || reason == USAGE_LIMIT
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefusalKind {
-    Limit,
-    Overloaded,
-    Unavailable,
+pub fn limit_refusal(status: Option<u16>, reason: &str) -> bool {
+    status == Some(RATE_LIMITED) || is_account_refusal(reason)
+}
+
+fn worded<T: Copy>(all: &[T], word: fn(T) -> &'static str, value: &str) -> Option<T> {
+    all.iter().copied().find(|item| word(*item) == value)
+}
+
+worded_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum RefusalKind {
+        Limit => "limit",
+        Overloaded => "overloaded",
+        Unavailable => "unavailable",
+    }
 }
 
 impl RefusalKind {
-    pub const ALL: [Self; 3] = [Self::Limit, Self::Overloaded, Self::Unavailable];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Limit => "limit",
-            Self::Overloaded => "overloaded",
-            Self::Unavailable => "unavailable",
-        }
-    }
-
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+        worded(Self::ALL, Self::as_str, value)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Class {
-    Billing,
-    Other,
+worded_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Class {
+        Billing => BILLING,
+        Other => "other",
+    }
 }
 
 impl Class {
-    pub const ALL: [Self; 2] = [Self::Billing, Self::Other];
-
     pub fn of(reason: &str) -> Self {
         if reason == BILLING {
             Self::Billing
@@ -137,35 +181,19 @@ impl Class {
             Self::Other
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Billing => BILLING,
-            Self::Other => "other",
-        }
-    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Sent,
-    Suppressed,
+worded_enum! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        Sent => "sent",
+        Suppressed => "suppressed",
+    }
 }
 
 impl Outcome {
-    pub const ALL: [Self; 2] = [Self::Sent, Self::Suppressed];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Sent => "sent",
-            Self::Suppressed => "suppressed",
-        }
-    }
-
     pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|outcome| outcome.as_str() == value)
+        worded(Self::ALL, Self::as_str, value)
     }
 }
 
@@ -256,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn code_shape_is_one_alphabet_and_one_length_for_rust_and_sql() {
+    fn code_shape_is_one_alphabet_and_one_length() {
         let allowed = "abcdefghijklmnopqrstuvwxyz0123456789_";
         for byte in 0..=127u8 {
             let symbol = char::from(byte);
@@ -271,25 +299,24 @@ mod tests {
         assert!(safe_code(&"a".repeat(MAX_CODE_LEN)));
         assert!(!safe_code(&"a".repeat(MAX_CODE_LEN + 1)));
         assert_eq!(code_pattern(), "^[a-z0-9_]{1,64}$");
-        assert!(code_pattern().contains(&format!("{{1,{MAX_CODE_LEN}}}")));
     }
 
     #[test]
     fn contract_words_round_trip_for_every_variant() {
-        for kind in RefusalKind::ALL {
+        for kind in RefusalKind::ALL.iter().copied() {
             assert_eq!(RefusalKind::parse(kind.as_str()), Some(kind));
             assert!(safe_code(kind.as_str()));
         }
         assert_eq!(RefusalKind::parse(""), None);
         assert_eq!(RefusalKind::parse("Limit"), None);
-        for class in Class::ALL {
+        for class in Class::ALL.iter().copied() {
             assert_eq!(Class::of(class.as_str()), class);
             assert!(safe_code(class.as_str()));
         }
         assert_eq!(Class::Billing.as_str(), BILLING);
         assert_eq!(Class::of(""), Class::Other);
         assert_eq!(Class::of(USAGE_LIMIT), Class::Other);
-        for outcome in Outcome::ALL {
+        for outcome in Outcome::ALL.iter().copied() {
             assert_eq!(Outcome::parse(outcome.as_str()), Some(outcome));
             for next_at in [0, 42, u64::MAX] {
                 let answer = Answer { outcome, next_at };
@@ -299,11 +326,10 @@ mod tests {
         assert_eq!(Outcome::parse(""), None);
         assert_eq!(Outcome::parse("Sent"), None);
         assert_eq!(Answer::parse("outcome=unknown next_at=1"), None);
-        assert_eq!(HELPER_BINARY, "dl-unit-failure-notify");
     }
 
     #[test]
-    fn billing_and_plan_quota_are_decided_once_for_every_mapper() {
+    fn the_shared_rule_decides_billing_and_plan_quota_from_status_text_and_account() {
         let credit = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the API."}}"#;
         let typed = r#"{"error":{"type":"billing_error","message":"x"}}"#;
         let limit = r#"{"error":{"message":"You have reached your specified API usage limits."}}"#;
@@ -357,6 +383,52 @@ mod tests {
         );
         assert_eq!(status_reason(429), "http_429");
         assert_eq!(status_reason(529), "http_529");
+        let thinking = r#"{"error":{"type":"invalid_request_error","message":"thinking.budget_tokens: Input should be greater than or equal to 1024"}}"#;
+        for account in [Account::Metered, Account::Plan] {
+            for status in [400, 403] {
+                assert_eq!(
+                    refusal_reason(status, thinking, account),
+                    status_reason(status)
+                );
+            }
+            assert_eq!(
+                account_refusal(Some(429), "Rate limit reached", account),
+                None
+            );
+            assert_eq!(
+                account_refusal(None, "rate_limit_error: limit reached", account),
+                None
+            );
+            assert_eq!(
+                account_refusal(Some(402), "Spend limit reached", account),
+                Some(BILLING)
+            );
+            assert_eq!(
+                account_refusal(Some(500), "Spend limit reached", account),
+                None
+            );
+            assert_eq!(account_refusal(None, "Spend limit reached", account), None);
+        }
+        for status in [None, Some(400), Some(429), Some(500)] {
+            assert_eq!(
+                account_refusal(status, "5-hour limit reached", Account::Plan),
+                Some(USAGE_LIMIT)
+            );
+        }
+        assert_eq!(
+            account_refusal(Some(400), "5-hour limit reached", Account::Metered),
+            None
+        );
+        assert!(rate_limit_text("API Error: Rate_Limit_Error"));
+        assert!(!rate_limit_text("limit reached"));
+        assert!(limit_refusal(
+            Some(RATE_LIMITED),
+            status_reason(RATE_LIMITED)
+        ));
+        assert!(limit_refusal(None, BILLING));
+        assert!(limit_refusal(Some(500), USAGE_LIMIT));
+        assert!(!limit_refusal(Some(OVERLOADED), status_reason(OVERLOADED)));
+        assert!(!limit_refusal(None, ""));
         assert!(is_account_refusal(BILLING));
         assert!(is_account_refusal(USAGE_LIMIT));
         for status in [0, 200, 400, 401, 403, 404, 429, 500, 529, 600] {

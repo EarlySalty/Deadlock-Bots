@@ -21,7 +21,7 @@ pub use chat_backend::ChatProviderBackend;
 pub use claude_plan::ClaudePlanBackend;
 pub use config::{
     AlarmConfig, ConfigError, FallbackConfig, GatewayConfig, ProviderConfig, ProviderKind,
-    SlotConfig, Target,
+    SlotConfig, Target, READINESS_CHILDREN,
 };
 pub use router::{
     LedgerEntry, LedgerOutcome, PostgresLedger, ProviderHandle, RouteError, Routed, SlotRouter,

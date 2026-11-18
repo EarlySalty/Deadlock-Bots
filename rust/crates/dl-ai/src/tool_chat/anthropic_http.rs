@@ -8,7 +8,7 @@ use reqwest::header::HeaderValue;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::config::ConfigError;
 use super::types::{ContentBlock, StopReason, ToolChatRequest, ToolChatResponse, Usage};
-use crate::upstream::{account_refusal, request_error_status, status_reason, Account};
+use crate::upstream::{limit_refusal, refusal_reason, request_error_status, Account};
 
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -166,18 +166,21 @@ pub fn parse_response(body: &Value) -> Result<ToolChatResponse, BackendError> {
     })
 }
 
-fn status_error(status: reqwest::StatusCode, body: &[u8], account: Account) -> BackendError {
+pub(super) fn status_error(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    account: Account,
+) -> BackendError {
     let code = status.as_u16();
-    let words = crate::usage::error_words(body);
-    if let Some(reason) = account_refusal(Some(code), &words, account) {
-        return BackendError::upstream(FailureKind::Limit, reason, code);
-    }
-    let kind = match code {
-        429 => FailureKind::Limit,
-        _ if request_error_status(code) => FailureKind::InvalidRequest,
-        _ => FailureKind::Unavailable,
+    let reason = refusal_reason(code, &crate::usage::error_words(body), account);
+    let kind = if limit_refusal(Some(code), reason) {
+        FailureKind::Limit
+    } else if request_error_status(code) {
+        FailureKind::InvalidRequest
+    } else {
+        FailureKind::Unavailable
     };
-    BackendError::upstream(kind, status_reason(code), code)
+    BackendError::upstream(kind, reason, code)
 }
 
 async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, BackendError> {

@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use dl_ai::tool_chat::{
     FailureKind, Message, RouteError, Routed, SlotRouter, StopReason, ToolChatRequest, ToolSpec,
 };
-use dl_ai::upstream::HEALTH_PATH;
+use dl_ai::upstream::{HEALTH_PATH, OVERLOADED};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -132,7 +132,7 @@ fn failure_response(failure: RouteError) -> Response {
             let (status, kind) = match last.1.kind {
                 FailureKind::Limit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
                 FailureKind::Busy | FailureKind::Overloaded => (
-                    StatusCode::from_u16(529).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                    StatusCode::from_u16(OVERLOADED).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
                     "overloaded_error",
                 ),
                 FailureKind::Timeout => (StatusCode::GATEWAY_TIMEOUT, "timeout_error"),

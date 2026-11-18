@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use tokio::sync::OnceCell;
 
 use crate::tool_chat::FailureKind;
-use crate::upstream::{refusal_reason, safe_code, Account};
+use crate::upstream::{refusal_reason, safe_code, Account, GATEWAY_BINARY, GATEWAY_UNIT};
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse};
 
 pub mod code {
@@ -58,7 +58,7 @@ pub async fn replay_pending() -> Result<usize, sqlx::Error> {
         "dl-brain-feeder" => "dl-brain-feeder.service",
         "dl-knowledge" => "dl-knowledge.service",
         "dl-verbinder" => "dl-verbinder.service",
-        "dl-ai-gateway" => "dl-ai-gateway.service",
+        service if service == GATEWAY_BINARY => GATEWAY_UNIT,
         _ => return Ok(0),
     };
     let since: Option<String> = sqlx::query_scalar("SELECT min(ts) FROM public.llm_usage WHERE project='Deadlock-Bots' AND service=$1 AND attempt_state='started'")
@@ -436,7 +436,9 @@ fn count(body: &Value, name: &str) -> Option<i64> {
     body["usage"][name].as_i64().filter(|value| *value >= 0)
 }
 pub(crate) fn cached_tokens(body: &Value) -> Option<u64> {
-    body["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64()
+    let cached = body["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64()?;
+    let prompt = body["usage"]["prompt_tokens"].as_u64();
+    Some(prompt.map_or(cached, |prompt| cached.min(prompt)))
 }
 pub(crate) fn error_words(body: &[u8]) -> String {
     let Ok(body) = serde_json::from_slice::<Value>(body) else {
@@ -655,6 +657,17 @@ mod tests {
             assert_eq!(error_words(body), "");
         }
         assert_eq!(cached_tokens(&json!({"usage":{}})), None);
+        let reported = |prompt: Value, cached: Value| {
+            cached_tokens(
+                &json!({"usage":{"prompt_tokens":prompt,"prompt_tokens_details":{"cached_tokens":cached}}}),
+            )
+        };
+        assert_eq!(reported(json!(100), json!(60)), Some(60));
+        assert_eq!(reported(json!(100), json!(100)), Some(100));
+        assert_eq!(reported(json!(100), json!(500)), Some(100));
+        assert_eq!(reported(json!(0), json!(5)), Some(0));
+        assert_eq!(reported(Value::Null, json!(5)), Some(5));
+        assert_eq!(reported(json!(100), Value::Null), None);
         assert_eq!(
             cached_tokens(&json!({"usage":{"prompt_tokens_details":{"cached_tokens":-3}}})),
             None
@@ -1093,18 +1106,6 @@ impl ChatProvider for UsageProvider {
     ) -> Result<ChatResponse, ChatProviderError> {
         PURPOSE
             .scope(self.purpose.clone(), self.inner.chat(messages, params))
-            .await
-    }
-    async fn chat_with_status(
-        &self,
-        messages: &[ChatMessage],
-        params: ChatParams,
-    ) -> Result<(ChatResponse, Option<u16>), ChatProviderError> {
-        PURPOSE
-            .scope(
-                self.purpose.clone(),
-                self.inner.chat_with_status(messages, params),
-            )
             .await
     }
     fn effective_model(&self, params: &ChatParams) -> Option<String> {

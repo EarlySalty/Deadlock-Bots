@@ -11,7 +11,9 @@ use tokio::process::Command;
 use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
-use crate::upstream::{account_refusal, status_reason, Account, USAGE_LIMIT};
+use crate::upstream::{
+    account_refusal, rate_limit_text, status_reason, Account, OVERLOADED, RATE_LIMITED,
+};
 
 const PASSED_ENV: [&str; 5] = ["HOME", "USER", "PATH", "LANG", "XDG_RUNTIME_DIR"];
 const ENVELOPE_TOKENS: u32 = 512;
@@ -245,25 +247,24 @@ fn usage(result: &Value) -> Usage {
     }
 }
 
-const OVERLOADED: u16 = 529;
-const RATE_LIMITED: u16 = 429;
-
 fn result_failure(status: Option<u16>, text: &str) -> (FailureKind, &'static str) {
-    if status == Some(OVERLOADED) || mentions(text, &["overloaded"]) {
-        (FailureKind::Overloaded, status_reason(OVERLOADED))
-    } else if mentions(text, &["limit reached"]) {
-        (FailureKind::Limit, USAGE_LIMIT)
-    } else if let Some(reason) = account_refusal(status, text, Account::Plan) {
+    let stated = status.map(status_reason);
+    if let Some(reason) = account_refusal(status, text, Account::Plan) {
         (FailureKind::Limit, reason)
-    } else if status == Some(RATE_LIMITED) || mentions(text, &["rate limit", "rate_limit"]) {
-        (FailureKind::Limit, status_reason(RATE_LIMITED))
+    } else if status == Some(OVERLOADED) || mentions(text, &["overloaded"]) {
+        (
+            FailureKind::Overloaded,
+            stated.unwrap_or_else(|| status_reason(OVERLOADED)),
+        )
+    } else if status == Some(RATE_LIMITED) || rate_limit_text(text) {
+        (
+            FailureKind::Limit,
+            stated.unwrap_or_else(|| status_reason(RATE_LIMITED)),
+        )
     } else if text.contains("output token maximum") {
         (FailureKind::InvalidOutput, "output_token_maximum")
     } else {
-        (
-            FailureKind::Unavailable,
-            status.map_or("result_error", status_reason),
-        )
+        (FailureKind::Unavailable, stated.unwrap_or("result_error"))
     }
 }
 
@@ -389,7 +390,7 @@ mod tests {
         };
         assert_eq!(
             failure(429, "API Error: Overloaded"),
-            Some((FailureKind::Overloaded, "http_529", Some(429)))
+            Some((FailureKind::Overloaded, "http_429", Some(429)))
         );
         assert_eq!(
             failure(529, ""),
@@ -442,7 +443,43 @@ mod tests {
         );
         assert_eq!(
             failure(500, "API Error: rate_limit_error"),
-            Some((FailureKind::Limit, "http_429", Some(500)))
+            Some((FailureKind::Limit, "http_5xx", Some(500)))
+        );
+        assert_eq!(
+            failure(500, "Spend limit reached"),
+            Some((FailureKind::Unavailable, "http_5xx", Some(500)))
+        );
+        assert_eq!(
+            failure(402, "Spend limit reached"),
+            Some((FailureKind::Limit, "billing", Some(402)))
+        );
+        assert_eq!(
+            failure(402, "API Error: Overloaded"),
+            Some((FailureKind::Limit, "billing", Some(402)))
+        );
+        assert_eq!(
+            failure(529, "Claude AI usage limit reached"),
+            Some((FailureKind::Limit, "usage_limit", Some(529)))
+        );
+        let unnumbered = |text: &str| {
+            parse_result(
+                &json!({"type": "result", "is_error": true, "result": text}),
+                MODEL,
+            )
+            .and_then(Result::err)
+            .map(|e| (e.kind, e.reason, e.status))
+        };
+        assert_eq!(
+            unnumbered("Rate limit reached"),
+            Some((FailureKind::Limit, "http_429", None))
+        );
+        assert_eq!(
+            unnumbered("API Error: Overloaded"),
+            Some((FailureKind::Overloaded, "http_529", None))
+        );
+        assert_eq!(
+            unnumbered("Spend limit reached"),
+            Some((FailureKind::Unavailable, "result_error", None))
         );
         assert_eq!(
             failure(400, "bad request"),
@@ -456,6 +493,53 @@ mod tests {
                 Some(200)
             ))
         );
+    }
+
+    #[test]
+    fn both_plan_mappers_store_the_same_reason_for_a_status_and_text() {
+        use super::super::anthropic_http::status_error;
+        use crate::upstream::is_account_refusal;
+        for (status, text, reason) in [
+            (529, "Claude AI usage limit reached", "usage_limit"),
+            (402, "Overloaded", "billing"),
+            (402, "boom", "billing"),
+            (412, "", "billing"),
+            (402, "Spend limit reached", "billing"),
+            (400, "Your credit balance is too low", "billing"),
+            (403, "Your credit balance is too low", "billing"),
+            (400, "Spend limit reached", "billing"),
+            (500, "Spend limit reached", "http_5xx"),
+            (400, "You have reached your usage limit", "usage_limit"),
+            (500, "Claude AI usage limit reached", "usage_limit"),
+            (429, "5-hour limit reached", "usage_limit"),
+            (429, "Rate limit reached", "http_429"),
+            (429, "", "http_429"),
+            (500, "rate_limit_error", "http_5xx"),
+            (429, "Overloaded", "http_429"),
+            (529, "Overloaded", "http_529"),
+            (529, "Your credit balance is too low", "http_529"),
+            (400, "thinking.budget_tokens is too small", "http_4xx"),
+            (403, "forbidden", "http_403"),
+            (401, "Your credit balance is too low", "http_401"),
+            (500, "boom", "http_5xx"),
+        ] {
+            let body = json!({"error": {"message": text}}).to_string();
+            let http = status_error(
+                reqwest::StatusCode::from_u16(status).expect("status"),
+                body.as_bytes(),
+                Account::Plan,
+            );
+            assert_eq!(http.reason, reason, "http {status} {text}");
+            let cli = result_failure(Some(status), text);
+            assert_eq!(cli.1, reason, "cli {status} {text}");
+            if is_account_refusal(reason) {
+                assert_eq!(
+                    (http.kind, cli.0),
+                    (FailureKind::Limit, FailureKind::Limit),
+                    "{status} {text}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use super::backend::{BackendError, CallTarget, FailureKind, ToolBackend};
 use super::emulation;
 use super::types::{ToolChatRequest, ToolChatResponse, Usage};
 use crate::chat_provider::PROVIDER_ERROR;
-use crate::upstream::is_account_refusal;
+use crate::upstream::limit_refusal;
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError};
 
 pub struct ChatProviderBackend {
@@ -31,7 +31,9 @@ fn provider_error(error: ChatProviderError) -> BackendError {
     let (Some(status), Some(reason)) = (error.upstream_status(), error.upstream_reason()) else {
         return BackendError::new(FailureKind::Unavailable, PROVIDER_ERROR);
     };
-    let kind = if status == 429 || is_account_refusal(reason) {
+    let kind = if reason == PROVIDER_ERROR {
+        FailureKind::InvalidOutput
+    } else if limit_refusal(Some(status), reason) {
         FailureKind::Limit
     } else {
         FailureKind::Unavailable
@@ -93,10 +95,7 @@ impl ToolBackend for ChatProviderBackend {
             response.usage.completion_tokens,
         ) {
             (Some(prompt_tokens), Some(output_tokens)) => {
-                let cache_read = response
-                    .usage
-                    .cached_tokens
-                    .map(|cached| cached.min(prompt_tokens));
+                let cache_read = response.usage.cached_tokens;
                 Some(Usage {
                     input_tokens: prompt_tokens.saturating_sub(cache_read.unwrap_or(0)),
                     output_tokens,
@@ -202,7 +201,7 @@ mod tests {
             (Some(60), 40, Some(60)),
             (Some(0), 100, Some(0)),
             (None, 100, None),
-            (Some(500), 0, Some(100)),
+            (Some(100), 0, Some(100)),
         ] {
             let response = completed(Arc::new(Answered(Ok(served(answer, cached)))))
                 .await
@@ -235,7 +234,7 @@ mod tests {
         };
         assert_eq!(
             completed(Arc::new(Answered(Err(unusable)))).await,
-            Err((FailureKind::Unavailable, "provider_error", Some(200)))
+            Err((FailureKind::InvalidOutput, "provider_error", Some(200)))
         );
         let unreported = completed(MockChatProvider::new(vec![Ok(served(answer, None))]))
             .await

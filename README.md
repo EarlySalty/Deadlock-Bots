@@ -32,10 +32,12 @@ Follow `/home/nathanael/Documents/claude-config/machines/v50671/RUST-BUILDS.md` 
 
 ## Deploy
 
-Releases live in `/opt/deadlock/bots/releases/<sha>`. `/opt/deadlock/bots/current` is a symlink to the active release, and `/opt/deadlock/bots/rollback` keeps the previous one. The release installer is `rust/bin/dl-bot/examples/install_discord_release.rs`; it takes eight arguments (source worktree, then artefact and SHA256 for `dl-bot`, with the commit between them, for `dl-ai-gateway` and for `dl-unit-failure-notify`), installs the gateway config and the units `dl-ai-gateway.service` and `dl-community-points-sync.service` from the repo, flips the `current` symlink, restarts `dl-bot` and the gateway and waits until the gateway answers `/healthz`; when it does not, the installer puts config, units and symlink back. It applies no migrations: apply them before the switch. Units the installer does not restart need a manual restart:
+Releases live in `/opt/deadlock/bots/releases/<sha>`. `/opt/deadlock/bots/current` is a symlink to the active release. The release installer is `rust/bin/dl-bot/examples/install_discord_release.rs`; it takes eight arguments (source worktree, then artefact and SHA256 for `dl-bot`, with the commit between them, for `dl-ai-gateway` and for `dl-unit-failure-notify`). It copies the active release, replaces these three binaries, keeps `dl-web` and `dl-infisical-env` unchanged, installs the gateway config and the units `dl-ai-gateway.service` and `dl-community-points-sync.service` from the repo, flips the `current` symlink, restarts `deadlock-bot-rust.service` and `dl-ai-gateway.service` and waits until the gateway answers `/healthz`. The wait is the gateway's own start budget from the installed config plus a margin. When the gateway does not answer in that time, the installer puts config, units and symlink back, restarts both units again and waits for the previous gateway the same way. It keeps no separate rollback pointer: the previous release stays in `releases/`, and the failed one stays there too and is reused by the next run for the same commit. It applies no migrations: apply them before the switch.
+
+The installer does not restart `deadlock-web-rust.service`. Its binary is carried over unchanged, so a restart only moves the process onto the new release path:
 
 ```bash
-systemctl --user restart deadlock-bot-rust.service deadlock-web-rust.service dl-ai-gateway.service
+systemctl --user restart deadlock-web-rust.service
 ```
 
 ## Check that it is live

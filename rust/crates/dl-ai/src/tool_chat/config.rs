@@ -27,7 +27,19 @@ pub struct AlarmConfig {
     pub notify_timeout_secs: u64,
 }
 
+pub const READINESS_CHILDREN: usize = 2;
+const POOL_CONNECT_ALLOWANCE_SECS: u64 = 10;
+
 impl AlarmConfig {
+    pub fn start_budget(&self) -> Duration {
+        let children = u64::try_from(READINESS_CHILDREN).unwrap_or(u64::MAX);
+        let budget_secs = children
+            .saturating_mul(self.notify_timeout_secs)
+            .saturating_add(POOL_CONNECT_ALLOWANCE_SECS)
+            .saturating_add(self.scan_interval_secs);
+        Duration::from_secs(budget_secs)
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if [&self.notify_config, &self.credential]
             .iter()
@@ -154,9 +166,18 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+#[derive(Deserialize)]
+struct ListenOnly {
+    listen: SocketAddr,
+}
+
 impl GatewayConfig {
     pub fn load(path: &std::path::Path) -> Result<Self, ConfigError> {
         Self::parse(&std::fs::read_to_string(path)?)
+    }
+
+    pub fn listen_address(path: &std::path::Path) -> Result<SocketAddr, ConfigError> {
+        Ok(toml::from_str::<ListenOnly>(&std::fs::read_to_string(path)?)?.listen)
     }
 
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
@@ -360,6 +381,18 @@ notify_timeout_secs = 75
         assert_eq!(targets[0].retry_backoff, Duration::ZERO);
         assert_eq!(targets[0].deadline, Duration::from_secs(150));
         assert_eq!(targets[1].deadline, Duration::from_secs(150));
+    }
+
+    #[test]
+    fn the_start_budget_covers_both_readiness_children_the_pool_and_the_first_scan() {
+        let alarm = GatewayConfig::parse(SAMPLE).expect("valid config").alarm;
+        assert_eq!(alarm.start_budget().as_secs(), 220);
+        let longer = GatewayConfig::parse(
+            &SAMPLE.replace("notify_timeout_secs = 75", "notify_timeout_secs = 300"),
+        )
+        .expect("valid config")
+        .alarm;
+        assert_eq!(longer.start_budget().as_secs(), 670);
     }
 
     #[test]

@@ -3,11 +3,17 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dl_ai::tool_chat::{AlarmConfig, Delivery, Refusal, RefusalAlarm, RefusalNotifier};
-use dl_ai::upstream::{protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT, HELPER_BINARY};
+use dl_ai::tool_chat::{
+    AlarmConfig, Delivery, Refusal, RefusalAlarm, RefusalNotifier, READINESS_CHILDREN,
+};
+use dl_ai::upstream::{
+    protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT, HELPER_BINARY, SYSTEMCTL,
+};
 
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const NO_HELPER: &str = "the release ships no protected notify helper next to the gateway";
+const NO_CONTRACT: &str = "notify helper does not accept this config, credential and contract";
+const ON_FAILURE_PROPERTY: &str = "OnFailure";
 const SCAN_LIMIT: i64 = 256;
 
 pub struct ProcessNotifier {
@@ -149,23 +155,39 @@ async fn run(
     }
 }
 
-pub async fn readiness(config: &AlarmConfig, binary: &Path) -> Vec<&'static str> {
+fn unwired() -> String {
+    format!("{GATEWAY_UNIT} has no {ON_FAILURE_PROPERTY} alarm")
+}
+
+pub async fn readiness(config: &AlarmConfig, binary: &Path) -> Vec<String> {
     let mut missing = Vec::new();
     if protected_path(binary, false).is_err() || !executable(binary) {
-        missing.push(NO_HELPER);
+        missing.push(NO_HELPER.to_owned());
     }
     let mut handshake = helper(config, binary);
     handshake.arg("--contract");
-    let spoken = output(handshake, config.notify_timeout())
-        .await
-        .is_ok_and(|stdout| stdout.lines().any(|line| line.trim() == CONTRACT));
-    if !spoken {
-        missing.push("notify helper does not accept this config, credential and contract");
-    }
-    if !on_failure_wired(config.notify_timeout()).await {
-        missing.push("dl-ai-gateway.service has no OnFailure alarm");
+    let children: [Child; READINESS_CHILDREN] = [
+        (handshake, speaks_contract, NO_CONTRACT.to_owned()),
+        (on_failure_query(), names_on_failure_unit, unwired()),
+    ];
+    for (command, accepted, reason) in children {
+        let answered = output(command, config.notify_timeout()).await;
+        if !answered.is_ok_and(|stdout| accepted(&stdout)) {
+            missing.push(reason);
+        }
     }
     missing
+}
+
+type Child = (tokio::process::Command, fn(&str) -> bool, String);
+
+fn speaks_contract(stdout: &str) -> bool {
+    stdout.lines().any(|line| line.trim() == CONTRACT)
+}
+
+fn names_on_failure_unit(stdout: &str) -> bool {
+    let wanted = on_failure_unit();
+    stdout.split_whitespace().any(|unit| unit == wanted)
 }
 
 fn executable(path: &Path) -> bool {
@@ -178,12 +200,19 @@ fn on_failure_unit() -> String {
     format!("unit-failure-notify@{GATEWAY_UNIT}.service")
 }
 
-async fn on_failure_wired(budget: Duration) -> bool {
-    let mut command = tokio::process::Command::new("/usr/bin/systemctl");
+fn on_failure_query() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(SYSTEMCTL);
     command
         .env_clear()
         .env("PATH", CHILD_PATH)
-        .args(["--user", "show", GATEWAY_UNIT, "-p", "OnFailure", "--value"])
+        .args([
+            "--user",
+            "show",
+            GATEWAY_UNIT,
+            "-p",
+            ON_FAILURE_PROPERTY,
+            "--value",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -193,10 +222,7 @@ async fn on_failure_wired(budget: Duration) -> bool {
             command.env(name, value);
         }
     }
-    output(command, budget).await.is_ok_and(|stdout| {
-        let wanted = on_failure_unit();
-        stdout.split_whitespace().any(|unit| unit == wanted)
-    })
+    command
 }
 
 fn now() -> i64 {
@@ -239,7 +265,7 @@ pub async fn watch(alarm: Arc<RefusalAlarm>, config: AlarmConfig) -> anyhow::Err
     }
 }
 
-pub fn unready(missing: &[&'static str]) -> Option<anyhow::Error> {
+pub fn unready(missing: &[String]) -> Option<anyhow::Error> {
     (!missing.is_empty()).then(|| anyhow::anyhow!("alarm not ready: {}", missing.join("; ")))
 }
 
@@ -370,13 +396,18 @@ mod tests {
 
     #[test]
     fn the_checked_on_failure_unit_is_the_one_the_shipped_unit_file_names() {
-        let unit = include_str!("../../../../service/systemd/dl-ai-gateway.service");
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../service/systemd")
+            .join(GATEWAY_UNIT);
+        let unit = std::fs::read_to_string(shipped).expect("shipped unit");
+        let key = format!("{ON_FAILURE_PROPERTY}=");
         let wired: Vec<String> = unit
             .lines()
-            .filter_map(|line| line.strip_prefix("OnFailure="))
+            .filter_map(|line| line.strip_prefix(key.as_str()))
             .map(|target| target.replace("%n", GATEWAY_UNIT))
             .collect();
         assert_eq!(wired, [on_failure_unit()]);
+        assert!(unwired().starts_with(GATEWAY_UNIT));
     }
 
     #[tokio::test]
@@ -384,12 +415,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let old_helper = script(dir.path(), "old", "exit 2");
         let missing = readiness(&config(Path::new("/nonexistent/c")), &old_helper).await;
-        assert!(
-            missing.contains(&"notify helper does not accept this config, credential and contract")
-        );
+        assert!(missing.iter().any(|reason| reason == NO_CONTRACT));
         let absent = Path::new("/nonexistent/notify");
         let missing = readiness(&config(Path::new("/run/c")), absent).await;
-        assert!(missing.contains(&NO_HELPER));
+        assert!(missing.iter().any(|reason| reason == NO_HELPER));
         let shipped = sibling_helper().expect("sibling");
         assert_eq!(shipped.file_name(), Some(OsStr::new(HELPER_BINARY)));
         assert_eq!(

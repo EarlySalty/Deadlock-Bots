@@ -153,7 +153,11 @@ pub enum ChatProviderError {
     #[error("LLM provider rate limited")]
     RateLimit,
     #[error("LLM provider authentication failed")]
-    Auth { status: u16, reason: &'static str },
+    Auth {
+        status: u16,
+        reason: &'static str,
+        hinweis: Option<String>,
+    },
     #[error("LLM provider error: {}", statusteil(.0))]
     Provider(String),
     #[error("LLM provider error: {}", statusteil(.hinweis))]
@@ -186,12 +190,17 @@ impl ChatProviderError {
     pub fn upstream(status: u16, rohtext: &str, account: Account) -> Self {
         let words = crate::usage::error_words(rohtext.as_bytes());
         let reason = refusal_reason(status, &words, account);
+        let refused = is_account_refusal(reason);
         match StatusCode::from_u16(status) {
-            Ok(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => Self::Auth { status, reason },
+            Ok(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => Self::Auth {
+                status,
+                reason,
+                hinweis: refused.then(|| hinweis(status, rohtext, refused)),
+            },
             Ok(StatusCode::TOO_MANY_REQUESTS) => Self::RateLimit,
             _ => Self::Upstream {
                 status,
-                hinweis: hinweis(status, rohtext, is_account_refusal(reason)),
+                hinweis: hinweis(status, rohtext, refused),
                 reason,
             },
         }
@@ -229,6 +238,10 @@ impl ChatProviderError {
             Self::Provider(hinweis) | Self::Upstream { hinweis, .. } => {
                 format!("LLM provider error: {hinweis}")
             }
+            Self::Auth {
+                hinweis: Some(hinweis),
+                ..
+            } => format!("{self}: {hinweis}"),
             andere => andere.to_string(),
         }
     }
@@ -1259,10 +1272,11 @@ async fn send_json_with_retry(
         if !status.is_success() {
             let retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
             let retrying = retryable && attempt < retry.max_retries;
-            let rohtext = if retrying {
+            let unread = retrying || status == StatusCode::TOO_MANY_REQUESTS;
+            let rohtext = if unread {
                 String::new()
             } else {
-                response.text().await.unwrap_or_default()
+                refusal_text(response).await
             };
             if let Some(tracked) = tracked.take() {
                 tracked
@@ -1306,7 +1320,19 @@ async fn send_json_with_retry(
             }
             return Err(error);
         }
-        let body = match response.json::<Value>().await {
+        let Some(bytes) = crate::bounded_response(response, crate::MAX_API_RESPONSE_BYTES).await
+        else {
+            if let Some(tracked) = tracked.take() {
+                tracked
+                    .finish_before(None, Some(crate::usage::code::RESPONSE_BODY), deadline)
+                    .await;
+            }
+            return Err(ChatProviderError::Provider(
+                "response body unreadable or too large".into(),
+            )
+            .answered(status.as_u16()));
+        };
+        let body = match serde_json::from_slice::<Value>(&bytes) {
             Ok(body) => body,
             Err(_) => {
                 if let Some(tracked) = tracked.take() {
@@ -1321,7 +1347,7 @@ async fn send_json_with_retry(
         if let Some(tracked) = tracked.take() {
             let error = parse_openai_chat_response(&body)
                 .is_err()
-                .then_some("invalid_output");
+                .then_some(FailureKind::InvalidOutput.ledger_code());
             tracked.finish_before(Some(&body), error, deadline).await;
         }
         return Ok(HttpJsonResult {
@@ -1334,6 +1360,13 @@ async fn send_json_with_retry(
     Err(ChatProviderError::Provider(
         "retry loop exhausted unexpectedly".to_string(),
     ))
+}
+
+async fn refusal_text(response: reqwest::Response) -> String {
+    crate::bounded_response(response, crate::MAX_API_RESPONSE_BYTES)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
 }
 
 /// Trennt den Teil, den wir selbst formulieren, vom Wortlaut des Anbieters.
@@ -2630,7 +2663,8 @@ mod tests {
             auth,
             ChatProviderError::Auth {
                 status: 401,
-                reason: "http_401"
+                reason: "http_401",
+                hinweis: None,
             }
         );
         assert_eq!(auth_attempts, 1);
@@ -2659,7 +2693,8 @@ mod tests {
             err,
             ChatProviderError::Auth {
                 status: 401,
-                reason: "http_401"
+                reason: "http_401",
+                hinweis: None,
             }
         );
 
@@ -2712,44 +2747,75 @@ mod tests {
 
     #[tokio::test]
     async fn refusals_carry_the_reason_decided_from_status_body_and_account() {
-        let upstream = |status, body, reason| ChatProviderError::Upstream {
+        let upstream = |status, hinweis: &str, reason| ChatProviderError::Upstream {
             status,
-            hinweis: hinweis(status, body, is_account_refusal(reason)),
+            hinweis: hinweis.to_owned(),
             reason,
         };
+        let account_stop = |status: u16, said: &str| {
+            format!("HTTP {status}: Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen.{ANBIETER_MARKER}{said}")
+        };
+        let said = |body: &str| {
+            serde_json::from_str::<Value>(body).expect("fixture")["error"]["message"]
+                .as_str()
+                .expect("message")
+                .to_owned()
+        };
+        let credit_stop = |status| account_stop(status, &said(CREDIT_BODY));
+        let usage_stop = |status| account_stop(status, &said(USAGE_BODY));
+        let unauthenticated = "LLM provider authentication failed";
         let billed = refused(metered(403, CREDIT_BODY).await).await;
         assert_eq!(
             billed,
             ChatProviderError::Auth {
                 status: 403,
-                reason: "billing"
+                reason: "billing",
+                hinweis: Some(credit_stop(403)),
             }
         );
-        assert_eq!(billed.to_string(), "LLM provider authentication failed");
+        assert_eq!(billed.to_string(), unauthenticated);
+        assert_eq!(
+            billed.transparenz_wortlaut(),
+            format!("{unauthenticated}: {}", credit_stop(403))
+        );
+        for plain in [
+            refused(metered(403, "").await).await,
+            refused(metered(403, r#"{"error":{"message":"forbidden"}}"#).await).await,
+            refused(metered(401, CREDIT_BODY).await).await,
+        ] {
+            assert!(matches!(
+                plain,
+                ChatProviderError::Auth { hinweis: None, .. }
+            ));
+            assert_eq!(plain.transparenz_wortlaut(), unauthenticated);
+        }
         assert_eq!(
             refused(metered(403, "").await).await,
             ChatProviderError::Auth {
                 status: 403,
-                reason: "http_403"
+                reason: "http_403",
+                hinweis: None,
             }
         );
-        for body in [CREDIT_BODY, USAGE_BODY] {
-            assert_eq!(
-                refused(metered(400, body).await).await,
-                upstream(400, body, "billing")
-            );
-        }
+        assert_eq!(
+            refused(metered(400, CREDIT_BODY).await).await,
+            upstream(400, &credit_stop(400), "billing")
+        );
+        assert_eq!(
+            refused(metered(400, USAGE_BODY).await).await,
+            upstream(400, &usage_stop(400), "billing")
+        );
         assert_eq!(
             refused(metered(429, USAGE_BODY).await).await,
             ChatProviderError::RateLimit
         );
         assert_eq!(
             refused(token_plan(400, USAGE_BODY).await).await,
-            upstream(400, USAGE_BODY, "usage_limit")
+            upstream(400, &usage_stop(400), "usage_limit")
         );
         assert_eq!(
             refused(token_plan(400, CREDIT_BODY).await).await,
-            upstream(400, CREDIT_BODY, "billing")
+            upstream(400, &credit_stop(400), "billing")
         );
         assert_eq!(
             refused(token_plan(429, USAGE_BODY).await).await,
@@ -2763,7 +2829,8 @@ mod tests {
             refused(token_plan(403, USAGE_BODY).await).await,
             ChatProviderError::Auth {
                 status: 403,
-                reason: "usage_limit"
+                reason: "usage_limit",
+                hinweis: Some(usage_stop(403)),
             }
         );
         assert_eq!(
@@ -2772,7 +2839,7 @@ mod tests {
         );
         assert_eq!(billed.upstream_reason(), Some("billing"));
         assert_eq!(
-            upstream(503, "", "http_5xx").upstream_reason(),
+            upstream(503, "HTTP 503", "http_5xx").upstream_reason(),
             Some("http_5xx")
         );
         assert_eq!(ChatProviderError::Timeout.upstream_reason(), None);
@@ -2783,7 +2850,7 @@ mod tests {
         for status in [0, 200, 302, 418, 600, 999] {
             assert_eq!(
                 ChatProviderError::upstream(status, "", Account::Metered),
-                upstream(status, "", "http_status")
+                upstream(status, &format!("HTTP {status}"), "http_status")
             );
         }
     }
@@ -2845,6 +2912,8 @@ mod tests {
                 .cached_tokens
         };
         assert_eq!(cached(json!({"cached_tokens": 4})), Some(4));
+        assert_eq!(cached(json!({"cached_tokens": 9})), Some(9));
+        assert_eq!(cached(json!({"cached_tokens": 500})), Some(9));
         assert_eq!(cached(json!({"cached_tokens": 0})), Some(0));
         assert_eq!(cached(json!({})), None);
         assert_eq!(cached(json!({"cached_tokens": -1})), None);

@@ -35,7 +35,7 @@ impl Drop for Entry {
     }
 }
 
-pub fn credential(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+pub fn credential(path: &Path) -> Result<Zeroizing<String>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -51,16 +51,16 @@ pub fn credential(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
     if bytes.is_empty() || bytes.len() > 8192 {
         bail!("Infisical-Credential hat eine ungültige Größe.");
     }
-    Ok(bytes)
-}
-
-pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<String>> {
-    let credential = credential(path)?;
-    let token = std::str::from_utf8(&credential)
+    std::str::from_utf8(&bytes)
         .ok()
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))
-        .context("Infisical-Credential ist ungültig.")?;
+        .map(|value| Zeroizing::new(value.to_owned()))
+        .context("Infisical-Credential ist ungültig.")
+}
+
+pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<String>> {
+    let token = credential(path)?;
     let client = uplink_infisical_transport::client_builder(&config.infisical_socket, 0)
         .map_err(|_| anyhow::anyhow!("Geschützte Infisical-Gegenstelle ist nicht verfügbar."))?
         .timeout(Duration::from_secs(INFISICAL_TIMEOUT_SECS))
@@ -79,7 +79,7 @@ pub async fn broker_token(config: &Config, path: &Path) -> Result<Zeroizing<Stri
             ("includeImports", "true"),
             ("recursive", "false"),
         ])
-        .bearer_auth(token)
+        .bearer_auth(token.as_str())
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("Infisical ist nicht erreichbar."))?;
