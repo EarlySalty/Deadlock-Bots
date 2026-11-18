@@ -104,3 +104,30 @@ Lost round. The final round was called on b8053f13 at about 10:08 and ended with
 - REAL: `HostFiles::keep` chained its steps with `?`, the form 1014c510 removed from the rollback.
 
 All three are closed in the commit that follows 4a4c3d4c on this branch. What the bot proof shows and what it does not is stated in that commit. The answer is cut off after the installer file, so it says nothing about the other files.
+
+## 6. Addendum 2026-11-18: claims of the commit texts tested at HEAD
+
+Commands run from `rust/` at f6f1a09e. "Production part" means the file up to its `#[cfg(test)]` line.
+
+Two corrections of f6f1a09e and of section 5 above:
+- Both say 1014c510 moved the rollback to "attempt every step". Wrong commit. `git log -S'fn every(' --format=%h -- bin/dl-bot/examples/install_discord_release.rs` prints `662a823d`: that commit wrote `every` and put the rollback on it. 1014c510 put `restart()` on it (its text: "`restart()` attempts both restarts and reports both errors"). `keep()` was missed by both.
+- f6f1a09e describes a sweep of the other files without the command. The sweep: for each `.rs` file of `git diff --name-only origin/main...HEAD`, string literals of four or more characters that occur twice or more in the production part and at least once on a line this branch added. Result, 20 values:
+  - `bin/dl-ai-gateway/src/alarm.rs`: `AI_GATEWAY_ALARM_FAILED` (two log events), `PATH` and `HOME` (environment of the two child commands).
+  - `bin/dl-unit-failure-notify/src/main.rs`: `event_mode`, `devfeed_429`, `provider_refusal`, `install` (clap attribute strings, which take literals).
+  - `crates/dl-ai/src/chat_provider.rs`: `LLM provider error: {}` (two `#[error]` attributes of this branch plus one from main), `minimax`, `mistral`, `Authorization`, `Bearer {}` (same count on main and at HEAD: 7, 8, 3, 3).
+  - `crates/dl-ai/src/tool_chat/anthropic_http.rs`: the JSON keys `system`, `tools`, `type`, `text`, and `cache_control`, which this branch writes at two places (the last tool and the system block).
+  - `crates/dl-ai/src/tool_chat/claude_plan.rs`: the JSON key `usage`. `crates/dl-ai/src/tool_chat/types.rs`: `Option::is_none` in two serde attributes.
+  - `crates/dl-provider-refusal/src/lib.rs`: `billing`, once as the reason code `BILLING` and once as a text marker searched in provider messages.
+  These stay as they are. No commit of this branch may be read as claiming one source for them; f6f1a09e's wording "provider names that are on main" covers four of the 20 values, not the list.
+
+Claims of the earlier fix commits, each with its test:
+- dcedab49, "`HELPER_BINARY` names the helper once": `grep -rn '"dl-unit-failure-notify"' --include=*.rs --include=Cargo.toml bin crates` prints two lines, the package name in `bin/dl-unit-failure-notify/Cargo.toml:2` and the constant in `crates/dl-provider-refusal/src/lib.rs:35`. The helper's test compares its package name with the constant.
+- 4a4c3d4c, "`GATEWAY_BINARY` and `GATEWAY_UNIT` come from one literal": `grep -rn '"dl-ai-gateway' --include=*.rs bin crates` prints one line, `crates/dl-provider-refusal/src/lib.rs:9`.
+- 1014c510, "`HEALTH_PATH` names the route for the gateway router and for the installer's probe": `grep -rn '"/healthz"' --include=*.rs bin/dl-ai-gateway crates/dl-ai crates/dl-provider-refusal bin/dl-unit-failure-notify` prints one line, the constant. dl-bot's own `/healthz` route in `bin/dl-bot/src/mcp.rs` is another service and not touched.
+- 1014c510, "the writers in usage.rs, chat_provider.rs, lib.rs, chat_backend.rs and anthropic_http.rs use the same names": a grep of the production parts of these five files for the ledger code words as string literals prints the constant definitions (`usage.rs:16-18`, `chat_provider.rs:171`) and the word `transport` twice: `chat_provider.rs:1463` (a log word of `request_error_kind`, on main at `:1330`) and `anthropic_http.rs:219` (a reason, on main at `:204`, the same word as the ledger code of `FailureKind::Unavailable` in `backend.rs:31`). Neither is a ledger code written at that place, and neither line is changed by this branch. Stated, not closed.
+- dcedab49 and 4a4c3d4c on status numbers: a grep of the production parts of `anthropic_http.rs`, `chat_backend.rs`, `claude_plan.rs`, `tool_chat/alarm.rs` and `chat_provider.rs` for `402`, `412`, `429`, `529` prints three lines, all comments in `chat_provider.rs` (`:27`, `:272`, `:1391`).
+- dcedab49, "round-trip test for every variant": the tests iterate `RefusalKind::ALL`, `Class::ALL` and `Outcome::ALL` (`dl-provider-refusal/src/lib.rs:306`, `:312`, `:319`), and since 4a4c3d4c `worded_enum!` emits `ALL` from the same list as the enum.
+
+Not retested here:
+- f0f438e4, the migration version "above every version applied in production and every version on the open branches": a statement of 2026-11-17. It is checked against production again before the migration is applied.
+- fd2a00d9, "Every status mapper ... uses status_reason" and dcedab49, "billing has the kind Limit in every mapper": replaced by the narrower statements of 4a4c3d4c ("Not claimed" paragraph).
