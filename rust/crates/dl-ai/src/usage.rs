@@ -11,6 +11,14 @@ use crate::tool_chat::FailureKind;
 use crate::upstream::{refusal_reason, safe_code, Account};
 use crate::{ChatMessage, ChatParams, ChatProvider, ChatProviderError, ChatResponse};
 
+pub mod code {
+    pub const CANCELLED: &str = "cancelled";
+    pub const HTTP_ERROR: &str = "http_error";
+    pub const INVALID_JSON: &str = "invalid_json";
+    pub const RESPONSE_BODY: &str = "response_body";
+    pub const LOCAL: [&str; 4] = [CANCELLED, HTTP_ERROR, INVALID_JSON, RESPONSE_BODY];
+}
+
 static LEDGER: OnceCell<(PgPool, &'static str)> = OnceCell::const_new();
 tokio::task_local! { static PURPOSE: String; }
 #[cfg(test)]
@@ -285,7 +293,7 @@ impl Attempt {
                 total: None,
                 request_id: None,
                 success: false,
-                error_code: Some("cancelled".into()),
+                error_code: Some(code::CANCELLED.into()),
                 http_status: None,
                 latency_ms: 0,
                 error_reason: None,
@@ -384,7 +392,8 @@ impl Attempt {
 
     pub async fn finish_refused_before(mut self, body: &[u8], account: Account, deadline: Instant) {
         self.refuse(body, account);
-        self.finish_before(None, Some("http_error"), deadline).await;
+        self.finish_before(None, Some(code::HTTP_ERROR), deadline)
+            .await;
     }
 
     fn refuse(&mut self, body: &[u8], account: Account) {
@@ -471,12 +480,10 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
             .as_deref()
             .is_some_and(|value| !safe_code(value))
         || completion.error_code.as_deref().is_some_and(|value| {
-            !matches!(
-                value,
-                "cancelled" | "http_error" | "invalid_json" | "response_body"
-            ) && !FailureKind::ALL
-                .iter()
-                .any(|kind| kind.ledger_code() == value)
+            !code::LOCAL.contains(&value)
+                && !FailureKind::ALL
+                    .iter()
+                    .any(|kind| kind.ledger_code() == value)
         })
     {
         return Err(sqlx::Error::Protocol(
@@ -554,7 +561,7 @@ mod tests {
             total: None,
             request_id: None,
             success: false,
-            error_code: Some("cancelled".into()),
+            error_code: Some(code::CANCELLED.into()),
             http_status: None,
             latency_ms: 12,
             error_reason: None,
@@ -582,7 +589,7 @@ mod tests {
                     total: None,
                     request_id: None,
                     success: false,
-                    error_code: Some("cancelled".into()),
+                    error_code: Some(code::CANCELLED.into()),
                     http_status,
                     latency_ms: 0,
                     error_reason: None,

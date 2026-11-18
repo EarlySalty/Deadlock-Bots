@@ -482,7 +482,13 @@ impl FireworksClient {
             .ok()?;
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            attempt.finish_before(None, Some("timeout"), deadline).await;
+            attempt
+                .finish_before(
+                    None,
+                    Some(tool_chat::FailureKind::Timeout.ledger_code()),
+                    deadline,
+                )
+                .await;
             return None;
         }
         let response = match request.timeout(remaining).send().await {
@@ -492,9 +498,9 @@ impl FireworksClient {
                     .finish_before(
                         None,
                         Some(if error.is_timeout() {
-                            "timeout"
+                            tool_chat::FailureKind::Timeout.ledger_code()
                         } else {
-                            "transport"
+                            tool_chat::FailureKind::Unavailable.ledger_code()
                         }),
                         deadline,
                     )
@@ -514,7 +520,7 @@ impl FireworksClient {
         }
         let Some(bytes) = bounded_response(response, MAX_API_RESPONSE_BYTES).await else {
             attempt
-                .finish_before(None, Some("response_body"), deadline)
+                .finish_before(None, Some(usage::code::RESPONSE_BODY), deadline)
                 .await;
             return None;
         };
@@ -522,7 +528,7 @@ impl FireworksClient {
             Ok(data) => data,
             Err(_) => {
                 attempt
-                    .finish_before(None, Some("invalid_json"), deadline)
+                    .finish_before(None, Some(usage::code::INVALID_JSON), deadline)
                     .await;
                 return None;
             }

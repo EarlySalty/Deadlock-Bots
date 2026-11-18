@@ -8,8 +8,10 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::time::sleep;
 
+use crate::tool_chat::FailureKind;
 use crate::upstream::{
-    billing_status, refusal_reason, request_error_status, status_reason, Account,
+    billing_status, is_account_refusal, refusal_reason, request_error_status, status_reason,
+    Account,
 };
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
@@ -189,7 +191,7 @@ impl ChatProviderError {
             Ok(StatusCode::TOO_MANY_REQUESTS) => Self::RateLimit,
             _ => Self::Upstream {
                 status,
-                hinweis: anbieter_hinweis(status, rohtext),
+                hinweis: hinweis(status, rohtext, is_account_refusal(reason)),
                 reason,
             },
         }
@@ -1213,7 +1215,9 @@ async fn send_json_with_retry(
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             if let Some(tracked) = tracked.take() {
-                tracked.finish_before(None, Some("timeout"), deadline).await;
+                tracked
+                    .finish_before(None, Some(FailureKind::Timeout.ledger_code()), deadline)
+                    .await;
             }
             return Err(ChatProviderError::Timeout);
         }
@@ -1222,7 +1226,9 @@ async fn send_json_with_retry(
             Ok(response) => response,
             Err(err) if err.is_timeout() => {
                 if let Some(tracked) = tracked.take() {
-                    tracked.finish_before(None, Some("timeout"), deadline).await;
+                    tracked
+                        .finish_before(None, Some(FailureKind::Timeout.ledger_code()), deadline)
+                        .await;
                 }
                 tracing::warn!(
                     provider = provider,
@@ -1234,7 +1240,7 @@ async fn send_json_with_retry(
             Err(err) => {
                 if let Some(tracked) = tracked.take() {
                     tracked
-                        .finish_before(None, Some("transport"), deadline)
+                        .finish_before(None, Some(FailureKind::Unavailable.ledger_code()), deadline)
                         .await;
                 }
                 tracing::warn!(
@@ -1305,7 +1311,7 @@ async fn send_json_with_retry(
             Err(_) => {
                 if let Some(tracked) = tracked.take() {
                     tracked
-                        .finish_before(None, Some("invalid_json"), deadline)
+                        .finish_before(None, Some(crate::usage::code::INVALID_JSON), deadline)
                         .await;
                 }
                 return Err(ChatProviderError::Provider("invalid JSON response".into())
@@ -1353,13 +1359,17 @@ pub fn statusteil(hinweis: &str) -> &str {
 /// niemandem, dass das Fireworks-Konto wegen einer offenen Rechnung gesperrt
 /// ist; genau das stand aber im Body, den vorher niemand gelesen hat.
 pub fn anbieter_hinweis(status: u16, rohtext: &str) -> String {
+    hinweis(status, rohtext, false)
+}
+
+fn hinweis(status: u16, rohtext: &str, account_refused: bool) -> String {
     let meldung = anbieter_meldung(rohtext);
     let deutung = match status {
-        404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
-        413 => Some("Anfrage zu gross"),
-        _ if billing_status(status) => {
+        _ if account_refused || billing_status(status) => {
             Some("Anbieter-Konto gesperrt oder Limit erreicht, Abrechnung beim Anbieter pruefen")
         }
+        404 => Some("Modell oder Endpunkt gibt es dort nicht, Modellnamen pruefen"),
+        413 => Some("Anfrage zu gross"),
         _ if request_error_status(status) => {
             Some("Anfrage abgelehnt, meist ein ungueltiger Parameter")
         }
@@ -2704,7 +2714,7 @@ mod tests {
     async fn refusals_carry_the_reason_decided_from_status_body_and_account() {
         let upstream = |status, body, reason| ChatProviderError::Upstream {
             status,
-            hinweis: anbieter_hinweis(status, body),
+            hinweis: hinweis(status, body, is_account_refusal(reason)),
             reason,
         };
         let billed = refused(metered(403, CREDIT_BODY).await).await;

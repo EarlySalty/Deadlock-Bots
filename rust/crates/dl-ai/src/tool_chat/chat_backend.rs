@@ -83,7 +83,7 @@ impl ToolBackend for ChatProviderBackend {
         let output = json_payload(&crate::strip_think(&response.content)).ok_or_else(|| {
             answered(BackendError::new(
                 FailureKind::InvalidOutput,
-                "invalid_json",
+                crate::usage::code::INVALID_JSON,
             ))
         })?;
         let (content, stop_reason) =

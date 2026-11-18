@@ -1,4 +1,4 @@
-use dl_ai::upstream::{GATEWAY_UNIT, HELPER_BINARY};
+use dl_ai::upstream::{GATEWAY_UNIT, HEALTH_PATH, HELPER_BINARY};
 use std::{
     error::Error,
     fs::{self, File, OpenOptions},
@@ -105,9 +105,10 @@ fn as_owner(command: &[&str]) -> Result<String> {
 }
 
 fn restart() -> Result<()> {
-    as_owner(&["/usr/local/bin/bot-restart", "dl-bot"])?;
-    as_owner(&["/usr/bin/systemctl", "--user", "restart", GATEWAY_UNIT])?;
-    Ok(())
+    every(vec![
+        as_owner(&["/usr/local/bin/bot-restart", "dl-bot"]).map(drop),
+        as_owner(&["/usr/bin/systemctl", "--user", "restart", GATEWAY_UNIT]).map(drop),
+    ])
 }
 
 fn every(steps: Vec<Result<()>>) -> Result<()> {
@@ -140,7 +141,7 @@ fn listen_address(config: &str) -> Result<SocketAddr> {
 }
 
 fn serves(address: SocketAddr, attempts: u32, pause: Duration) -> Result<()> {
-    let url = format!("http://{address}/healthz");
+    let url = format!("http://{address}{HEALTH_PATH}");
     let mut last = String::new();
     for attempt in 0..attempts {
         if attempt > 0 {
@@ -321,8 +322,11 @@ impl HostFiles {
 
 fn provenance(sha: &str, checksums: [&str; 3], previous_sha: &str, base_name: &str) -> String {
     let rebuilt = REBUILT.map(|name| format!("\"{name}\"")).join(", ");
+    let units = UNITS
+        .map(|unit| unit.trim_end_matches(".service"))
+        .join(" und ");
     format!(
-        "source_sha = \"{sha}\"\nrebuilt_binaries = [{rebuilt}]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\ndl_unit_failure_notify_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot, KI-Gateway und dessen Ausfallmelder aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration und die Units dl-ai-gateway und dl-community-points-sync aus dem Repository; dieser Release wendet keine Migrationen an, Schemaänderungen laufen getrennt über dl-central-migrate\"\n",
+        "source_sha = \"{sha}\"\nrebuilt_binaries = [{rebuilt}]\ndl_bot_sha256 = \"{}\"\ndl_ai_gateway_sha256 = \"{}\"\ndl_unit_failure_notify_sha256 = \"{}\"\nretained_from_release = \"{previous_sha}\"\nretained_provenance = \"{base_name}\"\nrelease_scope = \"Discord-Bot, KI-Gateway und dessen Ausfallmelder aus demselben Quellstand; übrige Begleitbinaries unverändert übernommen; Gateway-Konfiguration und die Units {units} aus dem Repository; dieser Release wendet keine Migrationen an, Schemaänderungen laufen getrennt über dl-central-migrate\"\n",
         checksums[0], checksums[1], checksums[2]
     )
 }
@@ -892,7 +896,7 @@ mod tests {
         let address = listener.local_addr()?;
         drop(listener);
         let refused = serves(address, 2, Duration::ZERO);
-        assert!(refused.is_err_and(|error| error.to_string().contains("/healthz")));
+        assert!(refused.is_err_and(|error| error.to_string().contains(HEALTH_PATH)));
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let answer = std::thread::spawn(move || -> std::io::Result<()> {

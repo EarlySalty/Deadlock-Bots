@@ -6,6 +6,7 @@ use std::{
 
 pub const GATEWAY_UNIT: &str = "dl-ai-gateway.service";
 pub const HELPER_BINARY: &str = "dl-unit-failure-notify";
+pub const HEALTH_PATH: &str = "/healthz";
 pub const CONTRACT: &str = "dl-provider-refusal/1";
 pub const BILLING: &str = "billing";
 pub const USAGE_LIMIT: &str = "usage_limit";

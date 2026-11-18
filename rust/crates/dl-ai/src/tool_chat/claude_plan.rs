@@ -245,19 +245,18 @@ fn usage(result: &Value) -> Usage {
     }
 }
 
+const OVERLOADED: u16 = 529;
+const RATE_LIMITED: u16 = 429;
+
 fn result_failure(status: Option<u16>, text: &str) -> (FailureKind, &'static str) {
-    if let Some(code @ 529) = status {
-        (FailureKind::Overloaded, status_reason(code))
-    } else if mentions(text, &["overloaded"]) {
-        (FailureKind::Overloaded, "upstream_overloaded")
+    if status == Some(OVERLOADED) || mentions(text, &["overloaded"]) {
+        (FailureKind::Overloaded, status_reason(OVERLOADED))
     } else if mentions(text, &["limit reached"]) {
         (FailureKind::Limit, USAGE_LIMIT)
     } else if let Some(reason) = account_refusal(status, text, Account::Plan) {
         (FailureKind::Limit, reason)
-    } else if let Some(code @ 429) = status {
-        (FailureKind::Limit, status_reason(code))
-    } else if mentions(text, &["rate limit", "rate_limit"]) {
-        (FailureKind::Limit, "rate_limit")
+    } else if status == Some(RATE_LIMITED) || mentions(text, &["rate limit", "rate_limit"]) {
+        (FailureKind::Limit, status_reason(RATE_LIMITED))
     } else if text.contains("output token maximum") {
         (FailureKind::InvalidOutput, "output_token_maximum")
     } else {
@@ -390,7 +389,7 @@ mod tests {
         };
         assert_eq!(
             failure(429, "API Error: Overloaded"),
-            Some((FailureKind::Overloaded, "upstream_overloaded", Some(429)))
+            Some((FailureKind::Overloaded, "http_529", Some(429)))
         );
         assert_eq!(
             failure(529, ""),
@@ -443,7 +442,7 @@ mod tests {
         );
         assert_eq!(
             failure(500, "API Error: rate_limit_error"),
-            Some((FailureKind::Limit, "rate_limit", Some(500)))
+            Some((FailureKind::Limit, "http_429", Some(500)))
         );
         assert_eq!(
             failure(400, "bad request"),

@@ -228,7 +228,11 @@ impl ToolBackend for AnthropicHttpBackend {
         };
         let body = bounded_body(response).await.map_err(answered)?;
         let body: Value = serde_json::from_slice(&body).map_err(|_| {
-            BackendError::upstream(FailureKind::InvalidOutput, "invalid_json", code)
+            BackendError::upstream(
+                FailureKind::InvalidOutput,
+                crate::usage::code::INVALID_JSON,
+                code,
+            )
         })?;
         parse_response(&body)
             .map(|response| ToolChatResponse {

@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use dl_ai::tool_chat::{
     FailureKind, Message, RouteError, Routed, SlotRouter, StopReason, ToolChatRequest, ToolSpec,
 };
+use dl_ai::upstream::HEALTH_PATH;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -71,7 +72,7 @@ impl SystemPrompt {
 pub fn app(router: Arc<SlotRouter>, max_request_bytes: usize) -> Router {
     Router::new()
         .route("/v1/messages", post(messages))
-        .route("/healthz", get(health))
+        .route(HEALTH_PATH, get(health))
         .layer(DefaultBodyLimit::max(max_request_bytes))
         .with_state(router)
 }
