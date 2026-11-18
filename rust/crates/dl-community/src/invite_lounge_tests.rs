@@ -885,17 +885,22 @@ async fn bereits_eingeladene_bekommen_hilfe_statt_einladung() {
 
 #[tokio::test]
 async fn entscheidung_waehrend_laufendem_versand_bleibt_still() {
-    for reply in [
-        wants(InviteTurnAction::Invite, None),
-        wants(
+    for (action, text) in [
+        (InviteTurnAction::Invite, None),
+        (
             InviteTurnAction::WaitForCommunity,
             Some("Gleich schaut jemand drauf."),
         ),
-        wants(
+        (
             InviteTurnAction::AskAlreadyInvited,
             Some("Hast du schon eine Einladung bekommen?"),
         ),
     ] {
+        let decision = InviteTurnDecision {
+            intent: InviteIntent::WantsInvite,
+            action,
+            text: text.map(Into::into),
+        };
         let lounge = setup();
         let mut state = pending(true);
         if let Some(request) = state.request.as_mut() {
@@ -903,23 +908,28 @@ async fn entscheidung_waehrend_laufendem_versand_bleibt_still() {
         }
         state.dispatch_started_at_millis = Some(NOW * 1000);
         lounge.store.put(state.clone()).await;
-        lounge.decide(vec![reply]);
-        lounge
-            .post(message(2, NOW + 5, "und jetzt? 123456789"), NOW + 5)
-            .await;
-        assert_eq!(
-            turns(&lounge.brain)[0].member.phase,
-            InviteRequestPhase::InProgress
-        );
+        lounge.decide(vec![wants(action, text)]);
+        let event = message(2, NOW + 5, "und jetzt? 123456789");
+        lounge.post(event.clone(), NOW + 5).await;
+        let turn = turns(&lounge.brain).remove(0);
+        assert_eq!(turn.member.phase, InviteRequestPhase::InProgress);
+        assert!(decision.valid(), "{action:?}");
+        assert!(!decision.fits(&turn), "{action:?}");
+        let mut closed = turn.clone();
+        closed.member.phase = InviteRequestPhase::Closed;
+        assert!(decision.fits(&closed), "{action:?}");
         assert_eq!(
             lounge.store.state().await,
             LoungeState {
                 last_seen: 2,
-                ..state
+                ..state.clone()
             }
         );
         assert!(notices(&lounge.brain).is_empty());
         assert_eq!(lounge.calls().await, 0);
+        let mut untouched = state.clone();
+        invite_now(&mut untouched, &event, Some(CODE.into()));
+        assert_eq!(untouched, state);
     }
 }
 
