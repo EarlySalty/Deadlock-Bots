@@ -13,16 +13,23 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+macro_rules! owner {
+    () => {
+        "nathanael"
+    };
+}
+
 macro_rules! owner_home {
     () => {
-        "/home/nathanael"
+        concat!("/home/", owner!())
     };
 }
 
 const ROOT: &str = "/opt/deadlock/bots";
 const RELEASES: &str = "releases";
 const CURRENT: &str = "current";
-const OWNER: &str = "nathanael";
+const OWNER: &str = owner!();
+const SUPERUSER: &str = "root";
 const WORKTREES: &str = concat!(owner_home!(), "/.worktrees");
 const CONFIG_DIRECTORY: &str = concat!(owner_home!(), "/.config/deadlock-bots");
 const UNIT_DIRECTORY: &str = concat!(owner_home!(), "/.config/systemd/user");
@@ -31,6 +38,15 @@ const SOURCE_UNIT_DIRECTORY: &str = "service/systemd";
 const UNITS: [&str; 2] = [GATEWAY_UNIT, "dl-community-points-sync.service"];
 const OWNER_UID: u32 = 1000;
 const BOT_BINARY: &str = "dl-bot";
+const BOT_UNIT: &str = "deadlock-bot-rust.service";
+const RESTARTED: [&str; 2] = [BOT_UNIT, GATEWAY_UNIT];
+const BOT_SETTLED: [&str; 3] = ["ActiveState=active", "SubState=running", "NRestarts=0"];
+const BOT_SETTLE_SECS: u64 = 30;
+const RUNUSER: &str = "/usr/sbin/runuser";
+const INSTALL: &str = "/usr/bin/install";
+const COPY: &str = "/usr/bin/cp";
+const ASSETS: &str = "assets";
+const REMOTE: &str = "origin";
 const LAUNCHER: &str = "dl-infisical-env";
 const REBUILT: [&str; 3] = [BOT_BINARY, GATEWAY_BINARY, HELPER_BINARY];
 const COMPANIONS: [&str; 2] = ["dl-web", LAUNCHER];
@@ -115,15 +131,15 @@ fn source_matches(source: &Path, sha: &str) -> Result<()> {
     let git = |arguments: &[&str]| {
         let mut command = vec!["-u", OWNER, "--", "/usr/bin/git", "-C", source];
         command.extend_from_slice(arguments);
-        run("/usr/sbin/runuser", &command)
+        run(RUNUSER, &command)
     };
-    if git(&["remote", "get-url", "origin"])? != "git@github.com:EarlySalty/Deadlock-Bots.git" {
+    if git(&["remote", "get-url", REMOTE])? != "git@github.com:EarlySalty/Deadlock-Bots.git" {
         return Err("Die Quelle gehört nicht zum Discord-Bot-Repository".into());
     }
     if git(&["rev-parse", "HEAD"])? != sha || !git(&["status", "--porcelain"])?.is_empty() {
         return Err("Der Quellstand ist nicht sauber auf dem angegebenen Commit".into());
     }
-    let remote = git(&["ls-remote", "origin", "refs/heads/main"])?;
+    let remote = git(&["ls-remote", REMOTE, "refs/heads/main"])?;
     if remote.split_whitespace().next() != Some(sha) {
         return Err("Der Quellstand entspricht nicht dem aktuellen origin/main".into());
     }
@@ -140,9 +156,14 @@ fn hash(path: &Path) -> Result<String> {
         .ok_or_else(|| "Ungültiger Dateihash".into())
 }
 
+fn runtime_directory() -> String {
+    format!("/run/user/{OWNER_UID}")
+}
+
 fn as_owner(command: &[&str]) -> Result<String> {
-    let runtime = format!("XDG_RUNTIME_DIR=/run/user/{OWNER_UID}");
-    let bus = format!("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{OWNER_UID}/bus");
+    let directory = runtime_directory();
+    let runtime = format!("XDG_RUNTIME_DIR={directory}");
+    let bus = format!("DBUS_SESSION_BUS_ADDRESS=unix:path={directory}/bus");
     let mut arguments = vec![
         "-u",
         OWNER,
@@ -152,14 +173,22 @@ fn as_owner(command: &[&str]) -> Result<String> {
         bus.as_str(),
     ];
     arguments.extend_from_slice(command);
-    run("/usr/sbin/runuser", &arguments)
+    run(RUNUSER, &arguments)
+}
+
+fn user_manager(arguments: &[&str]) -> Result<String> {
+    let mut command = vec![SYSTEMCTL, "--user"];
+    command.extend_from_slice(arguments);
+    as_owner(&command)
 }
 
 fn restart() -> Result<()> {
-    every(vec![
-        as_owner(&["/usr/local/bin/bot-restart", BOT_BINARY]).map(drop),
-        as_owner(&[SYSTEMCTL, "--user", "restart", GATEWAY_UNIT]).map(drop),
-    ])
+    every(
+        RESTARTED
+            .iter()
+            .map(|unit| user_manager(&["restart", unit]).map(drop))
+            .collect(),
+    )
 }
 
 fn every(steps: Vec<Result<()>>) -> Result<()> {
@@ -236,17 +265,52 @@ fn serves(proof: &Proof, pause: Duration) -> Result<()> {
     }
 }
 
+fn bot_state() -> Result<String> {
+    let properties = BOT_SETTLED
+        .map(|line| line.split_once('=').map_or(line, |(name, _)| name))
+        .join(",");
+    user_manager(&["show", BOT_UNIT, "--property", properties.as_str()])
+}
+
+fn settled(state: &str, settle: Duration) -> Result<()> {
+    let holds = BOT_SETTLED
+        .iter()
+        .all(|expected| state.lines().any(|line| line == *expected));
+    if holds {
+        return Ok(());
+    }
+    Err(format!(
+        "{BOT_UNIT} läuft {} s nach dem Neustart nicht ohne automatischen Neustart: {}",
+        settle.as_secs(),
+        state.replace('\n', ", ")
+    )
+    .into())
+}
+
+fn bot_runs(
+    restarted: Instant,
+    settle: Duration,
+    state: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    std::thread::sleep(settle.saturating_sub(restarted.elapsed()));
+    settled(&state()?, settle)
+}
+
+fn prove(restarted: Instant, gateway: Result<Proof>) -> Result<()> {
+    every(vec![
+        gateway.and_then(|proof| serves(&proof, Duration::from_millis(SERVE_PAUSE_MILLIS))),
+        bot_runs(restarted, Duration::from_secs(BOT_SETTLE_SECS), bot_state),
+    ])
+}
+
 fn restart_and_prove(proof: &Proof) -> Result<()> {
     restart()?;
-    serves(proof, Duration::from_millis(SERVE_PAUSE_MILLIS))
+    prove(Instant::now(), Ok(*proof))
 }
 
 fn restart_and_prove_previous(config: &Path, failed: &Proof) -> Result<()> {
     restart()?;
-    serves(
-        &previous_proof(config, failed)?,
-        Duration::from_millis(SERVE_PAUSE_MILLIS),
-    )
+    prove(Instant::now(), previous_proof(config, failed))
 }
 
 fn backup_of(target: &Path) -> Result<PathBuf> {
@@ -269,7 +333,7 @@ fn stage_owner_file(origin: &Path, target: &Path, mode: &str) -> Result<PathBuf>
     }
     let staged = backup_of(target)?.with_extension("install");
     run(
-        "/usr/bin/install",
+        INSTALL,
         &[
             "-o",
             OWNER,
@@ -315,7 +379,7 @@ fn discard_backup(target: &Path) -> Result<()> {
 }
 
 fn reload_units() -> Result<()> {
-    as_owner(&[SYSTEMCTL, "--user", "daemon-reload"]).map(drop)
+    user_manager(&["daemon-reload"]).map(drop)
 }
 
 fn restore_units(installed: &[(PathBuf, bool)]) -> Result<()> {
@@ -392,10 +456,12 @@ impl HostFiles {
     }
 
     fn keep(&self) -> Result<()> {
-        discard_backup(&gateway_config())?;
-        self.units
-            .iter()
-            .try_for_each(|(target, _)| discard_backup(target))
+        every(
+            std::iter::once(gateway_config())
+                .chain(self.units.iter().map(|(target, _)| target.clone()))
+                .map(|target| discard_backup(&target))
+                .collect(),
+        )
     }
 }
 
@@ -521,16 +587,16 @@ fn reusable_candidate(
 }
 
 fn refresh_assets(source: &Path, stage: &Path) -> Result<()> {
-    let assets = stage.join("assets");
+    let assets = stage.join(ASSETS);
     if fs::symlink_metadata(&assets).is_ok() {
         fs::remove_dir_all(&assets)?;
     }
     run(
-        "/usr/bin/cp",
+        COPY,
         &[
             "-R",
             "--no-preserve=all",
-            text(&source.join("assets"))?,
+            text(&source.join(ASSETS))?,
             text(&assets)?,
         ],
     )?;
@@ -608,10 +674,7 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
     } else {
         let stage =
             TemporaryDirectory::new(&format!("{ROOT}/{RELEASES}/.stage-discord-{sha}-XXXXXXXX"))?;
-        run(
-            "/usr/bin/cp",
-            &["-a", text(&previous.join("."))?, text(&stage.0)?],
-        )?;
+        run(COPY, &["-a", text(&previous.join("."))?, text(&stage.0)?])?;
         owned(&stage.0.join(BOT_BINARY), false, 0)?;
         for name in carried_over() {
             owned(&stage.0.join(name), false, 0)?;
@@ -628,12 +691,12 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
         fs::copy(stage.0.join(provenance_file()), &base)?;
         for ((artifact, checksum), name) in artifacts.iter().zip(REBUILT) {
             run(
-                "/usr/bin/install",
+                INSTALL,
                 &[
                     "-o",
-                    "root",
+                    SUPERUSER,
                     "-g",
-                    "root",
+                    SUPERUSER,
                     "-m",
                     "0755",
                     text(artifact)?,
@@ -683,7 +746,12 @@ fn install(source: &Path, sha: &str, artifacts: &[(&Path, &str); 3]) -> Result<(
         ]);
         return Err(with_rollback(error, rollback));
     }
-    host.keep()?;
+    if let Err(error) = host.keep() {
+        return Err(format!(
+            "Der Release {sha} ist aktiv und geprüft; Sicherungen der ersetzten Dateien blieben liegen: {error}"
+        )
+        .into());
+    }
     println!(
         "Discord-Release aktiviert: {sha}; {}",
         checksum_report(&expected)
@@ -874,17 +942,20 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let source = directory.path().join("source");
         let stage = directory.path().join("stage");
-        fs::create_dir_all(source.join("assets/nested"))?;
-        fs::create_dir_all(stage.join("assets"))?;
+        let (fresh, staged) = (source.join(ASSETS), stage.join(ASSETS));
+        let (panel, emoji) = (Path::new("paten_panel.toml"), Path::new("nested/emoji.png"));
+        fs::create_dir_all(fresh.join(emoji).parent().ok_or(INVALID_TARGET)?)?;
+        fs::create_dir_all(&staged)?;
         fs::set_permissions(&stage, fs::Permissions::from_mode(0o755))?;
-        fs::write(source.join("assets/paten_panel.toml"), b"new")?;
-        fs::write(source.join("assets/nested/emoji.png"), b"png")?;
-        fs::write(stage.join("assets/paten_panel.toml"), b"old")?;
-        fs::write(stage.join("assets/stale.toml"), b"stale")?;
+        fs::write(fresh.join(panel), b"new")?;
+        fs::write(fresh.join(emoji), b"png")?;
+        fs::write(staged.join(panel), b"old")?;
+        let stale = staged.join("stale.toml");
+        fs::write(&stale, b"stale")?;
         refresh_assets(&source, &stage)?;
-        assert_eq!(fs::read(stage.join("assets/paten_panel.toml"))?, b"new");
-        assert_eq!(fs::read(stage.join("assets/nested/emoji.png"))?, b"png");
-        assert!(!stage.join("assets/stale.toml").exists());
+        assert_eq!(fs::read(staged.join(panel))?, b"new");
+        assert_eq!(fs::read(staged.join(emoji))?, b"png");
+        assert!(!stale.exists());
         Ok(())
     }
 
@@ -957,6 +1028,79 @@ mod tests {
 
     fn repository() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    fn state_of(lines: [&str; 3]) -> String {
+        lines.join("\n")
+    }
+
+    #[test]
+    fn the_bot_counts_as_running_only_when_active_without_an_automatic_restart() -> Result<()> {
+        let settle = Duration::from_secs(BOT_SETTLE_SECS);
+        settled(&state_of(BOT_SETTLED), settle)?;
+        let [active, running, unrestarted] = BOT_SETTLED;
+        let looping = [
+            [active, running, "NRestarts=1"],
+            [
+                "ActiveState=activating",
+                "SubState=auto-restart",
+                unrestarted,
+            ],
+            ["ActiveState=failed", "SubState=failed", unrestarted],
+            [active, "SubState=exited", unrestarted],
+        ];
+        for state in looping {
+            let refused = settled(&state_of(state), settle);
+            assert!(
+                refused.is_err_and(|error| error.to_string().contains(BOT_UNIT)),
+                "{state:?}"
+            );
+        }
+        assert!(settled("", settle).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_bot_proof_reads_the_state_after_the_settle_time_and_fails_with_it() -> Result<()> {
+        let settle = Duration::from_millis(SERVE_PAUSE_MILLIS / 20);
+        let restarted = Instant::now();
+        let mut read_after = None;
+        bot_runs(restarted, settle, || {
+            read_after = Some(restarted.elapsed());
+            Ok(state_of(BOT_SETTLED))
+        })?;
+        assert!(read_after.is_some_and(|waited| waited >= settle));
+        assert!(bot_runs(restarted, Duration::ZERO, || Ok(String::new())).is_err());
+        let unreadable = bot_runs(restarted, Duration::ZERO, || Err("kein Zustand".into()));
+        assert_eq!(
+            unreadable.map_err(|error| error.to_string()),
+            Err("kein Zustand".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_proven_bot_unit_is_the_one_whose_shipped_drop_in_starts_the_release_bot() -> Result<()> {
+        let drop_ins = repository()
+            .join(SOURCE_UNIT_DIRECTORY)
+            .join(format!("{BOT_UNIT}.d"));
+        let bot = Path::new(ROOT).join(CURRENT).join(BOT_BINARY);
+        let mut starts = Vec::new();
+        for entry in fs::read_dir(&drop_ins)? {
+            let content = fs::read_to_string(entry?.path())?;
+            starts.extend(
+                content
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("ExecStart="))
+                    .filter(|start| !start.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        let [start] = starts.as_slice() else {
+            return Err("genau ein ExecStart erwartet".into());
+        };
+        assert!(start.split(' ').any(|word| Some(word) == bot.to_str()));
+        Ok(())
     }
 
     #[test]
