@@ -57,6 +57,35 @@ pub async fn fetch_all_guild_members(
     }
 }
 
+pub fn member_scan_pages(member_count: u64) -> u64 {
+    member_count.div_ceil(GUILD_MEMBER_PAGE_LIMIT) + 1
+}
+
+pub fn member_scan_budget(
+    member_count: u64,
+    page_timeout: std::time::Duration,
+) -> std::time::Duration {
+    let pages = u32::try_from(member_scan_pages(member_count)).unwrap_or(u32::MAX);
+    page_timeout.saturating_mul(pages)
+}
+
+pub async fn fetch_counted_guild_members(
+    http: &serenity::http::Http,
+    guild: serenity::all::GuildId,
+    page_timeout: std::time::Duration,
+    member_count: u64,
+) -> Result<Vec<serenity::all::Member>, String> {
+    let budget = member_scan_budget(member_count, page_timeout);
+    tokio::time::timeout(budget, fetch_all_guild_members(http, guild, page_timeout))
+        .await
+        .map_err(|_| {
+            format!(
+                "Mitgliederliste mit {member_count} gemeldeten Mitgliedern nicht innerhalb von {} ms geladen",
+                budget.as_millis()
+            )
+        })?
+}
+
 pub const EMPTY_MEMBER_LIST: &str = "Mitgliederliste ist leer";
 
 fn next_member_cursor(
@@ -137,11 +166,23 @@ mod tests {
     async fn member_pages_server(
         pages: Vec<Option<Value>>,
     ) -> std::io::Result<(Http, tokio::task::JoinHandle<()>)> {
+        delayed_member_pages_server(
+            pages
+                .into_iter()
+                .map(|page| (std::time::Duration::ZERO, page))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn delayed_member_pages_server(
+        pages: Vec<(std::time::Duration, Option<Value>)>,
+    ) -> std::io::Result<(Http, tokio::task::JoinHandle<()>)> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move {
-            for page in pages {
+            for (delay, page) in pages {
                 let Ok((mut socket, _)) = listener.accept().await else {
                     return;
                 };
@@ -157,6 +198,7 @@ mod tests {
                     std::future::pending::<()>().await;
                     return;
                 };
+                tokio::time::sleep(delay).await;
                 let body = page.to_string();
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 if socket.write_all(response.as_bytes()).await.is_err() {
@@ -217,6 +259,56 @@ mod tests {
         assert_eq!(
             repeated.err().as_deref(),
             Some("Mitgliederliste blättert nicht weiter")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mitgliederscan_budget_folgt_der_gemeldeten_mitgliederzahl() {
+        let page = std::time::Duration::from_millis(100);
+        for (count, pages) in [(0, 1), (1, 2), (999, 2), (1000, 2), (1001, 3), (2000, 3)] {
+            assert_eq!(member_scan_pages(count), pages, "{count}");
+            assert_eq!(
+                member_scan_budget(count, page),
+                page * u32::try_from(pages).expect("pages")
+            );
+        }
+        assert_eq!(
+            member_scan_budget(u64::MAX, page),
+            page.saturating_mul(u32::MAX)
+        );
+    }
+
+    #[tokio::test]
+    async fn gezaehlte_mitgliederliste_endet_am_budget_der_gemeldeten_seiten() -> std::io::Result<()>
+    {
+        let page_timeout = std::time::Duration::from_millis(500);
+        let slow = std::time::Duration::from_millis(400);
+        let pages = || {
+            vec![
+                (slow, Some(json!([member_json(10), member_json(11)]))),
+                (slow, Some(json!([member_json(12)]))),
+                (slow, Some(json!([]))),
+            ]
+        };
+
+        let (http, server) = delayed_member_pages_server(pages()).await?;
+        let cut = fetch_counted_guild_members(&http, GuildId::new(1), page_timeout, 1).await;
+        server.abort();
+        assert_eq!(
+            cut.err().as_deref(),
+            Some(
+                "Mitgliederliste mit 1 gemeldeten Mitgliedern nicht innerhalb von 1000 ms geladen"
+            )
+        );
+
+        let (http, server) = delayed_member_pages_server(pages()).await?;
+        let complete =
+            fetch_counted_guild_members(&http, GuildId::new(1), page_timeout, 1001).await;
+        server.abort();
+        assert_eq!(
+            complete.map(|members| members.iter().map(|m| m.user.id.get()).collect::<Vec<_>>()),
+            Ok(vec![10, 11, 12])
         );
         Ok(())
     }

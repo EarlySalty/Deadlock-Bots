@@ -643,6 +643,11 @@ struct DiscordMessageWriteResponse {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DiscordGuildCounts {
+    approximate_member_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct NativeOnboardingPutConfig {
     prompts: Vec<NativeOnboardingPutPrompt>,
@@ -1219,10 +1224,16 @@ impl ServerSyncService {
     }
 
     async fn fetch_guild_members(&self) -> ServerSyncResult<Vec<serenity::all::Member>> {
-        crate::discord_pages::fetch_all_guild_members(
+        let counts: DiscordGuildCounts = self
+            .discord_get_json(
+                self.discord_api_url(&format!("/guilds/{}?with_counts=true", self.guild_id)),
+            )
+            .await?;
+        crate::discord_pages::fetch_counted_guild_members(
             &self.adapter.http,
             GuildId::new(self.guild_id),
             crate::discord_pages::discord_call_timeout(),
+            counts.approximate_member_count,
         )
         .await
         .map_err(ServerSyncError::internal)
