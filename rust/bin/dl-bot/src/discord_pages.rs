@@ -190,4 +190,44 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn seitenlimit_beendet_den_ganzen_serenity_aufruf_mit_aktivem_ratelimiter(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = connections.clone();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.extend([socket]);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{address}"))?)
+            .build()?;
+        let http = serenity::http::HttpBuilder::new("test-only")
+            .client(client)
+            .build();
+        assert!(http.ratelimiter.is_some());
+        let page_timeout = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            fetch_all_guild_members(&http, GuildId::new(1), page_timeout),
+        )
+        .await;
+        server.abort();
+        assert_eq!(
+            result.map(|members| members.err()),
+            Ok(Some(
+                "Zeitlimit für eine Seite der Mitgliederliste überschritten".to_string()
+            ))
+        );
+        assert!(started.elapsed() >= page_timeout);
+        assert!(connections.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        Ok(())
+    }
 }
