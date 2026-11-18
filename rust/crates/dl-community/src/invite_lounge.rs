@@ -29,6 +29,7 @@ const STATE_KV_NS: &str = "invite_lounge:requests";
 const BACKFILL_KV_NS: &str = "invite_lounge:history";
 const ACTIONS_SINCE_KEY: &str = "actions_since_v1";
 const CATCH_UP_MARK_KEY: &str = "catch_up_mark_v1";
+const TURN_FLOW_SINCE_KEY: &str = "turn_flow_since_v1";
 const USER_KEY_PREFIX: &str = "user:";
 const REQUEST_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 const DISCORD_EPOCH_MILLIS: i64 = 1_420_070_400_000;
@@ -283,6 +284,8 @@ trait LoungeStore: Send + Sync {
     async fn hidden_authors(&self, user_ids: &[u64]) -> Result<HashSet<u64>, String>;
     async fn actions_since(&self) -> Result<Option<i64>, String>;
     async fn mark_actions_since(&self, now: i64) -> Result<(), String>;
+    async fn turn_flow_since(&self) -> Result<Option<i64>, String>;
+    async fn mark_turn_flow_since(&self, now: i64) -> Result<(), String>;
     async fn catch_up_mark(&self) -> Result<Option<u64>, String>;
     async fn set_catch_up_mark(&self, message_id: u64) -> Result<(), String>;
     async fn steam_progress(
@@ -491,6 +494,30 @@ impl LoungeStore for PgLoungeStore {
             .map(|_| ())
             .map_err(|err| err.to_string()),
         }
+    }
+
+    async fn turn_flow_since(&self) -> Result<Option<i64>, String> {
+        kv::get(&self.pool, BACKFILL_KV_NS, TURN_FLOW_SINCE_KEY)
+            .await
+            .map_err(|err| err.to_string())?
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| "Ungültige Startzeit des Brain-Ablaufs".to_string())
+            })
+            .transpose()
+    }
+
+    async fn mark_turn_flow_since(&self, now: i64) -> Result<(), String> {
+        kv::set_if_absent(
+            &self.pool,
+            BACKFILL_KV_NS,
+            TURN_FLOW_SINCE_KEY,
+            &now.to_string(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| err.to_string())
     }
 
     async fn steam_progress(
@@ -1132,6 +1159,17 @@ impl InviteLoungeWatcher {
         }
     }
 
+    async fn skipped_by_old_flow(&self, status: &RequestStatus) -> Result<bool, String> {
+        let Some(check_in_at) = status.check_in_at.filter(|_| !status.asked()) else {
+            return Ok(false);
+        };
+        Ok(self
+            .store
+            .turn_flow_since()
+            .await?
+            .is_some_and(|since| check_in_at < since))
+    }
+
     async fn allows_actions(&self, created_at: i64) -> Result<bool, String> {
         Ok(self
             .store
@@ -1461,7 +1499,8 @@ impl InviteLoungeWatcher {
                 .follow_steam(user_id, &previous, &code, wait, now)
                 .await;
         }
-        let check_in_now = check_in_due(request, &previous.status, now);
+        let skipped_before = self.skipped_by_old_flow(&previous.status).await?;
+        let check_in_now = check_in_due(request, &previous.status, now, skipped_before);
         if !check_in_now && !is_due(request, &previous.status) {
             return Ok(());
         }
@@ -1477,6 +1516,12 @@ impl InviteLoungeWatcher {
             ManualInvite::None => {}
         }
         if check_in_now {
+            if skipped_before {
+                tracing::info!(
+                    user_id,
+                    "Invite-Lounge: die vorige Version hat die Nachfrage übersprungen, sie wird jetzt gestellt"
+                );
+            }
             return self.check_in(user_id, &previous, &code, now).await;
         }
         self.send_invite(user_id, &previous, &code, now).await
@@ -1822,6 +1867,7 @@ async fn watch(
     let start_mark = snowflake_at(started_at_millis);
     let mut tick = tokio::time::interval(TICK);
     let mut caught_up = false;
+    let mut flow_marked = false;
     let mut backoff = TICK;
     let mut next_catch_up = tokio::time::Instant::now();
     let mut catch_ups = tokio::task::JoinSet::new();
@@ -1864,8 +1910,16 @@ async fn watch(
                         Err(err) => tracing::warn!(%err, "Invite-Lounge-Startzeit konnte nicht gespeichert werden, der Rückblick wartet"),
                     }
                 }
-                if let Err(err) = watcher.poll_due(&mut dispatches).await {
-                    tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden");
+                if !flow_marked {
+                    match watcher.store.mark_turn_flow_since(now).await {
+                        Ok(()) => flow_marked = true,
+                        Err(err) => tracing::warn!(%err, "Invite-Lounge: Startzeit des Brain-Ablaufs konnte nicht gespeichert werden, Warteaufträge warten"),
+                    }
+                }
+                if flow_marked {
+                    if let Err(err) = watcher.poll_due(&mut dispatches).await {
+                        tracing::warn!(%err, "Invite-Lounge-Warteaufträge konnten nicht geprüft werden");
+                    }
                 }
             }
             Some(result) = catch_ups.join_next(), if !catch_ups.is_empty() => {
@@ -2189,13 +2243,18 @@ fn is_due(request: &Request, status: &RequestStatus) -> bool {
         && (request.direct || status.invite_now)
 }
 
-fn check_in_due(request: &Request, status: &RequestStatus, now: i64) -> bool {
+fn check_in_due(
+    request: &Request,
+    status: &RequestStatus,
+    now: i64,
+    skipped_by_old_flow: bool,
+) -> bool {
     status.channel_id == Some(CHECK_IN_CHANNEL_ID)
         && request.phase == Phase::Pending
         && !request.direct
         && status.wait.is_none()
         && !status.invite_now
-        && status.check_in_at.is_none()
+        && (status.check_in_at.is_none() || skipped_by_old_flow)
         && check_in_age(now.saturating_sub(request.created_at))
 }
 

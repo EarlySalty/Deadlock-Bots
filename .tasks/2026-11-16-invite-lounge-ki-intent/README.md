@@ -28,4 +28,6 @@ WHERE ns = 'invite_lounge:requests'
   AND jsonb_path_exists(v::jsonb, '$.outbox[*].update ? (@.kind == "confirmed" || @.kind == "reply")');
 ```
 
+Skipped check-ins from the old bot: the old bot skipped its 30-minute check-in when another member had answered the request and then sent the friend request after 60 minutes of silence. The new bot has no silence dispatch, so such a row (open, `check_in_at` set, no check-in notice) would wait for the member forever. On its first start the new bot stores its start time once under `invite_lounge:history` / `turn_flow_since_v1`; a row whose `check_in_at` is older than that time gets the check-in now (logged), once. A check-in the new bot itself sent and the broker dropped keeps a newer `check_in_at` and is not asked again. After a rollback and a new roll-forward, rows the old bot skipped during the rollback are newer than the stored time and stay unasked until the member writes again or the request expires after seven days. To ask them too, delete the key before the new bot starts again; that also asks once more those rows whose new-bot check-in the broker had dropped before the rollback.
+
 Deploy blocker to recheck: live dl-bot ran 59a0ac5f from the unmerged supporter branch.

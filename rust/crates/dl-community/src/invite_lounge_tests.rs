@@ -35,6 +35,7 @@ struct MemoryStore {
     known: Mutex<HashMap<u64, String>>,
     advance: Mutex<Option<ClockAdvance>>,
     actions_since: Mutex<Option<i64>>,
+    flow_since: Mutex<Option<i64>>,
     progress: Mutex<SteamProgress>,
     progress_queries: Mutex<Vec<(i64, i64)>>,
     manual: Mutex<Option<ManualInvite>>,
@@ -171,6 +172,13 @@ impl LoungeStore for MemoryStore {
     }
     async fn mark_actions_since(&self, now: i64) -> Result<(), String> {
         self.actions_since.lock().await.get_or_insert(now);
+        Ok(())
+    }
+    async fn turn_flow_since(&self) -> Result<Option<i64>, String> {
+        Ok(*self.flow_since.lock().await)
+    }
+    async fn mark_turn_flow_since(&self, now: i64) -> Result<(), String> {
+        self.flow_since.lock().await.get_or_insert(now);
         Ok(())
     }
     async fn steam_progress(
@@ -612,6 +620,80 @@ async fn nachfrage_nach_dreissig_minuten_und_nein_ohne_antwortbezug_laedt_ein() 
             .map(|request| request.phase),
         Some(Phase::Attempted)
     );
+}
+
+fn skipped_by_old_flow() -> LoungeState {
+    use merge_base as old;
+    let row = old::LoungeState {
+        last_seen: 1,
+        friend_code: Some(CODE.into()),
+        request: Some(old::Request {
+            message_id: 1,
+            created_at: NOW,
+            direct: false,
+            phase: old::Phase::Pending,
+        }),
+        status: old::RequestStatus {
+            channel_id: Some(CHECK_IN_CHANNEL_ID),
+            check_in_at: Some(NOW + CHECK_IN_SECONDS),
+            ..old::RequestStatus::default()
+        },
+        ..old::LoungeState::default()
+    };
+    let stored = serde_json::to_string(&row).expect("alte Zeile als JSON");
+    serde_json::from_str(&stored).expect("neue Version liest die alte Zeile")
+}
+
+const FLOW_SINCE: i64 = NOW + CHECK_IN_SECONDS + 60;
+
+#[tokio::test]
+async fn von_der_vorigen_version_uebersprungene_nachfrage_wird_nachgeholt() {
+    let lounge = setup();
+    *lounge.store.flow_since.lock().await = Some(FLOW_SINCE);
+    lounge.store.put(skipped_by_old_flow()).await;
+    lounge.poll(NOW + 2 * 3600).await;
+    lounge.poll(NOW + 3 * 3600).await;
+    assert_eq!(updates(&lounge.brain), vec![InviteLoungeUpdate::CheckIn {}]);
+    assert_eq!(lounge.calls().await, 0);
+    let state = lounge.store.state().await;
+    assert!(state.status.asked());
+    assert_eq!(state.status.check_in_at, Some(NOW + 2 * 3600));
+    lounge.decide(vec![wants(InviteTurnAction::Invite, None)]);
+    lounge
+        .post(
+            message(2, NOW + 3 * 3600 + 10, "nein, noch nicht"),
+            NOW + 3 * 3600 + 10,
+        )
+        .await;
+    assert_eq!(
+        turns(&lounge.brain)[0].member.phase,
+        InviteRequestPhase::CheckInAsked
+    );
+    assert_eq!(lounge.calls().await, 1);
+}
+
+#[tokio::test]
+async fn uebersprungene_nachfrage_nur_aus_der_vorigen_version_und_nur_einmal() {
+    for since in [None, Some(NOW + CHECK_IN_SECONDS)] {
+        let lounge = setup();
+        *lounge.store.flow_since.lock().await = since;
+        lounge.store.put(skipped_by_old_flow()).await;
+        lounge.poll(NOW + 2 * 3600).await;
+        assert!(notices(&lounge.brain).is_empty());
+        assert_eq!(lounge.store.state().await, skipped_by_old_flow());
+    }
+    let lounge = setup();
+    *lounge.store.flow_since.lock().await = Some(FLOW_SINCE);
+    lounge.store.put(skipped_by_old_flow()).await;
+    lounge
+        .brain
+        .script_notices(vec![Ok(ConversationReply::Rejected)]);
+    lounge.poll(NOW + 2 * 3600).await;
+    lounge.poll(NOW + 3 * 3600).await;
+    assert_eq!(notices(&lounge.brain).len(), 1);
+    assert!(lounge.outbox().await.is_empty());
+    assert!(!lounge.store.state().await.status.asked());
+    assert_eq!(lounge.calls().await, 0);
 }
 
 #[tokio::test]
@@ -2166,6 +2248,53 @@ async fn postgres_offene_phasen_und_verborgene_mitglieder_im_takt() {
     );
     assert_eq!(store.opted_out(11).await, Ok(true));
     assert_eq!(store.opted_out(USER).await, Ok(false));
+}
+
+#[cfg(feature = "testing")]
+#[tokio::test]
+async fn postgres_vorige_version_tauscht_neue_zeile_und_startzeit_bleibt_die_erste() {
+    let db = dl_central_db::testing::test_pool()
+        .await
+        .expect("Testdatenbank");
+    let store = PgLoungeStore {
+        pool: db.pool().clone(),
+    };
+    let mut state = pending(false);
+    state.status.claim(Some(Notice::CheckIn));
+    queue_notice(&mut state, Some(Notice::CheckIn), false);
+    assert_eq!(
+        store
+            .compare_exchange(USER, None, &state)
+            .await
+            .expect("Zustand schreibbar"),
+        Cas::Written
+    );
+    let stored: String = sqlx::query_scalar("SELECT v FROM bot.kv_store WHERE ns = $1 AND k = $2")
+        .bind(STATE_KV_NS)
+        .bind(user_key(USER))
+        .fetch_one(db.pool())
+        .await
+        .expect("Zeile lesbar");
+    let previous = merge_base::rewrite(&stored).expect("vorige Version liest die Zeile");
+    let swapped = sqlx::query("UPDATE bot.kv_store SET v = $1 WHERE ns = $2 AND k = $3 AND v = $4")
+        .bind(&previous)
+        .bind(STATE_KV_NS)
+        .bind(user_key(USER))
+        .bind(&previous)
+        .execute(db.pool())
+        .await
+        .expect("Tausch der vorigen Version");
+    assert_eq!(swapped.rows_affected(), 1);
+    assert_eq!(store.turn_flow_since().await, Ok(None));
+    store
+        .mark_turn_flow_since(NOW)
+        .await
+        .expect("Startzeit schreibbar");
+    store
+        .mark_turn_flow_since(NOW + 100)
+        .await
+        .expect("zweiter Start");
+    assert_eq!(store.turn_flow_since().await, Ok(Some(NOW)));
 }
 
 #[cfg(feature = "testing")]
