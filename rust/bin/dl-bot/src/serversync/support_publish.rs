@@ -1904,14 +1904,20 @@ enabled = false
         fs::remove_dir(&path).expect("remove banner directory");
         write_banner_bytes(temp.path(), b"banner");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
-        assert!(
-            fs::read(&path).is_err(),
-            "gesperrte Datei bleibt lesbar (Lauf als root?), der Lesefehler-Fall ist so nicht prüfbar"
-        );
-        let Err(err) = load_support_snapshot(temp.path()) else {
-            panic!("unlesbarer Banner muss den Snapshot abbrechen");
-        };
-        assert!(err.contains("konnte nicht gelesen werden"), "{err}");
+        let permissions_enforced = fs::read(&path).is_err();
+        let locked = load_support_snapshot(temp.path());
+        if permissions_enforced {
+            let Err(err) = locked else {
+                panic!("unlesbarer Banner muss den Snapshot abbrechen");
+            };
+            assert!(err.contains("konnte nicht gelesen werden"), "{err}");
+        } else {
+            let snapshot = locked.expect("lesbarer Banner");
+            assert_eq!(
+                snapshot.banner.map(|banner| banner.bytes),
+                Some(b"banner".to_vec())
+            );
+        }
     }
 
     #[test]
