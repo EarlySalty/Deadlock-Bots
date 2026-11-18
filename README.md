@@ -25,14 +25,14 @@ Configuration lives in `~/.config/deadlock-bots/*.toml` (`bot.toml`, `web.toml`,
 
 ```bash
 cd rust
-cargo build --release --bin dl-bot --bin dl-web --bin dl-ai-gateway
+cargo build --release --bin dl-bot --bin dl-web --bin dl-ai-gateway --bin dl-unit-failure-notify
 ```
 
 Follow `/home/nathanael/Documents/claude-config/machines/v50671/RUST-BUILDS.md` for the shared sccache, slot and artifact rules. Do not start competing release builds.
 
 ## Deploy
 
-Releases live in `/opt/deadlock/bots/releases/<sha>`. `/opt/deadlock/bots/current` is a symlink to the active release, and `/opt/deadlock/bots/rollback` keeps the previous one. The release installer is `rust/bin/dl-bot/examples/install_discord_release.rs`; it flips the `current` symlink and rebuilds `dl-bot` and `dl-ai-gateway`. After a switch, restart the affected units:
+Releases live in `/opt/deadlock/bots/releases/<sha>`. `/opt/deadlock/bots/current` is a symlink to the active release, and `/opt/deadlock/bots/rollback` keeps the previous one. The release installer is `rust/bin/dl-bot/examples/install_discord_release.rs`; it takes eight arguments (source worktree, then artefact and SHA256 for `dl-bot`, with the commit between them, for `dl-ai-gateway` and for `dl-unit-failure-notify`), installs the gateway config and the units `dl-ai-gateway.service` and `dl-community-points-sync.service` from the repo, flips the `current` symlink, restarts `dl-bot` and the gateway and waits until the gateway answers `/healthz`; when it does not, the installer puts config, units and symlink back. It applies no migrations: apply them before the switch. Units the installer does not restart need a manual restart:
 
 ```bash
 systemctl --user restart deadlock-bot-rust.service deadlock-web-rust.service dl-ai-gateway.service

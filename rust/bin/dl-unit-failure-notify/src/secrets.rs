@@ -35,7 +35,7 @@ impl Drop for Entry {
     }
 }
 
-fn credential(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+pub fn credential(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)

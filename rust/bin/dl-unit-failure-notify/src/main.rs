@@ -69,14 +69,36 @@ impl RefusalEvent<'_> {
     }
 }
 
+fn refusal_target(unit: &str, channel: u64) -> Result<()> {
+    if unit != GATEWAY_UNIT || channel != BOTLOGS_CHANNEL {
+        bail!("Anbieter-Ablehnungen sind ausschließlich für das KI-Gateway und den bestehenden Botlogs-Kanal erlaubt.");
+    }
+    Ok(())
+}
+
+fn refusal_credential(args: &Args) -> Result<&Path> {
+    let credential = args
+        .credential
+        .as_deref()
+        .context("Bestehender Credential-Pfad fehlt.")?;
+    if args.provider_refusal || args.contract {
+        protected_path(credential, false)?;
+    }
+    Ok(credential)
+}
+
+fn contract_ready(config: &Config, args: &Args) -> Result<()> {
+    refusal_target(GATEWAY_UNIT, config.channel_id)?;
+    state::Store::ready(&config.state_directory)?;
+    secrets::credential(refusal_credential(args)?).map(drop)
+}
+
 fn validate_refusal_event<'a>(
     unit: &str,
     channel: u64,
     args: &'a Args,
 ) -> Result<RefusalEvent<'a>> {
-    if unit != GATEWAY_UNIT || channel != BOTLOGS_CHANNEL {
-        bail!("Anbieter-Ablehnungen sind ausschließlich für das KI-Gateway und den bestehenden Botlogs-Kanal erlaubt.");
-    }
+    refusal_target(unit, channel)?;
     let provider = args
         .provider
         .as_deref()
@@ -123,10 +145,11 @@ fn refusal_content(host: &str, event: &RefusalEvent<'_>) -> String {
         .map(|status| format!(", HTTP {status}"))
         .unwrap_or_default();
     format!(
-        "**KI-Anbieter lehnt Anfragen ab: `{}`**\nHost: `{host}`\n{} (`{}`{status})\nAntworten über diesen Anbieter fallen aus, bis er wieder Anfragen annimmt.\nWeitere Meldungen: höchstens einmal pro Tag und zweimal innerhalb von sieben Tagen.",
+        "**KI-Anbieter lehnt Anfragen ab: `{}`**\nHost: `{host}`\n{} (`{}`{status})\nAntworten über diesen Anbieter fallen aus, bis er wieder Anfragen annimmt.\n{}",
         event.provider,
         refusal_cause(event),
         event.reason,
+        state::budget_note(),
     )
 }
 
@@ -329,9 +352,7 @@ async fn run(args: Args) -> Result<()> {
         return install(&args);
     }
     if args.contract {
-        if let Some(credential) = args.credential.as_deref() {
-            protected_path(credential, false)?;
-        }
+        contract_ready(&config, &args)?;
         println!("{CONTRACT}");
         return Ok(());
     }
@@ -421,7 +442,7 @@ async fn run(args: Args) -> Result<()> {
             } else {
                 format!("{} fehlgeschlagene Starts", state.unreported)
             };
-            format!("**Dienst ausgefallen: `{unit}`**\nHost: `{}`\n{cause}\nSeit der letzten bestätigten Meldung: {attempts}. Weitere Wiederholungen: {repeats}.\nWeitere Meldungen: höchstens einmal pro Tag und zweimal innerhalb von sieben Tagen.", config.host_label)
+            format!("**Dienst ausgefallen: `{unit}`**\nHost: `{}`\n{cause}\nSeit der letzten bestätigten Meldung: {attempts}. Weitere Wiederholungen: {repeats}.\n{}", config.host_label, state::budget_note())
         };
         state.pending = Some(state::Pending {
             key: format!(
@@ -436,11 +457,7 @@ async fn run(args: Args) -> Result<()> {
         // getrennt gespeichert und gemeinsam konservativ zum Budget gezählt.
         store.save(&state)?;
     }
-    let credential = args
-        .credential
-        .as_deref()
-        .context("Bestehender Credential-Pfad fehlt.")?;
-    let token = secrets::broker_token(&config, credential).await?;
+    let token = secrets::broker_token(&config, refusal_credential(&args)?).await?;
     // Erst nach erfolgreichem Secretladen und unmittelbar vor HTTP reservieren:
     // verlorene ACKs dürfen nach Broker-TTL/Neustart keinen Replay-Sturm erzeugen.
     let attempt_time = now()?;
@@ -477,7 +494,52 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dl_provider_refusal::MAX_CODE_LEN;
+    use dl_provider_refusal::{HELPER_BINARY, MAX_CODE_LEN};
+
+    #[test]
+    fn the_contract_answer_needs_the_refusal_target_state_and_credential() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let credential = root.path().join("credential");
+        fs::write(&credential, b"fixture").unwrap();
+        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600)).unwrap();
+        let prepared = |channel: u64, state: &str, credential: &Path| {
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "broker_origin": "http://127.0.0.1:1",
+                "channel_id": channel,
+                "state_directory": root.path().join(state),
+                "infisical_socket": "/run/fixture.sock",
+                "project_id": "fixture",
+                "environment": "fixture",
+                "secret_path": "/",
+                "host_label": "fixture",
+            }))
+            .unwrap();
+            let args = Args::try_parse_from([
+                "notify",
+                "--config",
+                "/c.json",
+                "--contract",
+                "--credential",
+                credential.to_str().unwrap(),
+            ])
+            .unwrap();
+            contract_ready(&config, &args)
+        };
+        prepared(BOTLOGS_CHANNEL, "state", &credential).unwrap();
+        assert!(prepared(BOTLOGS_CHANNEL + 1, "state", &credential).is_err());
+        assert!(prepared(BOTLOGS_CHANNEL, "credential", &credential).is_err());
+        assert!(prepared(BOTLOGS_CHANNEL, "state", &root.path().join("absent")).is_err());
+        assert_eq!(
+            state::budget_note(),
+            "Weitere Meldungen: höchstens eine in 24 Stunden und 2 in 7 Tagen."
+        );
+    }
+
+    #[test]
+    fn the_binary_carries_the_name_gateway_and_installer_look_for() {
+        assert_eq!(env!("CARGO_BIN_NAME"), HELPER_BINARY);
+    }
 
     #[test]
     fn devfeed_mode_is_confined_to_existing_feed_and_botlogs() {

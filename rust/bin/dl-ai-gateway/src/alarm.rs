@@ -4,12 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dl_ai::tool_chat::{AlarmConfig, Delivery, Refusal, RefusalAlarm, RefusalNotifier};
-use dl_ai::upstream::{protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT};
+use dl_ai::upstream::{protected_path, Answer, CONTRACT, DAY_SECS, GATEWAY_UNIT, HELPER_BINARY};
 
 const CHILD_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
-const HELPER: &str = "dl-unit-failure-notify";
-const NO_HELPER: &str = "the release ships no protected dl-unit-failure-notify next to the gateway";
-const ON_FAILURE: &str = "unit-failure-notify@dl-ai-gateway.service.service";
+const NO_HELPER: &str = "the release ships no protected notify helper next to the gateway";
 const SCAN_LIMIT: i64 = 256;
 
 pub struct ProcessNotifier {
@@ -27,7 +25,7 @@ pub fn sibling_helper() -> anyhow::Result<PathBuf> {
     let gateway = std::env::current_exe()?;
     gateway
         .parent()
-        .map(|release| release.join(HELPER))
+        .map(|release| release.join(HELPER_BINARY))
         .ok_or_else(|| anyhow::anyhow!("gateway binary {} has no directory", gateway.display()))
 }
 
@@ -176,6 +174,10 @@ fn executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
+fn on_failure_unit() -> String {
+    format!("unit-failure-notify@{GATEWAY_UNIT}.service")
+}
+
 async fn on_failure_wired(budget: Duration) -> bool {
     let mut command = tokio::process::Command::new("/usr/bin/systemctl");
     command
@@ -191,9 +193,10 @@ async fn on_failure_wired(budget: Duration) -> bool {
             command.env(name, value);
         }
     }
-    output(command, budget)
-        .await
-        .is_ok_and(|stdout| stdout.split_whitespace().any(|unit| unit == ON_FAILURE))
+    output(command, budget).await.is_ok_and(|stdout| {
+        let wanted = on_failure_unit();
+        stdout.split_whitespace().any(|unit| unit == wanted)
+    })
 }
 
 fn now() -> i64 {
@@ -365,6 +368,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_checked_on_failure_unit_is_the_one_the_shipped_unit_file_names() {
+        let unit = include_str!("../../../../service/systemd/dl-ai-gateway.service");
+        let wired: Vec<String> = unit
+            .lines()
+            .filter_map(|line| line.strip_prefix("OnFailure="))
+            .map(|target| target.replace("%n", GATEWAY_UNIT))
+            .collect();
+        assert_eq!(wired, [on_failure_unit()]);
+    }
+
     #[tokio::test]
     async fn an_unprepared_host_is_reported_not_ready() {
         let dir = tempfile::tempdir().expect("dir");
@@ -377,7 +391,7 @@ mod tests {
         let missing = readiness(&config(Path::new("/run/c")), absent).await;
         assert!(missing.contains(&NO_HELPER));
         let shipped = sibling_helper().expect("sibling");
-        assert_eq!(shipped.file_name(), Some(OsStr::new(HELPER)));
+        assert_eq!(shipped.file_name(), Some(OsStr::new(HELPER_BINARY)));
         assert_eq!(
             shipped.parent(),
             std::env::current_exe().expect("exe").parent()

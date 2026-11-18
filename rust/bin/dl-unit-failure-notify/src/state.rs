@@ -11,6 +11,7 @@ use std::{
 use dl_provider_refusal::{DAY_SECS as DAY, WEEK_SECS as WEEK};
 
 const MAX_STATE_BYTES: u64 = 32_768;
+const WEEKLY_SENDS: usize = 2;
 const MAX_RECENT_INVOCATIONS: usize = 256;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -67,7 +68,7 @@ impl State {
             .chain(self.uncertain_attempts.iter())
             .filter(|time| now.saturating_sub(**time) < WEEK)
             .count();
-        week < 2
+        week < WEEKLY_SENDS
             && !self
                 .confirmed
                 .iter()
@@ -116,8 +117,35 @@ pub struct Store {
     path: PathBuf,
 }
 
+pub fn budget_note() -> String {
+    format!(
+        "Weitere Meldungen: höchstens eine in {} Stunden und {WEEKLY_SENDS} in {} Tagen.",
+        DAY / 3_600,
+        WEEK / DAY
+    )
+}
+
 impl Store {
     pub fn open(directory: &Path, unit_key: &str) -> Result<Self> {
+        Self::ready(directory)?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(directory.join(format!("{unit_key}.lock")))
+            .context("Meldesperre ist nicht verfügbar.")?;
+        lock.lock_exclusive()
+            .context("Meldesperre konnte nicht gehalten werden.")?;
+        Ok(Self {
+            _lock: lock,
+            path: directory.join(format!("{unit_key}.json")),
+        })
+    }
+
+    pub fn ready(directory: &Path) -> Result<()> {
         if !directory.is_absolute() {
             bail!("Das Zustandsverzeichnis muss ein absoluter Pfad sein.");
         }
@@ -135,21 +163,7 @@ impl Store {
         if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
             bail!("Zustandsverzeichnis muss dem Dienstnutzer gehören und Modus 0700 haben.");
         }
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(directory.join(format!("{unit_key}.lock")))
-            .context("Meldesperre ist nicht verfügbar.")?;
-        lock.lock_exclusive()
-            .context("Meldesperre konnte nicht gehalten werden.")?;
-        Ok(Self {
-            _lock: lock,
-            path: directory.join(format!("{unit_key}.json")),
-        })
+        Ok(())
     }
 
     pub fn load(&self) -> Result<State> {
