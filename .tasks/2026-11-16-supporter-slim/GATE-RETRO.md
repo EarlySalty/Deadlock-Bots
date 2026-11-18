@@ -79,6 +79,8 @@ Fixer pass on `feat/supporter-slim-land-20261117` after gate round 5, with the r
 - 2f6ed231 introduced the placeholder name cap that hid long names; removed in 76e263bf.
 - e85a3ec5 claimed every serversync Discord URL went through `discord_api_url`; the rank guide legacy scan and delete still formatted `discord_api_base`. Fixed in d7bc8422.
 - e85a3ec5 and 8adca784 stated that `discord_call_timeout()` bounds a retry call with its retries; it covered one request plus the wait budget, not five requests. Fixed in 2d237684.
+- 2d237684 said the other `discord_call_timeout()` users bound one request each; with serenity's ratelimiter on, the cap covers one whole serenity call. Corrected in 5e24d534 and 65fcb08a.
+- 5e24d534 said its test shows the cap with the ratelimiter on; the test hung on a silent proxy and never made the ratelimiter wait. Fixed in 65fcb08a.
 - e85a3ec5 capped the history scans by "the last allowed page was full", which reports a complete history of exactly 500 messages as cut short. Fixed in 28effbea.
 
 ### Twin checks of this pass
@@ -101,7 +103,7 @@ The reviewer named three BLOCKING findings and two NITs in `serversync.rs` befor
 ### Gate run at 3387bbad (no verdict, tool failure)
 
 - REAL 1 nine live guild model fetches without an outer bound (snapshot, rollback_export, diff, restore, onboarding_preview, onboarding_apply, serverguide_preview, serverguide_apply, welcome_preview), against the 09e742f6 subject "bound every serversync and pager Discord call": 7e57b8b0. The diff `apply` through `dl_server_as_code::apply_preview` stays without an outer bound, because cancelling it after a Discord write skips the created id mapping and the final run status; see Open.
-- REAL 2 the 2d237684 claim that the other `discord_call_timeout()` users "bound one request each": wrong for production, where serenity's ratelimiter resends on 429 without a cap and its client has no request timeout. The cap covers one whole serenity call; 5e24d534 tests it with the ratelimiter on.
+- REAL 2 the 2d237684 claim that the other `discord_call_timeout()` users "bound one request each": wrong for production, where serenity's ratelimiter resends on 429 without a cap and its client has no request timeout. The cap covers one whole serenity call. 5e24d534 added a test against a silent proxy that could not tell a ratelimiter wait from a hang; 65fcb08a replaces it with an exhausted GuildMembers bucket, so the ratelimiter waits before the first request and the page timeout ends the call with zero requests sent (mutation checked).
 - REAL 3 the link test gave the Steam Bot and the Twitch dashboard one token: 8dea0d4c (one token per service, mutation checked).
 - REAL 4 the funding goal compared with itself: 8dea0d4c (`TEST_GOAL_CENTS` literal, mutation checked).
 - REAL 5 SHAs from before the message reword in this file: mapped by tree hash to the current commits in this commit.
@@ -111,5 +113,7 @@ The reviewer named three BLOCKING findings and two NITs in `serversync.rs` befor
 ### Open
 
 - `ServerSyncService::apply` has no time bound on its Discord writes; a bound per change belongs into `dl-server-as-code` `apply_preview_with_port`, outside this branch.
+
+### Resolved
 
 - Hook findings 1-3 of round 5 (Ursache blocks of 127d1968, 33a0614e and da38bb50 without a twins layer): resolved by the message reword, all three now carry "Twins fixed here".
