@@ -3077,12 +3077,10 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         _requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<SnapshotOutput> {
-        let report = dl_server_as_code::import_live_guild_snapshot(
-            &self.pool,
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let model = self.fetch_live_guild_model_bounded().await?;
+        let report =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "serenity_http")
+                .await?;
         Ok(snapshot_output(report))
     }
 
@@ -3090,11 +3088,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RollbackExportOutput> {
-        let model = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let model = self.fetch_live_guild_model_bounded().await?;
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
@@ -3167,11 +3161,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn diff(&self, requested_by_user_id: Option<u64>) -> ServerSyncResult<DiffOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
                 .await?;
@@ -3223,11 +3213,7 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<RestoreOutput> {
         let (rollback_export_id, artifact_hash, artifact) =
             self.load_rollback_artifact(rollback_export_id).await?;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
                 .await?;
@@ -3291,11 +3277,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<OnboardingPreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
@@ -3370,11 +3352,7 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
         // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
         validate_onboarding_references(&live, &preview.config)
@@ -3468,11 +3446,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<ServerGuidePreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "serverguide_preview")
                 .await?;
@@ -3547,11 +3521,7 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         validate_server_guide_config(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -4358,11 +4328,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
