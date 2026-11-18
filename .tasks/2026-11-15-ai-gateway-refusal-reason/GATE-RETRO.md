@@ -90,3 +90,17 @@ Stays TRIVIA after the second opinion, with its reason: `usage::code::INVALID_JS
 Kept as stated limits, not claimed as closed: 529 is Overloaded in claude_plan and Unavailable on the API-key path because the kind drives retries; reason words still differ per writer; the service-to-unit map in `usage.rs` keeps its other names from main.
 
 Corrections of earlier commit texts are in the commit that closes these findings.
+
+## 5. Addendum 2026-11-18: coverage of section 2, and the round that ended without a verdict
+
+Coverage. The heading of section 2 says "every open finding". Checked by a script that reads the numbered lines of gate4.txt (96 lines: 20 BLOCKING, 76 NIT) and the numbers cited in this file: 79 lines were cited by number, 17 were not. The 17, with the item that covers each:
+- Blocking 11 and 12 (`install_discord_release.rs:396` and `:538`): item 5, which names both lines without their numbers.
+- Notes 21 to 34: lines the hook derives from the reviewer's per-unit answer ("unit ... mishandles input class"), no finding text of their own. Mapped by unit, not by wording: 21 (README) to items 1 and 2; 22 to 26 (helper `contract_ready`, its tests, `secrets.rs::credential`, `state.rs::ready`) to item 12; 27 to 29 (`ChatProviderError`, `upstream`) to item 13; 30 to 32 (the chat providers' response read) to item 15; 33 and 34 (`tool_chat/alarm.rs`) to item 10.
+- Note 52 (`state.rs:120`, the budget sentence): the TRIVIA bullet on `state.rs:122`.
+
+Lost round. The final round was called on b8053f13 at about 10:08 and ended without a verdict when the reviewer's account limit was reached (exit 2, branch counter unchanged at 4). Its output holds one answer the hook rejected for a malformed reference. That answer named three twins in `install_discord_release.rs`:
+- REAL: `restart()` restarts the bot and the gateway, and only the gateway was proven afterwards. 662a823d closed "a returned restart counts as a running service" for the gateway only.
+- REAL: the owner's runtime directory was written twice in `as_owner`, although 4a4c3d4c lists a function for it.
+- REAL: `HostFiles::keep` chained its steps with `?`, the form 1014c510 removed from the rollback.
+
+All three are closed in the commit that follows 4a4c3d4c on this branch. What the bot proof shows and what it does not is stated in that commit. The answer is cut off after the installer file, so it says nothing about the other files.
