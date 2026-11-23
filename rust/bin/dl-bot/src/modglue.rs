@@ -1,7 +1,7 @@
 //! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
@@ -272,6 +272,7 @@ impl BrainMessageOwner for dl_community::faq::FaqChat {
 #[derive(Default)]
 pub struct BrainConversations {
     entries: HashMap<(u64, u64, u64), BrainConversation>,
+    pending: HashMap<(u64, u64, u64), Weak<()>>,
 }
 
 struct BrainConversation {
@@ -284,6 +285,19 @@ impl BrainConversations {
         self.entries.retain(|_, conversation| {
             now.saturating_duration_since(conversation.last_reply) < BRAIN_CONVERSATION_TTL
         });
+    }
+
+    fn begin(&mut self, key: (u64, u64, u64), empty: bool, now: Instant) -> Option<Arc<()>> {
+        self.prune(now);
+        self.pending.retain(|_, work| work.strong_count() > 0);
+        let pending = self.pending.get(&key).and_then(Weak::upgrade);
+        if empty && (pending.is_some() || self.entries.contains_key(&key)) {
+            return None;
+        }
+        // Each answer task holds the token until it ends, including on cancellation.
+        let pending = pending.unwrap_or_else(|| Arc::new(()));
+        self.pending.insert(key, Arc::downgrade(&pending));
+        Some(pending)
     }
 
     fn history(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<Vec<String>> {
@@ -324,7 +338,13 @@ impl BrainConversations {
         dl_brain::question_or_image_default(&event.content, !event.image_attachment_urls.is_empty())
     }
 
-    fn record(&mut self, event: &dl_discord::MessageEvent, message_id: u64, now: Instant) {
+    fn record(
+        &mut self,
+        event: &dl_discord::MessageEvent,
+        message_id: u64,
+        question: &str,
+        now: Instant,
+    ) {
         self.prune(now);
         if message_id == 0 {
             return;
@@ -341,14 +361,7 @@ impl BrainConversations {
             } else {
                 conversation.turns.clear();
             }
-            conversation.turns.push((
-                message_id,
-                dl_brain::question_or_image_default(
-                    &event.content,
-                    !event.image_attachment_urls.is_empty(),
-                )
-                .unwrap_or_default(),
-            ));
+            conversation.turns.push((message_id, question.to_owned()));
             let mut characters: usize = conversation
                 .turns
                 .iter()
@@ -1152,6 +1165,22 @@ impl BrainHandler {
             self.clear_guide_pending(event, proactive).await;
             return;
         }
+        let _pending = match event.guild_id {
+            Some(guild_id) if !proactive => {
+                let key = (guild_id, event.channel_id, event.author_id);
+                let empty = question.trim().is_empty() && images.is_empty();
+                let Some(pending) =
+                    self.conversations
+                        .lock()
+                        .await
+                        .begin(key, empty, Instant::now())
+                else {
+                    return;
+                };
+                Some(pending)
+            }
+            _ => None,
+        };
         let is_public = replies.is_public(event);
         let feedback = !proactive && !is_public;
         let context = dl_brain::DiscordQueryContext {
@@ -1179,7 +1208,7 @@ impl BrainHandler {
         }
         let outcome = match reservation {
             dl_brain::DiscordReservation::Accepted => {
-                let history = if proactive {
+                let mut history = if proactive {
                     Vec::new()
                 } else {
                     self.conversations
@@ -1188,6 +1217,7 @@ impl BrainHandler {
                         .history(event, Instant::now())
                         .unwrap_or_default()
                 };
+                history.retain(|question| !question.is_empty());
                 let history = dl_brain::bounded_user_questions(&history, question);
                 dl_brain::answer_discord_query_with_history(
                     question,
@@ -1254,10 +1284,15 @@ impl BrainHandler {
             let body = direct_brain_reply_body(event, &text);
             match replies.reply(event, &body).await {
                 Ok(message_id) if extend_conversation && !proactive && !guide_channel(event) => {
-                    self.conversations
-                        .lock()
-                        .await
-                        .record(event, message_id, Instant::now());
+                    let question =
+                        dl_brain::question_or_image_default(question, !context.images.is_empty())
+                            .unwrap_or_default();
+                    self.conversations.lock().await.record(
+                        event,
+                        message_id,
+                        &question,
+                        Instant::now(),
+                    );
                 }
                 Ok(_) => {}
                 Err(err) => {
@@ -5469,11 +5504,14 @@ mod tests {
             assert_eq!(received.len(), 3);
             assert_eq!(received[0].1["text"], "Welche Items passen zu Abrams?");
             assert_eq!(received[1].1["query"]["text"], second.content);
-            assert_eq!(received[1].1["user_questions"], json!([first.content]));
+            assert_eq!(
+                received[1].1["user_questions"],
+                json!(["Welche Items passen zu Abrams?"])
+            );
             assert_eq!(received[2].1["query"]["text"], "Abrams");
             assert_eq!(
                 received[2].1["user_questions"],
-                json!([first.content, second.content])
+                json!(["Welche Items passen zu Abrams?", second.content])
             );
             for (headers, body) in &received[1..] {
                 assert!(headers.get("x-discord-read-access").is_none());
@@ -5717,11 +5755,12 @@ mod tests {
                     ..Default::default()
                 };
                 let mut event = test_message_event(Some(1), "Und welche Items passen dazu?");
-                handler
-                    .conversations
-                    .lock()
-                    .await
-                    .record(&event, 999, Instant::now());
+                handler.conversations.lock().await.record(
+                    &event,
+                    999,
+                    &event.content,
+                    Instant::now(),
+                );
                 if reply {
                     event.is_reply = true;
                     event.reply_message_id = Some(999);
@@ -5774,6 +5813,9 @@ mod tests {
         );
         assert_eq!(handler.conversations.lock().await.entries.len(), 1);
 
+        handler
+            .handle_message_event_with_replies(&mention, 42, &replies)
+            .await;
         let empty = test_message_event(Some(1), " \n ");
         handler
             .handle_message_event_with_replies(&empty, 42, &replies)
@@ -5788,10 +5830,58 @@ mod tests {
             *answerer.calls.lock().await,
             vec![(question.content.clone(), 3)]
         );
+        assert_eq!(*answerer.histories.lock().await, vec![Vec::<String>::new()]);
         let sent = replies.sent.lock().await;
         assert_eq!(sent.len(), 2);
         assert_eq!(brain_v2_text(&sent[1].2), "Antwort: Welche Lanes gibt es?");
         assert_eq!(sent[1].2["message_reference"]["message_id"], "2");
+    }
+
+    #[tokio::test]
+    async fn empty_mentions_do_not_interrupt_a_lane_wave_conversation() {
+        let (mut handler, answerer) = direct_test_handler();
+        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(2));
+        let pending_answerer = Arc::new(PendingGuideAnswerer::default());
+        handler.answerer = pending_answerer.clone();
+        let replies = RecordingBrainReplies::default();
+        let question = "Wie viele Seelen gibt eine Minion-Welle?";
+        let first = test_message_event(Some(1), &format!("<@42> {question}"));
+        let mut ping = test_message_event(Some(1), "<@42>");
+        ping.message_id = 3;
+
+        let first_answer = handler.handle_message_event_with_replies(&first, 42, &replies);
+        let ping_during_answer = async {
+            pending_answerer.started.notified().await;
+            handler
+                .handle_message_event_with_replies(&ping, 42, &replies)
+                .await;
+            assert!(replies.sent.lock().await.is_empty());
+            pending_answerer.release.notify_one();
+        };
+        tokio::join!(first_answer, ping_during_answer);
+
+        handler.answerer = answerer.clone();
+        ping.message_id = 4;
+        handler
+            .handle_message_event_with_replies(&ping, 42, &replies)
+            .await;
+        let mut followup = test_message_event(Some(1), "Wie viele Seelen ab Minute 10?");
+        followup.message_id = 5;
+        handler
+            .handle_message_event_with_replies(&followup, 42, &replies)
+            .await;
+        ping.message_id = 6;
+        handler
+            .handle_message_event_with_replies(&ping, 42, &replies)
+            .await;
+
+        assert_eq!(*answerer.calls.lock().await, vec![(followup.content, 3)]);
+        assert_eq!(
+            *answerer.histories.lock().await,
+            vec![vec![question.to_owned()]]
+        );
+        let sent = replies.sent.lock().await;
+        assert_eq!(sent.iter().map(|reply| reply.1).collect::<Vec<_>>(), [2, 5]);
     }
 
     #[tokio::test]
@@ -5827,7 +5917,10 @@ mod tests {
             assert_eq!(answerer.legacy_calls.load(Ordering::Relaxed), 0);
             assert_eq!(
                 *answerer.histories.lock().await,
-                vec![Vec::<String>::new(), vec![mention.content.clone()]]
+                vec![
+                    Vec::<String>::new(),
+                    vec!["Welche Lanes gibt es?".to_owned()]
+                ]
             );
             let sent = replies.sent.lock().await;
             assert_eq!(sent.len(), 2);
@@ -5948,7 +6041,7 @@ mod tests {
         let mut event = test_message_event(Some(1), "");
         for index in 0..6 {
             event.content = format!("Frage {index} {}", "ä".repeat(900));
-            conversations.record(&event, 1000 + index, now);
+            conversations.record(&event, 1000 + index, &event.content, now);
         }
         let history = conversations.history(&event, now).expect("Eigener Verlauf");
         assert_eq!(history.len(), 4);
@@ -5966,7 +6059,7 @@ mod tests {
             .expect("Eigene frühere Botantwort");
         assert_eq!(branch, history[..2]);
         event.content = "Neuer Gesprächszweig".into();
-        conversations.record(&event, 1010, now);
+        conversations.record(&event, 1010, &event.content, now);
         event.is_reply = false;
         event.reply_message_id = None;
         assert_eq!(
@@ -5989,12 +6082,12 @@ mod tests {
         let now = Instant::now();
         let event = test_message_event(Some(1), "Folgefrage");
         let mut conversations = BrainConversations::default();
-        conversations.record(&event, 1001, now);
+        conversations.record(&event, 1001, &event.content, now);
         assert_eq!(
             conversations.question(&event, now + Duration::from_secs(599)),
             Some("Folgefrage".into())
         );
-        conversations.record(&event, 1002, now + Duration::from_secs(599));
+        conversations.record(&event, 1002, &event.content, now + Duration::from_secs(599));
         assert!(conversations
             .question(&event, now + Duration::from_secs(600))
             .is_some());
@@ -6030,6 +6123,7 @@ mod tests {
             handler.conversations.lock().await.record(
                 &event,
                 1001,
+                &event.content,
                 Instant::now() - BRAIN_CONVERSATION_TTL,
             );
             if reply {
@@ -6070,7 +6164,11 @@ mod tests {
                 }
             }
             let last = Instant::now() - Duration::from_secs(120);
-            handler.conversations.lock().await.record(&event, 999, last);
+            handler
+                .conversations
+                .lock()
+                .await
+                .record(&event, 999, &event.content, last);
             let replies = RecordingBrainReplies {
                 fail,
                 deny,
@@ -6108,7 +6206,7 @@ mod tests {
             .conversations
             .lock()
             .await
-            .record(&event, 1001, Instant::now());
+            .record(&event, 1001, &event.content, Instant::now());
         assert!(handler.conversation_question(&event, 42).await.is_none());
         let (handler, _) = direct_test_handler();
         handler
@@ -6141,7 +6239,11 @@ mod tests {
                 let replies = RecordingBrainReplies::default();
                 let mut event = test_message_event(Some(1), "Folgefrage ohne Belege");
                 let last = Instant::now() - Duration::from_secs(120);
-                handler.conversations.lock().await.record(&event, 999, last);
+                handler
+                    .conversations
+                    .lock()
+                    .await
+                    .record(&event, 999, &event.content, last);
                 if reply {
                     event.is_reply = true;
                     event.reply_message_id = Some(999);
@@ -6206,7 +6308,7 @@ mod tests {
                 .conversations
                 .lock()
                 .await
-                .record(&event, 1001, Instant::now());
+                .record(&event, 1001, &event.content, Instant::now());
             handler
                 .handle_message_event_with_replies(&event, 42, &replies)
                 .await;
@@ -6225,7 +6327,7 @@ mod tests {
             .conversations
             .lock()
             .await
-            .record(&event, 1001, Instant::now());
+            .record(&event, 1001, &event.content, Instant::now());
         let handler = Arc::new(handler);
         let replies = Arc::new(RecordingBrainReplies::default());
         let dispatcher = dl_discord::Dispatcher::new();
