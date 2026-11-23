@@ -278,6 +278,7 @@ pub struct BrainConversations {
 struct BrainConversation {
     turns: Vec<(u64, String)>,
     last_reply: Instant,
+    implicit_closed_at: Option<u64>,
 }
 
 impl BrainConversations {
@@ -291,7 +292,11 @@ impl BrainConversations {
         self.prune(now);
         self.pending.retain(|_, work| work.strong_count() > 0);
         let pending = self.pending.get(&key).and_then(Weak::upgrade);
-        if empty && (pending.is_some() || self.entries.contains_key(&key)) {
+        let implicit_open = self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.implicit_closed_at.is_none());
+        if empty && (pending.is_some() || implicit_open) {
             return None;
         }
         // Each answer task holds the token until it ends, including on cancellation.
@@ -334,8 +339,34 @@ impl BrainConversations {
     }
 
     fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
-        self.history(event, now)?;
-        dl_brain::question_or_image_default(&event.content, !event.image_attachment_urls.is_empty())
+        self.prune(now);
+        let key = (event.guild_id?, event.channel_id, event.author_id);
+        let conversation = self.entries.get_mut(&key)?;
+        let text = event.content.trim();
+        let has_image = !event.image_attachment_urls.is_empty();
+        if text.is_empty() && !has_image {
+            return None;
+        }
+        let addressed = event.reply_message_id.is_some_and(|reply| {
+            event
+                .reply_channel_id
+                .is_none_or(|channel| channel == event.channel_id)
+                && conversation.turns.iter().any(|(id, _)| *id == reply)
+        });
+        let is_reply =
+            event.is_reply || event.reply_message_id.is_some() || event.reply_channel_id.is_some();
+        if addressed && !brain_followup_acknowledgment(text) {
+            return dl_brain::question_or_image_default(text, has_image);
+        }
+        let is_question = !is_reply && implicit_brain_question(text);
+        if is_question && conversation.implicit_closed_at.is_none() {
+            return Some(text.to_owned());
+        }
+        if !is_question {
+            let previous = conversation.implicit_closed_at.unwrap_or_default();
+            conversation.implicit_closed_at = Some(previous.max(event.message_id));
+        }
+        None
     }
 
     fn record(
@@ -355,7 +386,14 @@ impl BrainConversations {
             let mut conversation = self.entries.remove(&key).unwrap_or(BrainConversation {
                 turns: Vec::new(),
                 last_reply: now,
+                implicit_closed_at: None,
             });
+            if conversation
+                .implicit_closed_at
+                .is_some_and(|closed| event.message_id > closed)
+            {
+                conversation.implicit_closed_at = None;
+            }
             if let Some(history) = history {
                 conversation.turns.truncate(history.len());
             } else {
@@ -374,6 +412,91 @@ impl BrainConversations {
             self.entries.insert(key, conversation);
         }
     }
+}
+
+fn brain_followup_acknowledgment(text: &str) -> bool {
+    let words = text
+        .trim_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .to_lowercase();
+    matches!(
+        words.as_str(),
+        "danke"
+            | "danke dir"
+            | "alles klar"
+            | "passt"
+            | "okay"
+            | "ok"
+            | "erledigt"
+            | "warte"
+            | "ne warte"
+            | "nee warte"
+            | "thanks"
+            | "got it"
+            | "never mind"
+    )
+}
+
+fn implicit_brain_question(text: &str) -> bool {
+    if text.is_empty()
+        || text.starts_with(['>', '*', '`'])
+        || text.contains("<@")
+        || brain_followup_acknowledgment(text)
+    {
+        return false;
+    }
+    if text.ends_with('?') {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    let question = lower.trim_start_matches("okay,").trim_start();
+    let question = question
+        .strip_prefix("und ")
+        .or_else(|| question.strip_prefix("and "));
+    if let Some(continuation) = question {
+        return continuation == "danach"
+            || ["ab minute ", "bei minute ", "at minute ", "für ", "mit "]
+                .iter()
+                .any(|prefix| continuation.starts_with(prefix))
+            || question_prefix(continuation);
+    }
+    question_prefix(lower.trim_start_matches("okay,").trim_start())
+}
+
+fn question_prefix(text: &str) -> bool {
+    [
+        "wie viele ",
+        "wieviel ",
+        "wie viel ",
+        "wie kann ",
+        "wie mache ",
+        "wie geht ",
+        "wie ist ",
+        "wie lange ",
+        "was ",
+        "warum ",
+        "wo ",
+        "wann ",
+        "wer ",
+        "welche ",
+        "welcher ",
+        "welches ",
+        "kann ich ",
+        "kannst du ",
+        "kann man ",
+        "hast du ",
+        "gibt es ",
+        "ab minute ",
+        "how ",
+        "what ",
+        "why ",
+        "when ",
+        "where ",
+        "which ",
+        "can i ",
+        "can you ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 #[async_trait::async_trait]
@@ -5465,7 +5588,7 @@ mod tests {
         handler
             .handle_message_event_with_replies(&first, 42, &replies)
             .await;
-        let mut second = test_message_event(Some(1), "Okay ja ne Idee für ein Spirit build");
+        let mut second = test_message_event(Some(1), "Okay, hast du ne Idee für ein Spirit build");
         second.message_id = 4;
         second.is_reply = true;
         second.reply_message_id = Some(1001);
@@ -5475,6 +5598,8 @@ mod tests {
             .await;
         let mut third = test_message_event(Some(1), "Abrams");
         third.message_id = 5;
+        third.is_reply = true;
+        third.reply_message_id = Some(1002);
         handler
             .handle_message_event_with_replies(&third, 42, &replies)
             .await;
@@ -5941,6 +6066,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_brain_chat_stops_after_a_handoff_and_reopens_on_bot_reply() {
+        let (handler, answerer) = direct_test_handler();
+        let replies = RecordingBrainReplies::default();
+        let first = test_message_event(Some(1), "<@42> Wie viele Seelen gibt eine Welle?");
+        handler
+            .handle_message_event_with_replies(&first, 42, &replies)
+            .await;
+        let mut event = test_message_event(Some(1), "Und ab Minute 10");
+        event.message_id = 3;
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+
+        event.message_id = 4;
+        event.content = "Kannst du mir die Match-ID schicken?".into();
+        event.reply_message_id = Some(900);
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        event.reply_message_id = None;
+        for (id, text) in [
+            (5, "Dann kann ich dir das zeigen"),
+            (6, "Ne warte"),
+            (7, ""),
+            (8, "Da oben rechts hast du so ne ID"),
+            (9, "*wir reden nicht über meine Yamato-Performance*"),
+            (10, "Wo finde ich die Match-ID?"),
+        ] {
+            event.message_id = id;
+            event.content = text.into();
+            event.image_attachment_urls = if id == 7 {
+                vec!["https://cdn.discordapp.com/attachments/1/2/score.png".into()]
+            } else {
+                Vec::new()
+            };
+            handler
+                .handle_message_event_with_replies(&event, 42, &replies)
+                .await;
+        }
+        assert_eq!(answerer.calls.lock().await.len(), 2);
+        assert_eq!(replies.sent.lock().await.len(), 2);
+
+        event.message_id = 11;
+        event.reply_message_id = Some(1002);
+        event.content = "Und pro Trooper?".into();
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        event.message_id = 12;
+        event.reply_message_id = None;
+        event.content = "Und bei Minute 20".into();
+        handler
+            .handle_message_event_with_replies(&event, 42, &replies)
+            .await;
+        assert_eq!(
+            answerer
+                .calls
+                .lock()
+                .await
+                .iter()
+                .map(|(question, _)| question.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Wie viele Seelen gibt eine Welle?",
+                "Und ab Minute 10",
+                "Und pro Trooper?",
+                "Und bei Minute 20"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn mehrere_erwaehnungen_bleiben_eine_anfrage_und_folgefragen_erreichen_dasselbe_tageslimit(
     ) {
         let (handler, answerer) = direct_test_handler();
@@ -6080,12 +6277,12 @@ mod tests {
     #[test]
     fn gespraech_zehn_minuten_grenze_und_letzte_botantwort() {
         let now = Instant::now();
-        let event = test_message_event(Some(1), "Folgefrage");
+        let event = test_message_event(Some(1), "Und wie geht das?");
         let mut conversations = BrainConversations::default();
         conversations.record(&event, 1001, &event.content, now);
         assert_eq!(
             conversations.question(&event, now + Duration::from_secs(599)),
-            Some("Folgefrage".into())
+            Some("Und wie geht das?".into())
         );
         conversations.record(&event, 1002, &event.content, now + Duration::from_secs(599));
         assert!(conversations
@@ -6099,7 +6296,7 @@ mod tests {
             .is_some());
         assert_eq!(
             conversations.history(&reply, now + Duration::from_secs(600)),
-            Some(vec!["Folgefrage".to_owned()])
+            Some(vec!["Und wie geht das?".to_owned()])
         );
         reply.reply_message_id = Some(1002);
         assert!(conversations
@@ -6119,7 +6316,7 @@ mod tests {
         for reply in [false, true] {
             let (handler, answerer) = direct_test_handler();
             let replies = RecordingBrainReplies::default();
-            let mut event = test_message_event(Some(1), "Folgefrage");
+            let mut event = test_message_event(Some(1), "Und wie geht das?");
             handler.conversations.lock().await.record(
                 &event,
                 1001,
@@ -6237,7 +6434,7 @@ mod tests {
                 });
                 handler.answerer = answerer.clone();
                 let replies = RecordingBrainReplies::default();
-                let mut event = test_message_event(Some(1), "Folgefrage ohne Belege");
+                let mut event = test_message_event(Some(1), "Wie geht das ohne Belege?");
                 let last = Instant::now() - Duration::from_secs(120);
                 handler
                     .conversations
