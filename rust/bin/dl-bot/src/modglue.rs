@@ -6733,13 +6733,7 @@ mod tests {
                 );
                 if history {
                     assert!(query["answer_context"].is_null());
-                    assert_eq!(
-                        body["user_questions"],
-                        json!(questions[..index]
-                            .iter()
-                            .map(|question| format!("<@42> {question}"))
-                            .collect::<Vec<_>>())
-                    );
+                    assert_eq!(body["user_questions"], json!(questions[..index]));
                 }
                 assert_eq!(query["text"], question);
                 assert_eq!(query["requested_scopes"], json!(["bot.public"]));
