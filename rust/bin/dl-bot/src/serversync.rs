@@ -5824,6 +5824,7 @@ fn build_welle2b_onboarding_config(
         frischling_role,
         mitspieler_suche,
     )];
+    prompts.push(interest_prompt(model, &mut blockers));
     prompts.push(ping_prompt(model, &mut blockers));
     if let Some(mut prompt) = rank_prompt {
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
@@ -6039,33 +6040,7 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
                 "Spielersuche Ping Rolle",
                 "Spielersuche",
                 "Spieler-Suche",
-                // Live-Rollenname (Ist-Zustand 2026-07-03).
                 "Spieler Suche Ping",
-            ],
-        ),
-        (
-            "Events & Turniere",
-            &[
-                "Events & Turniere Ping Rolle",
-                "Events und Turniere Ping Rolle",
-                "Events & Turniere",
-                "Events Turniere",
-                "Turniere",
-                "Events",
-                // Live existiert keine Events/Turniere-Rolle; Competitive-
-                // Turniere/Scrims pingen heute "Grind Custom Ping" (Ist-Zustand
-                // 2026-07-03, alte Onboarding-Interessen-Frage).
-                "Grind Custom Ping",
-            ],
-        ),
-        (
-            "Custom Games",
-            &[
-                "Custom Games Ping Rolle",
-                "Custom Games",
-                // Live-Pendant: spaßige Customs (Hide and Seek etc.) pingen
-                // heute "Funny Custom Ping" (Ist-Zustand 2026-07-03).
-                "Funny Custom Ping",
             ],
         ),
         ("Streams", &["Streams"]),
@@ -6096,8 +6071,66 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
     }
 }
 
-// Discord erlaubt hart maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS,
-// live verifiziert 2026-07-15). Wir publishen drei: Weiche, Pings, Rang.
+struct InterestOption {
+    title: &'static str,
+    description: &'static str,
+    emoji: (&'static str, &'static str),
+    role_id: u64,
+}
+
+const INTEREST_OPTIONS: [InterestOption; 3] = [
+    InterestOption {
+        title: "Scrims",
+        description: "Trainingsspiele mit festen Teams. Danach mit /scrim-signup eintragen.",
+        emoji: dl_voice::router::ROUTER_EMOJI_RANKED,
+        role_id: dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID,
+    },
+    InterestOption {
+        title: "Lustige Custom Games",
+        description: "Hide and Seek, Spaßmodi und andere Customs. Du wirst gepingt, wenn eine Runde startet.",
+        emoji: dl_voice::router::ROUTER_EMOJI_BRAWL,
+        role_id: dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+    },
+    InterestOption {
+        title: "Turniere",
+        description: "Schaltet den Turnier-Bereich frei: Regeln, Ankündigungen, Team- und Spielersuche.",
+        emoji: dl_voice::router::ROUTER_EMOJI_CROWN,
+        role_id: dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+    },
+];
+
+fn interest_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardingPrompt {
+    let options = INTEREST_OPTIONS
+        .iter()
+        .map(|option| NativeOnboardingOption {
+            id: None,
+            title: option.title.to_string(),
+            description: Some(option.description.to_string()),
+            emoji: Some(json!({
+                "id": option.emoji.1,
+                "name": option.emoji.0,
+                "animated": false,
+            })),
+            role_ids: require_role_id_by_id(model, option.role_id, option.title, blockers)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        })
+        .collect();
+
+    NativeOnboardingPrompt {
+        id: None,
+        prompt_type: 0,
+        title: "Worauf hast du Lust?".to_string(),
+        options,
+        single_select: false,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
 fn find_rank_prompt(
     live: &NativeOnboardingConfig,
     model: &GuildModel,
@@ -6203,6 +6236,22 @@ fn require_role_id(
         ));
     }
     id
+}
+
+fn require_role_id_by_id(
+    model: &GuildModel,
+    role_id: u64,
+    label: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    if model.roles.contains_key(&role_id) {
+        Some(role_id)
+    } else {
+        blockers.push(format!(
+            "Rolle `{label}` ({role_id}) wurde im Live-Guild-Modell nicht gefunden"
+        ));
+        None
+    }
 }
 
 fn resolve_role_id(model: &GuildModel, aliases: &[&str]) -> Option<u64> {
