@@ -563,13 +563,6 @@ fn rang_guide_messages(
     let help_banner =
         optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings)?;
 
-    let banner_candidates: Vec<&crate::serversync::LoadedBanner<RangGuideBannerOutput>> =
-        std::iter::once(&hero_banner)
-            .chain(step_banners.iter())
-            .chain(std::iter::once(&help_banner))
-            .flatten()
-            .collect();
-
     let mut hero_components = Vec::new();
     if let Some(banner) = &hero_banner {
         hero_components.push(media_gallery(
@@ -703,10 +696,16 @@ fn rang_guide_messages(
         extras_children,
     ));
 
+    let hero_output = hero_banner.as_ref().map(|loaded| loaded.output.clone());
+    let banner_candidates = std::iter::once(hero_banner)
+        .chain(step_banners)
+        .chain(std::iter::once(help_banner))
+        .flatten()
+        .collect();
     Ok(chunk_rang_guide_components(
         components,
-        &banner_candidates,
-        hero_banner.as_ref().map(|loaded| loaded.output.clone()),
+        banner_candidates,
+        hero_output,
     ))
 }
 
@@ -723,7 +722,7 @@ fn section_text(title: &str, body: &str) -> String {
 
 fn chunk_rang_guide_components(
     components: Vec<Value>,
-    banner_candidates: &[&crate::serversync::LoadedBanner<RangGuideBannerOutput>],
+    banner_candidates: Vec<crate::serversync::LoadedBanner<RangGuideBannerOutput>>,
     hero_banner: Option<RangGuideBannerOutput>,
 ) -> Vec<RangGuideBuiltMessage> {
     let mut chunks = Vec::<Vec<Value>>::new();
@@ -750,27 +749,42 @@ fn chunk_rang_guide_components(
         chunks.push(current);
     }
 
-    chunks
-        .into_iter()
+    let chunk_refs: Vec<Vec<String>> = chunks
+        .iter()
         .map(|components| {
-            // Attachments gehoeren zu der Nachricht, deren Components sie per
-            // attachment://-URL referenzieren; IDs pro Nachricht ab 0.
             let mut refs = Vec::new();
-            for component in &components {
+            for component in components {
                 collect_attachment_refs(component, &mut refs);
             }
+            refs
+        })
+        .collect();
+    let mut banner_slots: Vec<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>> =
+        banner_candidates.into_iter().map(Some).collect();
+    chunks
+        .into_iter()
+        .zip(&chunk_refs)
+        .enumerate()
+        .map(|(chunk_index, (components, refs))| {
+            let later_refs = &chunk_refs[chunk_index + 1..];
             let attachments = refs
                 .iter()
                 .filter_map(|name| {
-                    banner_candidates
-                        .iter()
-                        .find(|banner| &banner.output.filename == name)
+                    let slot = banner_slots.iter_mut().find(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|banner| &banner.output.filename == name)
+                    })?;
+                    if later_refs.iter().any(|later| later.contains(name)) {
+                        slot.clone()
+                    } else {
+                        slot.take()
+                    }
                 })
                 .enumerate()
                 .map(|(index, banner)| RangGuidePayloadAttachment {
                     id: index as u8,
-                    filename: banner.output.filename.clone(),
-                    bytes: banner.bytes.clone(),
+                    filename: banner.output.filename,
+                    bytes: banner.bytes,
                 })
                 .collect();
             let has_hero = hero_banner

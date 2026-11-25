@@ -1058,9 +1058,8 @@ pub(crate) fn read_optional_banner(
     missing_suffix: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Option<Vec<u8>>, String> {
-    let path = repo_root.join(relative_path);
-    let bytes = read_banner_file(&path)
-        .map_err(|reason| format!("{label}-Banner `{}` {reason}", path.display()))?;
+    let bytes = read_banner_file(&repo_root.join(relative_path))
+        .map_err(|reason| format!("{label}-Banner `{relative_path}` {reason}"))?;
     if bytes.is_none() {
         warnings.push(format!(
             "{label}-Banner `{relative_path}` fehlt; {missing_suffix}"
@@ -8732,10 +8731,7 @@ mod tests {
                 read_optional_banner(temp.path(), "Test", relative_path, "ohne", &mut warnings);
             assert_eq!(
                 result,
-                Err(format!(
-                    "Test-Banner `{}` {reason}",
-                    temp.path().join(relative_path).display()
-                ))
+                Err(format!("Test-Banner `{relative_path}` {reason}"))
             );
             assert!(warnings.is_empty(), "{relative_path}: {warnings:?}");
         }

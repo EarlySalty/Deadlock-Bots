@@ -929,7 +929,7 @@ pub fn build_welcome_publish_output(
     let urls = &config.urls;
     let team_roles = resolve_team_roles(model, team_members, &mut warnings);
     let bot_team = bot_team_output(bot_user_id, texts, &mut warnings);
-    let navigation_messages = navigation_messages(model, repo_root, texts, &mut warnings)?;
+    let mut navigation_messages = navigation_messages(model, repo_root, texts, &mut warnings)?;
     let quickstart_buttons = quickstart_buttons(model, texts, urls)?;
     let hero_message_id = stored_message_ids
         .get("hero")
@@ -945,7 +945,7 @@ pub fn build_welcome_publish_output(
     for definition in WELCOME_SECTION_DEFINITIONS {
         let built_messages = match definition.id {
             "hero" => vec![hero_message(repo_root, texts, definition, &mut warnings)?],
-            "navigation" => navigation_messages.clone(),
+            "navigation" => std::mem::take(&mut navigation_messages),
             "team" => vec![team_message(
                 repo_root,
                 &team_roles,
@@ -1366,21 +1366,21 @@ impl NavigationChunk {
         self.components.push(component);
     }
 
-    fn push_category(&mut self, category: &NavigationCategoryMessage) {
+    fn push_category(&mut self, category: NavigationCategoryMessage) {
+        self.text_chars += category.text_chars();
         let mut container_components = Vec::new();
-        if let Some(divider) = &category.divider {
+        if let Some(divider) = category.divider {
             push_media_gallery_for_attachment(
                 &mut container_components,
                 &mut self.attachments,
                 &divider.filename,
-                divider.bytes.clone(),
+                divider.bytes,
             );
         } else {
             container_components.push(text_display(format!("### {}", category.category_name)));
         }
-        container_components.push(text_display(category.channel_list.clone()));
+        container_components.push(text_display(category.channel_list));
         let component = container(container_components);
-        self.text_chars += category.text_chars();
         self.component_count += count_component(&component);
         self.components.push(component);
         self.category_count += 1;
@@ -1437,28 +1437,19 @@ fn navigation_messages(
         }]);
     }
 
-    let mut chunks = vec![first];
-    for category in categories {
-        if !chunks.last().expect("nav chunk").can_add(&category) {
-            chunks.push(NavigationChunk::new());
+    let mut chunks = Vec::new();
+    let mut current = first;
+    for mut category in categories {
+        if !current.can_add(&category) {
+            chunks.push(std::mem::replace(&mut current, NavigationChunk::new()));
         }
-        if !chunks.last().expect("nav chunk").can_add(&category)
-            && chunks.last().expect("nav chunk").category_count == 0
-        {
-            let mut truncated = category.clone();
-            let list_budget = NAVIGATION_TEXT_CHAR_BUDGET.saturating_sub(truncated.title_chars());
-            truncated.channel_list = truncate_to_char_budget(&truncated.channel_list, list_budget);
-            chunks
-                .last_mut()
-                .expect("nav chunk")
-                .push_category(&truncated);
-            continue;
+        if !current.can_add(&category) && current.category_count == 0 {
+            let list_budget = NAVIGATION_TEXT_CHAR_BUDGET.saturating_sub(category.title_chars());
+            category.channel_list = truncate_to_char_budget(&category.channel_list, list_budget);
         }
-        chunks
-            .last_mut()
-            .expect("nav chunk")
-            .push_category(&category);
+        current.push_category(category);
     }
+    chunks.push(current);
 
     Ok(chunks
         .into_iter()
@@ -1538,13 +1529,13 @@ fn welcome_banner(
     warnings: &mut Vec<String>,
 ) -> Result<(WelcomeBannerOutput, Option<Vec<u8>>), String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let bytes = crate::serversync::read_banner_file(&repo_root.join(&relative_path))
-        .map_err(|reason| format!("Welcome-Banner `{relative_path}` {reason}"))?;
-    if bytes.is_none() {
-        warnings.push(format!(
-            "Welcome-Banner `{relative_path}` fehlt; Sektion wird ohne Bild gebaut"
-        ));
-    }
+    let bytes = crate::serversync::read_optional_banner(
+        repo_root,
+        "Welcome",
+        &relative_path,
+        "Sektion wird ohne Bild gebaut",
+        warnings,
+    )?;
     Ok((
         WelcomeBannerOutput {
             filename: filename.to_string(),
@@ -1564,12 +1555,14 @@ fn divider_attachment_for_category(
         return Ok(None);
     };
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let Some(bytes) = crate::serversync::read_banner_file(&repo_root.join(&relative_path))
-        .map_err(|reason| format!("Welcome-Divider `{relative_path}` {reason}"))?
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Welcome-Divider",
+        &relative_path,
+        &format!("Kategorie `{category_name}` wird ohne Bild gebaut"),
+        warnings,
+    )?
     else {
-        warnings.push(format!(
-            "Welcome-Divider `{relative_path}` fehlt; Kategorie `{category_name}` wird ohne Bild gebaut"
-        ));
         return Ok(None);
     };
     Ok(Some(WelcomePayloadAttachment {
@@ -2279,7 +2272,10 @@ description = "Custom allgemein"
     #[test]
     fn welcome_banner_und_divider_als_kaputter_link_brechen_ab() {
         let model = base_model();
-        for filename in ["hero.png", "divider-information.png"] {
+        for (filename, label) in [
+            ("hero.png", "Welcome-Banner"),
+            ("divider-information.png", "Welcome-Divider-Banner"),
+        ] {
             let temp = tempfile::tempdir().expect("tempdir");
             let banner_dir = temp.path().join(WELCOME_BANNER_DIR);
             std::fs::create_dir_all(&banner_dir).expect("banner dir");
@@ -2297,7 +2293,13 @@ description = "Custom allgemein"
                 true,
                 Some(999),
             );
-            assert!(result.is_err(), "{filename} muss den Build abbrechen");
+            assert_eq!(
+                result.err(),
+                Some(format!(
+                    "{label} `{WELCOME_BANNER_DIR}/{filename}` ist ein Link ohne Ziel"
+                )),
+                "{filename} muss den Build abbrechen"
+            );
         }
     }
 

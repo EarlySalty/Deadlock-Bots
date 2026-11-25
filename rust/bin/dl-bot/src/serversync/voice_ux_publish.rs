@@ -78,12 +78,9 @@ pub struct VoiceUxPublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
     pub cleared_legacy_kv_keys: Vec<String>,
     pub forum_post: VoiceUxForumPostOutput,
-    #[serde(skip)]
-    pub banners: VoiceUxBanners,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VoiceUxBanners {
+struct VoiceUxBanners {
     guide: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
     lfg: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
     spawn: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
@@ -205,27 +202,32 @@ pub fn build_voice_ux_publish_output(
 ) -> Result<VoiceUxPublishOutput, String> {
     let mut warnings = Vec::new();
     let banners = read_voice_ux_banners(repo_root, &mut warnings)?;
-    let base_messages = voice_ux_messages(&banners, forum_thread_id);
+    let base_messages = voice_ux_messages(banners, forum_thread_id);
     validate_voice_ux_messages(&base_messages)?;
     let payload_hash = voice_ux_payload_hash(&base_messages)?;
     let mut targets = Vec::new();
+    let message_count = base_messages.len();
+    let last_target = VOICE_UX_TARGET_CHANNEL_IDS.len().saturating_sub(1);
+    let mut base_messages = Some(base_messages);
 
-    for channel_id in VOICE_UX_TARGET_CHANNEL_IDS {
+    for (target_index, channel_id) in VOICE_UX_TARGET_CHANNEL_IDS.into_iter().enumerate() {
         let stored_ids = stored_message_ids
             .get(&channel_id)
             .cloned()
             .unwrap_or_default();
         let stored_payload_format = stored_payload_formats.get(&channel_id).cloned().flatten();
         let stored_payload_hash = stored_payload_hashes.get(&channel_id).cloned().flatten();
-        let repost_required = !voice_ux_storage_matches(
-            stored_payload_format.as_deref(),
-            &stored_ids,
-            base_messages.len(),
-        );
+        let repost_required =
+            !voice_ux_storage_matches(stored_payload_format.as_deref(), &stored_ids, message_count);
         let hash_matches = stored_payload_hash.as_deref() == Some(payload_hash.as_str());
-        let messages = base_messages
-            .iter()
-            .cloned()
+        let target_base = if target_index == last_target {
+            base_messages.take()
+        } else {
+            base_messages.clone()
+        };
+        let messages = target_base
+            .unwrap_or_default()
+            .into_iter()
             .enumerate()
             .map(|(message_index, mut message)| {
                 let stored_message_id = stored_ids.get(message_index).copied();
@@ -297,7 +299,6 @@ pub fn build_voice_ux_publish_output(
             pinned: false,
             warnings: Vec::new(),
         },
-        banners,
     })
 }
 
@@ -322,16 +323,70 @@ pub fn relink_voice_ux_forum_thread(
     output: &mut VoiceUxPublishOutput,
     thread_id: u64,
 ) -> Result<(), String> {
-    let fresh_messages = voice_ux_messages(&output.banners, Some(thread_id));
-    validate_voice_ux_messages(&fresh_messages)?;
-    let payload_hash = voice_ux_payload_hash(&fresh_messages)?;
+    let link_text = text_display_content(
+        &lfg_link_container(Some(thread_id)),
+        VOICE_UX_COMPONENT_ID_LFG_TEXT,
+    )
+    .ok_or_else(|| "Voice-UX-Mitspieler-finden-Text fehlt im Link-Container".to_string())?;
     for target in &mut output.targets {
-        target.payload_hash = payload_hash.clone();
-        for (message, fresh) in target.messages.iter_mut().zip(&fresh_messages) {
-            message.payload = fresh.payload.clone();
+        let replaced: usize = target
+            .messages
+            .iter_mut()
+            .map(|message| {
+                replace_text_display_content(
+                    &mut message.payload.components,
+                    VOICE_UX_COMPONENT_ID_LFG_TEXT,
+                    &link_text,
+                )
+            })
+            .sum();
+        if replaced != 1 {
+            return Err(format!(
+                "Voice-UX-Ziel {} enthält {replaced} Mitspieler-finden-Texte statt genau einem",
+                target.channel_id
+            ));
         }
+        validate_voice_ux_messages(&target.messages)?;
+        target.payload_hash = voice_ux_payload_hash(&target.messages)?;
     }
     Ok(())
+}
+
+fn text_display_content(value: &Value, id: u64) -> Option<String> {
+    if value.get("type").and_then(Value::as_u64) == Some(10)
+        && value.get("id").and_then(Value::as_u64) == Some(id)
+    {
+        return value
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    value
+        .get("components")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|child| text_display_content(child, id))
+}
+
+fn replace_text_display_content(components: &mut [Value], id: u64, content: &str) -> usize {
+    components
+        .iter_mut()
+        .map(|value| {
+            let own = if value.get("type").and_then(Value::as_u64) == Some(10)
+                && value.get("id").and_then(Value::as_u64) == Some(id)
+            {
+                value["content"] = Value::String(content.to_string());
+                1
+            } else {
+                0
+            };
+            let children = match value.get_mut("components") {
+                Some(Value::Array(children)) => replace_text_display_content(children, id, content),
+                _ => 0,
+            };
+            own + children
+        })
+        .sum()
 }
 
 pub fn adopt_voice_ux_message_ids(
@@ -367,7 +422,15 @@ pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String
                 })
                 .collect::<Vec<_>>();
             VoiceUxPayloadHashMessage {
-                message,
+                message: VoiceUxPayloadHashContent {
+                    message_index: 0,
+                    message_key: message.message_key.as_str(),
+                    action: "",
+                    stored_message_id: None,
+                    message_id: None,
+                    banner: &message.banner,
+                    payload: &message.payload,
+                },
                 attachment_hashes,
             }
         })
@@ -379,8 +442,19 @@ pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String
 
 #[derive(Serialize)]
 struct VoiceUxPayloadHashMessage<'a> {
-    message: &'a VoiceUxMessageOutput,
+    message: VoiceUxPayloadHashContent<'a>,
     attachment_hashes: Vec<VoiceUxPayloadHashAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct VoiceUxPayloadHashContent<'a> {
+    message_index: usize,
+    message_key: &'a str,
+    action: &'a str,
+    stored_message_id: Option<u64>,
+    message_id: Option<u64>,
+    banner: &'a Option<VoiceUxBannerOutput>,
+    payload: &'a VoiceUxMessagePayload,
 }
 
 #[derive(Serialize)]
@@ -533,25 +607,27 @@ fn read_voice_ux_banners(
 }
 
 fn voice_ux_messages(
-    banners: &VoiceUxBanners,
+    banners: VoiceUxBanners,
     forum_thread_id: Option<u64>,
 ) -> Vec<VoiceUxMessageOutput> {
+    let VoiceUxBanners {
+        guide,
+        lfg,
+        spawn,
+        manage,
+    } = banners;
     vec![
         message(
             "guide_lfg",
-            banners.guide.as_ref().map(|loaded| loaded.output.clone()),
+            guide.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
                 VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR,
                 vec![
-                    (
-                        VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
-                        banners.guide.as_ref(),
-                        guide_container(),
-                    ),
+                    (VOICE_UX_COMPONENT_ID_GUIDE_MEDIA, guide, guide_container()),
                     (
                         VOICE_UX_COMPONENT_ID_LFG_MEDIA,
-                        banners.lfg.as_ref(),
+                        lfg,
                         lfg_link_container(forum_thread_id),
                     ),
                 ],
@@ -559,19 +635,15 @@ fn voice_ux_messages(
         ),
         message(
             "spawn_manage",
-            banners.spawn.as_ref().map(|loaded| loaded.output.clone()),
+            spawn.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
                 VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR,
                 vec![
-                    (
-                        VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
-                        banners.spawn.as_ref(),
-                        spawn_container(),
-                    ),
+                    (VOICE_UX_COMPONENT_ID_SPAWN_MEDIA, spawn, spawn_container()),
                     (
                         VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
-                        banners.manage.as_ref(),
+                        manage,
                         manage_container(),
                     ),
                 ],
@@ -636,10 +708,6 @@ fn guide_container() -> Value {
     )
 }
 
-// Panel-Variante der Mitspieler-finden-Sektion: keine eigenen Buttons — Gesuch
-// und 🔔 laufen über den Forum-Post, hierhin kommt nur der Link. Die Thread-ID
-// stammt aus dem KV; solange der Post noch nicht existiert, zeigt der Link auf
-// das Forum selbst.
 fn lfg_link_container(forum_thread_id: Option<u64>) -> Value {
     let guild_id = dl_server_as_code::DEFAULT_GUILD_ID;
     let url = match forum_thread_id {
@@ -790,14 +858,12 @@ fn manage_container() -> Value {
     )
 }
 
-// Beide Sektionen einer Message landen in EINEM Container, damit die Message
-// als eine zusammenhängende Karte rendert statt als zwei getrennte Blöcke.
 fn payload_with_banner_sections(
     container_id: u64,
     separator_id: u64,
     sections: Vec<(
         u64,
-        Option<&crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+        Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
         Value,
     )>,
 ) -> VoiceUxMessagePayload {
@@ -806,12 +872,12 @@ fn payload_with_banner_sections(
     let section_count = sections.len();
     for (index, (media_id, banner, section_container)) in sections.into_iter().enumerate() {
         if let Some(banner) = banner {
+            children.push(media_gallery(media_id, &banner.output.filename));
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
-                filename: banner.output.filename.clone(),
-                bytes: banner.bytes.clone(),
+                filename: banner.output.filename,
+                bytes: banner.bytes,
             });
-            children.push(media_gallery(media_id, &banner.output.filename));
         }
         children.extend(container_children(section_container));
         if index + 1 < section_count {
@@ -1180,5 +1246,42 @@ mod tests {
             &lfg_watch_only,
             bot_id
         ));
+    }
+
+    #[test]
+    fn voice_ux_relink_gleicht_einem_frischen_build_mit_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_voice_ux_banners(temp.path(), b"banner");
+        let ids = BTreeMap::from([
+            (VOICE_UX_CHANNEL_ID, vec![1, 2]),
+            (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, vec![5, 6]),
+        ]);
+        let build = |thread_id| {
+            build_voice_ux_publish_output(
+                temp.path(),
+                &ids,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                thread_id,
+                None,
+                false,
+            )
+            .expect("build")
+        };
+        let fresh = build(Some(987_654_321));
+        let mut relinked = build(None);
+        assert_ne!(
+            relinked.targets[0].payload_hash,
+            fresh.targets[0].payload_hash
+        );
+        relink_voice_ux_forum_thread(&mut relinked, 987_654_321).expect("relink");
+        assert_eq!(relinked.targets, fresh.targets);
+
+        for message in &mut relinked.targets[1].messages {
+            message.payload.components.clear();
+        }
+        let error = relink_voice_ux_forum_thread(&mut relinked, 987_654_321)
+            .expect_err("missing link text");
+        assert!(error.contains("0 Mitspieler-finden-Texte"), "{error}");
     }
 }
