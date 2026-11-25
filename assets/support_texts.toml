@@ -1,25 +1,44 @@
-# Support V2 Texte fuer /serversync/support-apply.
-# Fehlende Felder fallen auf Compile-Defaults zurueck.
+# Support-Panel fuer /serversync/support-apply.
+# Die Stripe-Schaltflaeche erscheint erst, wenn [urls].stripe gesetzt ist.
+# Vorher keine Checkout-URL erfinden oder auf ein anderes Produkt umleiten.
 
 [texts]
 title = "**💜 Server unterstützen**"
-boost = """**Du hast Nitro?**
-Dann kannst du uns ohne Extra-Kosten mit bis zu zwei Server-Boosts unterstützen: Klick oben links auf den Servernamen → **Server Boost** → auf diesen Server boosten. Das war's schon."""
-donation = """**Kein Nitro?**
-Du kannst uns auch mit einer Spende unterstützen — sie fließt komplett in Serverkosten, Bots und unsere Website. Als Dankeschön bekommst du innerhalb von 24 Stunden nach Eingang die exklusive Unterstützer-Rolle für 31 Tage (nicht auf andere Accounts übertragbar)."""
-benefits = """**Deine Vorteile als Booster & Unterstützer**
-- Privater Text- & Voice-Bereich
-- Zugriff auf den ||geheimen|| Caster-Chat — plane Turniere & Events direkt mit
-- Lese-Zugriff auf den ||noch geheimeren|| Community-Moderatoren-Chat <:pepecrywow:1483145247319003320>
-- Platz in der Aktivitätenliste direkt unterm Team ❤️
-- Zugriff auf <#1326984426906714236>
-- Voice-Moderationsrechte (Leute moven, in volle Kanäle joinen)
-- Du streamst? Dann warten ein paar exklusive Extra-Features für den Twitch-Bot auf dich
+boost = """**So kannst du den Server unterstützen**
+• **Discord-Server-Abo** oder **Server-Boost** (Boosts zählen vorerst ebenfalls)
+• **Ko-fi-Spende** – die Unterstützer-Rolle gibt es dafür für 31 Tage, nach manueller Freischaltung
+• **Kostenpflichtiges Twitch-Bot-Abo** – die Discord-Supporter-Vorteile gibt es zusätzlich dazu, sobald die automatische Zuordnung eingerichtet ist
 
-Danke — jede Unterstützung, egal wie groß, trägt den Server. 💜"""
+Ein eigenes Stripe-Abo für Discord ist in Vorbereitung."""
+donation = """**Warum brauche ich Unterstützung?**
+Server, APIs, KI-Abos und die Entwicklung kosten je nach Monat **50 bis 250 €**, manchmal deutlich mehr. Allein 2026 sind nach meinen bisherigen Abrechnungen schon **über 1.600 €** zusammengekommen – ohne meine Arbeitszeit.
+
+Und ja, auch die KI-Abos kosten Geld. Bei so vielen Entwicklungsstunden sind sie aber deutlich günstiger, als die gleiche Zeit selbst nur zum Mindestlohn bei einem Entwickler bezahlen zu müssen. Planen, testen, Fehler beheben und alles betreiben muss ich trotzdem selbst.
+
+Das Geld fließt zurück in Infrastruktur und Entwicklung, nicht in meinen Gewinn."""
+benefits = """**Was bekommen Server-Supporter?**
+• **Steam Bot:** Die komplette Nutzung mit Steam-Verknüpfung, Rang-Rollen und Match-Abfragen wird auf Supporter umgestellt.
+• **Deadlock Brain:** Zugang ohne zusätzliche Kosten und ohne Nutzungslimits.
+• **Discord:** private Supporter-Channels, Streamer-VC und zusätzliche Voice-Rechte in freigegebenen Bereichen.
+• **Mitgestalten:** Abstimmungen, Einblicke in die Entwicklung und früher Zugang zu Betatests.
+
+**Was noch kommen soll**
+• **Brain-Build-Helfer:** Item- und Build-Vorschläge mit Erklärungen und Anpassungen an Gegner und Patches.
+• **Patch-Watchlist:** Benachrichtigungen zu Änderungen an euren Lieblingsheroes und Items.
+• Weitere Steam-Bot-Funktionen, sofern die Daten zuverlässig verfügbar sind.
+
+**Weiterhin kostenlos:** Mitspieler suchen, Voice-Channels, reguläre Turniere und Scrims sowie das normale Coaching.
+
+Danke an alle, die dabei helfen, den Server und die Projekte am Laufen zu halten. 💜"""
 
 [buttons]
-donate = "☕ Auf Ko-fi spenden"
+donate = "☕ Über Ko-fi unterstützen"
+stripe = "💳 Stripe-Abo abschließen"
 
 [urls]
 donate = "https://ko-fi.com/deutschedeadlockcommunity"
+# Stripe-Payment-Link fuer das *Server-Supporter*-Produkt eintragen, sobald vorhanden.
+# WICHTIG: Erst aktivieren, wenn die Zuordnung der Zahlung zum Discord-Konto
+# und die Vergabe/der Entzug der Supporter-Rolle umgesetzt und getestet sind.
+# Bestehende Steam-Plus-/Twitch-Bot-Abos duerfen nicht als dasselbe Produkt gelten.
+# stripe = "https://buy.stripe.com/DEIN_SERVER_SUPPORTER_PAYMENT_LINK"

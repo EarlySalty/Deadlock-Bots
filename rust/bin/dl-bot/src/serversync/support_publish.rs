@@ -25,6 +25,7 @@ pub const SUPPORT_COMPONENT_ID_MAIN_CONTAINER: u64 = 33_002;
 pub const SUPPORT_COMPONENT_ID_MAIN_TEXT: u64 = 33_003;
 pub const SUPPORT_COMPONENT_ID_ACTION_ROW: u64 = 33_004;
 pub const SUPPORT_COMPONENT_ID_DONATE_BUTTON: u64 = 33_005;
+pub const SUPPORT_COMPONENT_ID_STRIPE_BUTTON: u64 = 33_006;
 
 pub const SUPPORT_MARKER_COMPONENT_IDS: &[u64] = &[
     SUPPORT_COMPONENT_ID_HERO_MEDIA,
@@ -40,10 +41,11 @@ const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 
 pub const SUPPORT_DONATE_URL_DEFAULT: &str = "https://ko-fi.com/deutschedeadlockcommunity";
 pub const SUPPORT_TITLE: &str = "**💜 Server unterstützen**";
-pub const SUPPORT_BLOCK_BOOST: &str = "**Du hast Nitro?**\nDann kannst du uns ohne Extra-Kosten mit bis zu zwei Server-Boosts unterstützen: Klick oben links auf den Servernamen → **Server Boost** → auf diesen Server boosten. Das war's schon.";
-pub const SUPPORT_BLOCK_DONATION: &str = "**Kein Nitro?**\nDu kannst uns auch mit einer Spende unterstützen — sie fließt komplett in Serverkosten, Bots und unsere Website. Als Dankeschön bekommst du innerhalb von 24 Stunden nach Eingang die exklusive Unterstützer-Rolle für 31 Tage (nicht auf andere Accounts übertragbar).";
-pub const SUPPORT_BLOCK_BENEFITS: &str = "**Deine Vorteile als Booster & Unterstützer**\n- Privater Text- & Voice-Bereich\n- Zugriff auf den ||geheimen|| Caster-Chat — plane Turniere & Events direkt mit\n- Lese-Zugriff auf den ||noch geheimeren|| Community-Moderatoren-Chat <:pepecrywow:1483145247319003320>\n- Platz in der Aktivitätenliste direkt unterm Team ❤️\n- Zugriff auf <#1326984426906714236>\n- Voice-Moderationsrechte (Leute moven, in volle Kanäle joinen)\n- Du streamst? Dann warten ein paar exklusive Extra-Features für den Twitch-Bot auf dich\n\nDanke — jede Unterstützung, egal wie groß, trägt den Server. 💜";
-pub const SUPPORT_DONATE_BUTTON_LABEL: &str = "☕ Auf Ko-fi spenden";
+pub const SUPPORT_BLOCK_BOOST: &str = "**So kannst du den Server unterstützen**\n• **Discord-Server-Abo** oder **Server-Boost** (Boosts zählen vorerst ebenfalls)\n• **Ko-fi-Spende** – die Unterstützer-Rolle gibt es dafür für 31 Tage, nach manueller Freischaltung\n• **Kostenpflichtiges Twitch-Bot-Abo** – die Discord-Supporter-Vorteile gibt es zusätzlich dazu, sobald die automatische Zuordnung eingerichtet ist\n\nEin eigenes Stripe-Abo für Discord ist in Vorbereitung.";
+pub const SUPPORT_BLOCK_DONATION: &str = "**Warum brauche ich Unterstützung?**\nServer, APIs, KI-Abos und die Entwicklung kosten je nach Monat **50 bis 250 €**, manchmal deutlich mehr. Allein 2026 sind nach meinen bisherigen Abrechnungen schon **über 1.600 €** zusammengekommen – ohne meine Arbeitszeit.\n\nUnd ja, auch die KI-Abos kosten Geld. Bei so vielen Entwicklungsstunden sind sie aber deutlich günstiger, als die gleiche Zeit selbst nur zum Mindestlohn bei einem Entwickler bezahlen zu müssen. Planen, testen, Fehler beheben und alles betreiben muss ich trotzdem selbst.\n\nDas Geld fließt zurück in Infrastruktur und Entwicklung, nicht in meinen Gewinn.";
+pub const SUPPORT_BLOCK_BENEFITS: &str = "**Was bekommen Server-Supporter?**\n• **Steam Bot:** Die komplette Nutzung mit Steam-Verknüpfung, Rang-Rollen und Match-Abfragen wird auf Supporter umgestellt.\n• **Deadlock Brain:** Zugang ohne zusätzliche Kosten und ohne Nutzungslimits.\n• **Discord:** private Supporter-Channels, Streamer-VC und zusätzliche Voice-Rechte in freigegebenen Bereichen.\n• **Mitgestalten:** Abstimmungen, Einblicke in die Entwicklung und früher Zugang zu Betatests.\n\n**Was noch kommen soll**\n• **Brain-Build-Helfer:** Item- und Build-Vorschläge mit Erklärungen und Anpassungen an Gegner und Patches.\n• **Patch-Watchlist:** Benachrichtigungen zu Änderungen an euren Lieblingsheroes und Items.\n• Weitere Steam-Bot-Funktionen, sofern die Daten zuverlässig verfügbar sind.\n\n**Weiterhin kostenlos:** Mitspieler suchen, Voice-Channels, reguläre Turniere und Scrims sowie das normale Coaching.\n\nDanke an alle, die dabei helfen, den Server und die Projekte am Laufen zu halten. 💜";
+pub const SUPPORT_DONATE_BUTTON_LABEL: &str = "☕ Über Ko-fi unterstützen";
+pub const SUPPORT_STRIPE_BUTTON_LABEL: &str = "💳 Stripe-Abo abschließen";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SupportPublishOutput {
@@ -130,11 +132,13 @@ struct ResolvedSupportTexts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSupportButtons {
     donate: String,
+    stripe: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSupportUrls {
     donate: String,
+    stripe: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -161,12 +165,14 @@ struct SupportBodyTextsToml {
 #[serde(deny_unknown_fields)]
 struct SupportButtonsToml {
     donate: Option<String>,
+    stripe: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SupportUrlsToml {
     donate: Option<String>,
+    stripe: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -379,9 +385,11 @@ impl ResolvedSupportConfig {
             },
             buttons: ResolvedSupportButtons {
                 donate: SUPPORT_DONATE_BUTTON_LABEL.to_string(),
+                stripe: SUPPORT_STRIPE_BUTTON_LABEL.to_string(),
             },
             urls: ResolvedSupportUrls {
                 donate: SUPPORT_DONATE_URL_DEFAULT.to_string(),
+                stripe: None,
             },
         }
     }
@@ -392,7 +400,11 @@ impl ResolvedSupportConfig {
         apply_optional(&mut self.texts.donation, file.texts.donation);
         apply_optional(&mut self.texts.benefits, file.texts.benefits);
         apply_optional(&mut self.buttons.donate, file.buttons.donate);
+        apply_optional(&mut self.buttons.stripe, file.buttons.stripe);
         apply_optional(&mut self.urls.donate, file.urls.donate);
+        if let Some(stripe) = file.urls.stripe {
+            self.urls.stripe = Some(stripe);
+        }
         self
     }
 }
@@ -423,18 +435,28 @@ fn support_messages(
         });
     }
 
+    let mut support_buttons = vec![link_button(
+        SUPPORT_COMPONENT_ID_DONATE_BUTTON,
+        &config.buttons.donate,
+        &config.urls.donate,
+    )];
+    if let Some(stripe_url) = &config.urls.stripe {
+        if stripe_url.starts_with("https://buy.stripe.com/") {
+            support_buttons.push(link_button(
+                SUPPORT_COMPONENT_ID_STRIPE_BUTTON,
+                &config.buttons.stripe,
+                stripe_url,
+            ));
+        } else {
+            warnings.push("Stripe-Abo-Button deaktiviert: [urls].stripe muss ein gueltiger https://buy.stripe.com/-Payment-Link sein".to_string());
+        }
+    }
+
     components.push(container(
         SUPPORT_COMPONENT_ID_MAIN_CONTAINER,
         vec![
             text_display(SUPPORT_COMPONENT_ID_MAIN_TEXT, support_text(&config.texts)),
-            action_row(
-                SUPPORT_COMPONENT_ID_ACTION_ROW,
-                vec![link_button(
-                    SUPPORT_COMPONENT_ID_DONATE_BUTTON,
-                    &config.buttons.donate,
-                    &config.urls.donate,
-                )],
-            ),
+            action_row(SUPPORT_COMPONENT_ID_ACTION_ROW, support_buttons),
         ],
     ));
 
@@ -728,6 +750,55 @@ donate = "https://example.invalid/kofi"
         assert!(button.get("custom_id").is_none());
         validate_support_message_budget(payload).expect("budget");
         assert!(has_support_v2_marker(&payload.components));
+    }
+
+    #[test]
+    fn stripe_abo_button_erscheint_nur_mit_passendem_payment_link() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_support_texts_file(
+            temp.path(),
+            r#"[urls]
+stripe = "https://buy.stripe.com/test-server-supporter"
+"#,
+        );
+        let output = build_support_publish_output(
+            temp.path(),
+            &[],
+            Some(SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("output");
+        let row = &output.messages[0].payload.components[0]["components"][1]["components"];
+        assert_eq!(row.as_array().expect("buttons").len(), 2);
+        assert_eq!(row[1]["id"], json!(SUPPORT_COMPONENT_ID_STRIPE_BUTTON));
+        assert_eq!(row[1]["label"], json!(SUPPORT_STRIPE_BUTTON_LABEL));
+        assert_eq!(
+            row[1]["url"],
+            "https://buy.stripe.com/test-server-supporter"
+        );
+        assert_eq!(row[1]["style"], json!(5));
+
+        write_support_texts_file(
+            temp.path(),
+            r#"[urls]
+stripe = "https://example.com/no-payment-link"
+"#,
+        );
+        let invalid = build_support_publish_output(
+            temp.path(),
+            &[],
+            Some(SUPPORT_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("invalid link leaves Ko-fi active");
+        let row = &invalid.messages[0].payload.components[0]["components"][1]["components"];
+        assert_eq!(row.as_array().expect("buttons").len(), 1);
+        assert!(invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Stripe-Abo-Button deaktiviert")));
     }
 
     #[test]

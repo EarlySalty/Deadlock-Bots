@@ -239,8 +239,9 @@ impl RecordingFailure {
             // Zweifel lieber loggen als schweigen.
             Err(poisoned) => poisoned.into_inner(),
         };
-        let due = last
-            .is_none_or(|logged_at| now.saturating_duration_since(logged_at) >= DROP_FAILURE_WINDOW);
+        let due = last.is_none_or(|logged_at| {
+            now.saturating_duration_since(logged_at) >= DROP_FAILURE_WINDOW
+        });
         if due {
             *last = Some(now);
         }

@@ -10,10 +10,7 @@ fn dynamic_dashboard_html_is_escaped() {
         assert!(html.contains(ESCAPER), "HTML escaper is missing");
     }
 
-    for escaped_sink in [
-        "${esc(repo.name)}",
-        "${esc(e.message)}",
-    ] {
+    for escaped_sink in ["${esc(repo.name)}", "${esc(e.message)}"] {
         assert!(dashboard.contains(escaped_sink), "missing {escaped_sink}");
     }
 
