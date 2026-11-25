@@ -1,0 +1,309 @@
+diff --git a/rust/crates/dl-brain/src/brain_api.rs b/rust/crates/dl-brain/src/brain_api.rs
+index 1fef482b..d321ec1e 100644
+--- a/rust/crates/dl-brain/src/brain_api.rs
++++ b/rust/crates/dl-brain/src/brain_api.rs
+@@ -388,12 +388,37 @@ impl AiAnswerer for BrainApiAnswerer {
+         user_id: u64,
+         task: &crate::DiscordAnswerTask,
+         user_questions: &[String],
++    ) -> Result<BrainOutcome, BrainError> {
++        self.answer_discord_task_with_history_and_read_access(
++            question,
++            user_id,
++            task,
++            user_questions,
++            false,
++        )
++        .await
++    }
++
++    async fn answer_discord_task_with_history_and_read_access(
++        &self,
++        question: &str,
++        user_id: u64,
++        task: &crate::DiscordAnswerTask,
++        user_questions: &[String],
++        allow_discord_reads: bool,
+     ) -> Result<BrainOutcome, BrainError> {
+         if !task.valid() {
+             return Err(classified_backend_error("anfrage"));
+         }
+-        self.answer_query(question, Some(user_id), false, None, user_questions, 1800)
+-            .await
++        self.answer_query(
++            question,
++            Some(user_id),
++            allow_discord_reads,
++            None,
++            user_questions,
++            1800,
++        )
++        .await
+     }
+ 
+     async fn answer(&self, question: &str) -> Result<BrainOutcome, BrainError> {
+diff --git a/rust/crates/dl-brain/src/lib.rs b/rust/crates/dl-brain/src/lib.rs
+index 703e3bf1..716a95a4 100644
+--- a/rust/crates/dl-brain/src/lib.rs
++++ b/rust/crates/dl-brain/src/lib.rs
+@@ -148,6 +148,18 @@ pub trait AiAnswerer: Send + Sync {
+         self.answer_discord_task(question, user_id, task).await
+     }
+ 
++    async fn answer_discord_task_with_history_and_read_access(
++        &self,
++        question: &str,
++        user_id: u64,
++        task: &DiscordAnswerTask,
++        user_questions: &[String],
++        _allow_discord_reads: bool,
++    ) -> Result<BrainOutcome, BrainError> {
++        self.answer_discord_task_with_history(question, user_id, task, user_questions)
++            .await
++    }
++
+     async fn answer_discord_task(
+         &self,
+         _question: &str,
+diff --git a/rust/crates/dl-community/src/concierge.rs b/rust/crates/dl-community/src/concierge.rs
+index c77c5674..2c6f7716 100644
+--- a/rust/crates/dl-community/src/concierge.rs
++++ b/rust/crates/dl-community/src/concierge.rs
+@@ -1697,6 +1697,7 @@ struct AnswerOptions<'a> {
+     route: AnswerRoute,
+     response_components: Option<&'a Value>,
+     feedback: Option<&'a BrainFeedback>,
++    allow_discord_reads: bool,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -4841,6 +4842,7 @@ impl Concierge {
+                 route: AnswerRoute::OnboardingTour,
+                 response_components: Some(response_components),
+                 feedback: None,
++                allow_discord_reads: false,
+             },
+         )
+         .await
+@@ -5032,6 +5034,7 @@ impl Concierge {
+                                 route: AnswerRoute::Concierge,
+                                 response_components: None,
+                                 feedback,
++                                allow_discord_reads: false,
+                             },
+                         )
+                         .await;
+@@ -5089,6 +5092,7 @@ impl Concierge {
+                         route: AnswerRoute::Concierge,
+                         response_components: None,
+                         feedback,
++                        allow_discord_reads: false,
+                     },
+                 )
+                 .await;
+@@ -5107,6 +5111,7 @@ impl Concierge {
+                     route: AnswerRoute::Concierge,
+                     response_components: None,
+                     feedback,
++                    allow_discord_reads: is_direct_dm,
+                 },
+             )
+             .await;
+@@ -5384,6 +5389,7 @@ impl Concierge {
+                     user_id,
+                     channel_id,
+                     feedback: options.feedback,
++                    allow_discord_reads: options.allow_discord_reads,
+                 },
+                 trimmed,
+                 Some(&history),
+@@ -5646,11 +5652,12 @@ impl Concierge {
+         };
+         let user_questions =
+             dl_brain::bounded_user_questions(history.unwrap_or_default(), question);
+-        let request = brain.answer_discord_task_with_history(
++        let request = brain.answer_discord_task_with_history_and_read_access(
+             question,
+             binding.user_id,
+             &task,
+             &user_questions,
++            binding.allow_discord_reads,
+         );
+         let result = match binding.feedback {
+             Some(feedback) => {
+@@ -6041,6 +6048,7 @@ impl Concierge {
+                     user_id,
+                     channel_id,
+                     feedback: options.feedback,
++                    allow_discord_reads: options.allow_discord_reads,
+                 },
+                 question,
+                 None,
+@@ -8148,6 +8156,7 @@ struct AnswerBinding<'a> {
+     user_id: u64,
+     channel_id: u64,
+     feedback: Option<&'a BrainFeedback>,
++    allow_discord_reads: bool,
+ }
+ 
+ struct AnswerDecision {
+@@ -9687,6 +9696,7 @@ mod tests {
+                         user_id: 42,
+                         channel_id: 10,
+                         feedback: None,
++                        allow_discord_reads: false,
+                     },
+                     "Hallo",
+                     Some(&["Gespeicherter privater Verlauf".into()]),
+@@ -9761,6 +9771,7 @@ mod tests {
+                         user_id: 42,
+                         channel_id: 10,
+                         feedback: Some(&feedback),
++                        allow_discord_reads: false,
+                     },
+                     question,
+                     None,
+@@ -9936,6 +9947,7 @@ mod tests {
+                     user_id: 42,
+                     channel_id: 10,
+                     feedback: None,
++                    allow_discord_reads: false,
+                 },
+                 "Wie funktioniert Parry in Deadlock?",
+                 None,
+@@ -9985,6 +9997,7 @@ mod tests {
+                     user_id: 42,
+                     channel_id: 10,
+                     feedback: None,
++                    allow_discord_reads: false,
+                 },
+                 "Bist du ein Bot?",
+                 None,
+@@ -10022,6 +10035,7 @@ mod tests {
+                     user_id: 42,
+                     channel_id: 10,
+                     feedback: None,
++                    allow_discord_reads: false,
+                 },
+                 "Wie geht es dir?",
+                 None,
+@@ -10059,6 +10073,7 @@ mod tests {
+                     user_id: 42,
+                     channel_id: 10,
+                     feedback: None,
++                    allow_discord_reads: false,
+                 },
+                 "Hallo",
+                 None,
+@@ -10117,6 +10132,7 @@ mod tests {
+                             user_id: 42,
+                             channel_id: 10,
+                             feedback: None,
++                            allow_discord_reads: false,
+                         },
+                         question,
+                         stateful.then_some(history.as_slice()),
+@@ -10217,6 +10233,7 @@ mod tests {
+                                 route: AnswerRoute::Concierge,
+                                 response_components: None,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                         )
+                         .await
+@@ -10232,6 +10249,7 @@ mod tests {
+                                 route: AnswerRoute::Concierge,
+                                 response_components: None,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                         )
+                         .await
+@@ -10314,6 +10332,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -10415,6 +10434,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -10570,6 +10590,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -10808,6 +10829,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -10859,6 +10881,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -10939,6 +10962,7 @@ mod tests {
+                                 user_id: 42,
+                                 channel_id: 10,
+                                 feedback: None,
++                                allow_discord_reads: false,
+                             },
+                             question,
+                             None,
+@@ -11017,6 +11041,7 @@ mod tests {
+                         user_id: 42,
+                         channel_id: 10,
+                         feedback: None,
++                        allow_discord_reads: false,
+                     },
+                     question,
+                     None,
+@@ -11091,6 +11116,7 @@ mod tests {
+                             user_id: 42,
+                             channel_id: 10,
+                             feedback: None,
++                            allow_discord_reads: false,
+                         },
+                         question,
+                         None,
+@@ -11147,6 +11173,7 @@ mod tests {
+                         user_id: 42,
+                         channel_id: 10,
+                         feedback: None,
++                        allow_discord_reads: false,
+                     },
+                     "Wie funktioniert Parry in Deadlock?",
+                     None,
+@@ -11208,6 +11235,7 @@ mod tests {
+                         route: AnswerRoute::Concierge,
+                         response_components: None,
+                         feedback: None,
++                        allow_discord_reads: false,
+                     },
+                 )
+                 .await;
+@@ -11297,6 +11325,7 @@ mod tests {
+                             route: AnswerRoute::Concierge,
+                             response_components: None,
+                             feedback: None,
++                            allow_discord_reads: false,
+                         },
+                     )
+                     .await;

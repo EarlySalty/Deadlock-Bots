@@ -1,0 +1,20 @@
+    trivia questions 10, rounds 10, item plan Inhibitor, Stalker, Healing Tempo, Transcendent Cooldown, Scourge
+ok   de hub lists 7 modes with new titles [7]
+ok   de hub requests no sound index
+ok   hub-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"BODY.null outline none 3px"}]
+ok   en hub lists 7 modes with new titles [7]
+ok   en hub requests no sound index
+ok   hub-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"BODY.null outline none 3px"}]
+ok   trivia reachable via spiel param, no sound index
+ok   item-stats reachable via spiel param, no sound index
+ok   higher-lower reachable via spiel param, no sound index
+ok   guess-hero reachable via spiel param, no sound index
+ok   guess-item reachable via spiel param, no sound index
+ok   guess-ability reachable via spiel param, no sound index
+ok   hub link opens trivia in place
+ok   guess-hero still plays after shared changes
+ok   guess-item still plays after shared changes
+FAIL run aborted [Error: section end]
+checks ok 15 failed 1
+page or console problems 0, aborted requests 0
+

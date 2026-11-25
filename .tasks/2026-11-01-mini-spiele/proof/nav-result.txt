@@ -1,0 +1,10 @@
+ok  hub title
+ok  tile opens game without reload [http://localhost:4174/mini-spiele?spiel=guess-item]
+ok  back link returns to hub [http://localhost:4174/mini-spiele]
+ok  previous day link keeps route [http://localhost:4174/mini-spiele?date=2026-10-31]
+ok  archive badge
+ok  unknown game shows hub
+ok  future date falls back to today
+ok  CSP: API fetch ok and asset image loaded [{"n":1,"loaded":1,"src":"https://assets-bucket.deadlock-api.com/assets-api-res/images"}]
+ok  CSP: other host stays blocked (enforcement probe) [blocked]
+problems 0

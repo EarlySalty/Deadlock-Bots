@@ -1,0 +1,30 @@
+ok   de guess-hero no empty names [44 entries]
+info de guess-hero duplicate names: 0 
+ok   de guess-item no empty names [173 entries]
+info de guess-item duplicate names: 0 
+ok   de guess-ability no empty names [176 entries]
+info de guess-ability duplicate names: 0 
+ok   en guess-hero no empty names [44 entries]
+info en guess-hero duplicate names: 0 
+ok   en guess-item no empty names [173 entries]
+info en guess-item duplicate names: 0 
+ok   en guess-ability no empty names [176 entries]
+info en guess-ability duplicate names: 0 
+ok   German choice survives reload [stored=de pressed=true]
+ok   wrong guess listed [Erweitertes Magazin]
+ok   wrong guess marked
+ok   language switch relocalizes the guess [Extended Magazine]
+ok   guess survives reload
+ok   right guess marked correct [Radiant Regeneration]
+ok   combobox disabled after win
+info mode share text: "Deadlockdle #225: Item 2/5\n🟥🟩"
+ok   mode share text has day number and grid
+ok   mode share text has no URL
+ok   won state survives reload
+info hub share text: "Deadlockdle #225\n\n✅ Hero\n✅ Item\n✅ Ability"
+ok   hub share text lists every game
+ok   hub share text has no URL
+ok   hub share text has no trailing blank line
+problems 0
+
+exit=0

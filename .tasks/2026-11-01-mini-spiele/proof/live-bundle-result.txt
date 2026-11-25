@@ -1,0 +1,34 @@
+ok  guess-hero same answer id across languages [58 Vyper / Vyper]
+ok  guess-item same answer id across languages [2095565695 Geschärftes Bajonett / Point Blank]
+ok  guess-ability same answer id across languages [539192269 Überspannung / Power Surge]
+FAIL de hero silhouette filter wired
+ok  de guess-hero wrong guess listed [Infernus]
+ok  de guess-hero wrong marked
+ok  de guess-hero guess survives reload
+ok  de->en guess-hero guess relocalized mid puzzle [Infernus]
+ok  de->en guess-hero after switch and reload
+ok  en guess-hero attempts status [Attempts left: 5]
+ok  en hero mobile no horizontal overflow [0]
+ok  en guess-hero won [Vyper]
+ok  en guess-hero answer shown
+ok  en guess-hero result survives reload
+ok  de guess-hero finished state relocalized [Vyper]
+ok  en guess-hero result mobile no overflow [0]
+ok  de guess-item wrong guess listed [Erweitertes Magazin]
+ok  de guess-item wrong marked
+ok  de guess-item guess survives reload
+ok  de->en guess-item guess relocalized mid puzzle [Extended Magazine]
+ok  de->en guess-item after switch and reload
+ok  en guess-item attempts status [Attempts left: 4]
+ok  en guess-item won [Point Blank]
+ok  en guess-item answer shown
+ok  en guess-item result survives reload
+ok  de guess-item finished state relocalized [Geschärftes Bajonett]
+FAIL run aborted [TimeoutError: page.screenshot: Timeout 30000ms exceeded.
+Call log:
+  - taking page screenshot
+  - waiting for fonts to load...
+  - fonts loaded
+]
+problems 0
+

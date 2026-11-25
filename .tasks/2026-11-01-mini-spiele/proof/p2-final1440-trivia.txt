@@ -1,0 +1,40 @@
+    trivia questions 10, rounds 10, item plan Inhibitor, Stalker, Healing Tempo, Transcendent Cooldown, Scourge
+ok   de trivia q1 reveal matches generator [Zu welcher Kategorie gehört Lifestrike?]
+ok   trivia-de-revealed no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"BUTTON.inline-flex min-h-11 items-center justif outline solid 2px"}]
+ok   de trivia q2 reveal matches generator [Wie viele Seelen bringt ein Gossen-Ghul I?]
+ok   de trivia q3 reveal matches generator [Wie viel maximale Gesundheit hat ein Wächter? (key)]
+ok   de trivia q4 reveal matches generator [Welches dieser Items kostet am meisten?]
+ok   de trivia reload resumes at next question
+ok   de trivia language switch relocalizes mid game [Was ist die ultimative Fähigkeit von Celeste? => What is the ultimate ability of Celeste?]
+ok   de trivia q5 reveal matches generator [Was ist die ultimative Fähigkeit von Celeste?]
+ok   de trivia q6 reveal matches generator [Zu welcher Kategorie gehört Spirit Strike?]
+ok   de trivia q7 reveal matches generator [Welche Stufe hat Cursed Relic?]
+ok   de trivia q8 reveal matches generator [Welche dieser Fähigkeiten gehört nicht zu Grey Talon?]
+ok   de trivia q9 reveal matches generator [Wie viel kostet Siphon Bullets?]
+ok   de trivia q10 reveal matches generator [Wie viele Items der Kategorie Geist gibt es?]
+ok   de trivia final score [10/10]
+ok   de trivia day streak [{"gamesPlayed":4,"gamesWon":4,"currentStreak":4,"maxStreak":4,"lastPlayedDate":"2026-11-02"}]
+ok   trivia-de-result no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"DIV.flex flex-col gap-4 outline-none! outline none 2px"}]
+ok   de trivia result survives reload
+    de trivia real result 10/10, streak 4
+ok   en trivia stale tab does not overwrite stored answer [{"date":"2026-11-02","currentQuestion":1,"answers":[2,null,null,null,null,null,n]
+ok   en trivia q2 reveal matches generator [How many souls does a Gutter Ghoul I give?]
+ok   en trivia q3 reveal matches generator [How much max health does a Guardian have? (key)]
+ok   en trivia q4 reveal matches generator [Which of these items costs the most?]
+ok   en trivia reload resumes at next question
+ok   en trivia language switch relocalizes mid game [What is the ultimate ability of Celeste? => Was ist die ultimative Fähigkeit von Celeste?]
+ok   en trivia q5 reveal matches generator [What is the ultimate ability of Celeste?]
+ok   en trivia q6 reveal matches generator [What category is Spirit Strike?]
+ok   en trivia q7 reveal matches generator [What tier is Cursed Relic?]
+ok   en trivia q8 reveal matches generator [Which of these abilities does not belong to Grey Talon?]
+ok   en trivia q9 reveal matches generator [How much does Siphon Bullets cost?]
+ok   en trivia q10 reveal matches generator [How many Spirit items are there?]
+ok   en trivia final score [7/10]
+ok   en trivia day streak [{"gamesPlayed":1,"gamesWon":1,"currentStreak":1,"maxStreak":1,"lastPlayedDate":"2026-11-02"}]
+ok   trivia-en-result no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"DIV.flex flex-col gap-4 outline-none! outline none 2px"}]
+ok   en trivia result survives reload
+    en trivia real result 7/10, streak 1
+FAIL run aborted [Error: section end]
+checks ok 33 failed 1
+page or console problems 0, aborted requests 0
+

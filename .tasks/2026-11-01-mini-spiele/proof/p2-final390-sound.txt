@@ -1,0 +1,37 @@
+    trivia questions 10, rounds 10, item plan Inhibitor, Stalker, Healing Tempo, Transcendent Cooldown, Scourge
+ok   de guess-sound answer not visible before end [Aura of Suffering]
+ok   de guess-sound clip loaded as blob [{"src":"blob:http://127.0.0.1:4811/ad311039-13f2","paused":true,"time":0,"duration":null,"ready":4,"error":null}]
+ok   de guess-sound play accepted without media or CSP error [{"src":"blob:http://127.0.0.1:4811/ad311039-13f2","paused":false,"time":0,"duration":null,"ready":4,"error":null}]
+    de guess-sound play state {"src":"blob:http://127.0.0.1:4811/ad311039-13f2","paused":false,"time":0,"duration":null,"ready":4,"error":null}
+ok   de guess-sound volume stored
+ok   guess-sound-de-start no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:346-481","DIV.null:489-732","DIV.null:740-869"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1070 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/840 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   de guess-sound wrong guess listed
+ok   de guess-sound guess survives reload
+ok   de guess-sound volume survives reload
+ok   de guess-sound dashboard switch keeps game term
+ok   de guess-sound guess relocalized by terms switch [Powder Keg => Pulverfass]
+ok   de guess-sound result shows answer [Aura of Suffering / Aura of Suffering]
+ok   de guess-sound day streak [{"gamesPlayed":4,"gamesWon":4,"currentStreak":4,"maxStreak":4,"lastPlayedDate":"2026-11-02"}]
+ok   guess-sound-de-result no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:346-481","DIV.null:489-732","DIV.null:740-869"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1070 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/840 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   de guess-sound result survives reload
+    de guess-sound real result won on guess 2, answer Aura of Suffering, streak 4
+ok   guess-sound fetched sound index on open [3]
+ok   en guess-sound answer not visible before end [Aura of Suffering]
+ok   en guess-sound clip loaded as blob [{"src":"blob:http://127.0.0.1:4811/2fe90727-2870","paused":true,"time":0,"duration":null,"ready":4,"error":null}]
+ok   en guess-sound play accepted without media or CSP error [{"src":"blob:http://127.0.0.1:4811/2fe90727-2870","paused":false,"time":0,"duration":null,"ready":4,"error":null}]
+    en guess-sound play state {"src":"blob:http://127.0.0.1:4811/2fe90727-2870","paused":false,"time":0,"duration":null,"ready":4,"error":null}
+ok   en guess-sound volume stored
+ok   guess-sound-en-start no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:354-488","DIV.null:496-739","DIV.null:747-876"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1167 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/847 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   en guess-sound wrong guess listed
+ok   en guess-sound guess survives reload
+ok   en guess-sound volume survives reload
+ok   en guess-sound dashboard switch keeps game term
+ok   en guess-sound guess relocalized by terms switch [Powder Keg => Pulverfass]
+ok   en guess-sound result shows answer [Aura of Suffering / Aura of Suffering]
+ok   en guess-sound day streak [{"gamesPlayed":1,"gamesWon":0,"currentStreak":0,"maxStreak":0,"lastPlayedDate":"2026-11-02"}]
+ok   guess-sound-en-result no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:354-488","DIV.null:496-739","DIV.null:747-876"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1167 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/847 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   en guess-sound result survives reload
+    en guess-sound real result lost after 4, answer Aura of Suffering, streak 0
+checks ok 29 failed 0
+page or console problems 0, aborted requests 0
+

@@ -1,0 +1,35 @@
+    trivia questions 10, rounds 10, item plan Inhibitor, Stalker, Healing Tempo, Transcendent Cooldown, Scourge
+ok   de item-stats no solution before submit
+ok   de item-stats images grayscale and without alt [5]
+ok   de item-stats incomplete submit marks missing fields
+ok   de item-stats focus moves to first missing field [item-2037039379-active]
+ok   de item-stats write keeps value stored behind the tab
+ok   item-stats-de-partial no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":["DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-]
+ok   de item-stats answers survive reload
+ok   de item-stats dashboard switch changes UI, keeps game terms [Inhibitor]
+ok   de item-stats terms switch relocalizes names, same items [Inhibitor,Stalker,Healing Tempo,Transcendent Cooldown,Scourge => Inhibitor,Verräter-Klinge,Heilungstempo,Transzendente Abklingzeit,Geißel]
+ok   de item-stats answers kept after terms switch
+ok   de item-stats final score [20/20]
+ok   de item-stats day streak [{"gamesPlayed":4,"gamesWon":4,"currentStreak":4,"maxStreak":4,"lastPlayedDate":"2026-11-02"}]
+ok   item-stats-de-result no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":["DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-5 gap-y-3 638/640 visible","DIV.flex flex-wrap gap-x-]
+ok   de item-stats result survives reload
+    de item-stats real result 20/20, streak 4
+ok   en item-stats no solution before submit
+ok   en item-stats images grayscale and without alt [5]
+ok   en item-stats incomplete submit marks missing fields
+ok   en item-stats focus moves to first missing field [item-2037039379-active]
+ok   en item-stats write keeps value stored behind the tab
+ok   item-stats-en-partial no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"BUTTON.flex border transition-colors focus-visi outline solid 2px"}]
+ok   en item-stats answers survive reload
+ok   en item-stats dashboard switch changes UI, keeps game terms [Inhibitor]
+ok   en item-stats terms switch relocalizes names, same items [Inhibitor,Stalker,Healing Tempo,Transcendent Cooldown,Scourge => Inhibitor,Verräter-Klinge,Heilungstempo,Transzendente Abklingzeit,Geißel]
+ok   en item-stats answers kept after terms switch
+ok   en item-stats final score [18/20]
+ok   en item-stats day streak [{"gamesPlayed":1,"gamesWon":1,"currentStreak":1,"maxStreak":1,"lastPlayedDate":"2026-11-02"}]
+ok   item-stats-en-result no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[],"wide":[],"chain":[],"focus":"DIV.flex flex-col gap-4 outline-none! outline none 2px"}]
+ok   en item-stats result survives reload
+    en item-stats real result 18/20, streak 1
+FAIL run aborted [Error: section end]
+checks ok 28 failed 1
+page or console problems 0, aborted requests 0
+

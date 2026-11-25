@@ -1,0 +1,29 @@
+    trivia questions 10, rounds 10, item plan Inhibitor, Stalker, Healing Tempo, Transcendent Cooldown, Scourge
+ok   de dashboard default: terms english, UI german
+ok   de dashboard default offers Extended Magazine [Extended Magazine,Duration Extender]
+ok   de dashboard guess listed with english name [Monster Rounds]
+ok   terms-de-dashboard-english-terms no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:346-481","DIV.null:489-732","DIV.null:740-869"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1070 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/840 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   guesses stored as ids [[1009965641]]
+ok   terms deutsch relocalizes retained guess [Monster Rounds => Monster-Kugeln]
+ok   terms deutsch offers Erweitertes Magazin [Erweitertes Magazin,Größere Erweiterung,Mystische Erweiterung]
+ok   setting key persisted
+ok   terms switch leaves stored game untouched
+ok   reload keeps deutsch and guess
+ok   same puzzle: german answer name wins [Geschärftes Bajonett]
+ok   finished result relocalizes, game stays won [Geschärftes Bajonett => Point Blank]
+ok   en dashboard with deutsch terms: UI english, names german [Flammensprint]
+ok   browser game stored by the live P1 version loads with its guess [{"date":"2026-11-02","guesses":[3516947824],"status":"playing","hintsRevealed":1}]
+ok   terms-en-dashboard-german-terms no horizontal overflow at 390 [{"width":390,"scroll":390,"offenders":[],"wide":["DIV.null:354-488","DIV.null:496-739","DIV.null:747-876"],"chain":["NAV.flex gap-2 overflow-x-auto pb-1 lg:block 332/1167 auto","DIV.flex gap-2 overflow-x-auto pb-1 lg:block 332/847 auto","INPUT.min-h-12 w-full rounded-xl border border 364/366 clip"],]
+ok   guess-hero page has terms switch next to dashboard switch
+ok   guess-item page has terms switch next to dashboard switch
+ok   guess-sound page has terms switch next to dashboard switch
+ok   guess-ability page has terms switch next to dashboard switch
+ok   item-stats page has terms switch next to dashboard switch
+ok   trivia page has terms switch next to dashboard switch
+ok   higher-lower page has terms switch next to dashboard switch
+    second tab: storage value "german", native storage event synced false
+ok   terms setting syncs to a second tab through the storage listener [dispatched event, Moli did not deliver a native one]
+FAIL run aborted [Error: section end]
+checks ok 23 failed 1
+page or console problems 0, aborted requests 0
+

@@ -1,0 +1,82 @@
+ok  guess-hero same answer id across languages [14 Holliday / Holliday]
+ok  guess-item same answer id across languages [2947183272 Impuls-Regeneration / Radiant Regeneration]
+ok  guess-ability same answer id across languages [2670099061 Wurfhaken / Grapple]
+FAIL de hero silhouette filter wired
+ok  de guess-hero wrong guess listed [Infernus]
+ok  de guess-hero wrong marked
+ok  de guess-hero guess survives reload
+ok  de->en guess-hero guess relocalized mid puzzle [Infernus]
+ok  de->en guess-hero after switch and reload
+ok  en guess-hero attempts status [Attempts left: 5]
+ok  en hero mobile no horizontal overflow [0]
+ok  en guess-hero won [Holliday]
+ok  en guess-hero answer shown
+ok  en guess-hero result survives reload
+ok  de guess-hero finished state relocalized [Holliday]
+ok  en guess-hero result mobile no overflow [0]
+ok  de guess-item wrong guess listed [Erweitertes Magazin]
+ok  de guess-item wrong marked
+ok  de guess-item guess survives reload
+ok  de->en guess-item guess relocalized mid puzzle [Extended Magazine]
+ok  de->en guess-item after switch and reload
+ok  en guess-item attempts status [Attempts left: 4]
+ok  en guess-item won [Radiant Regeneration]
+ok  en guess-item answer shown
+ok  en guess-item result survives reload
+ok  de guess-item finished state relocalized [Impuls-Regeneration]
+ok  en guess-item result mobile no overflow [0]
+ok  de guess-ability wrong guess listed [Napalm]
+ok  de guess-ability wrong marked
+ok  de guess-ability guess survives reload
+ok  de->en guess-ability guess relocalized mid puzzle [Napalm]
+ok  de->en guess-ability after switch and reload
+ok  en guess-ability attempts status [Attempts left: 4]
+ok  en guess-ability won [Grapple]
+ok  en guess-ability answer shown
+ok  en guess-ability result survives reload
+ok  de guess-ability finished state relocalized [Wurfhaken]
+ok  en guess-ability result mobile no overflow [0]
+ok  en hub credit
+ok  en hub tiles
+ok  en hub mobile no overflow [0]
+FAIL en hero silhouette filter wired
+ok  en guess-hero wrong guess listed [Infernus]
+ok  en guess-hero wrong marked
+ok  en guess-hero guess survives reload
+ok  en->de guess-hero guess relocalized mid puzzle [Infernus]
+ok  en->de guess-hero after switch and reload
+ok  de guess-hero attempts status [Noch 5 Versuche]
+ok  de guess-hero won [Holliday]
+ok  de guess-hero answer shown
+ok  de guess-hero result survives reload
+ok  en guess-hero finished state relocalized [Holliday]
+ok  de guess-hero result mobile no overflow [0]
+ok  en guess-item wrong guess listed [Extended Magazine]
+ok  en guess-item wrong marked
+ok  en guess-item guess survives reload
+ok  en->de guess-item guess relocalized mid puzzle [Erweitertes Magazin]
+ok  en->de guess-item after switch and reload
+ok  de guess-item attempts status [Noch 4 Versuche]
+ok  de guess-item won [Impuls-Regeneration]
+ok  de guess-item answer shown
+ok  de guess-item result survives reload
+ok  en guess-item finished state relocalized [Radiant Regeneration]
+ok  de guess-item result mobile no overflow [0]
+ok  en guess-ability wrong guess listed [Napalm]
+ok  en guess-ability wrong marked
+ok  en guess-ability guess survives reload
+ok  en->de guess-ability guess relocalized mid puzzle [Napalm]
+ok  en->de guess-ability after switch and reload
+ok  de guess-ability attempts status [Noch 4 Versuche]
+ok  de guess-ability won [Wurfhaken]
+ok  de guess-ability answer shown
+ok  de guess-ability result survives reload
+ok  en guess-ability finished state relocalized [Grapple]
+ok  de guess-ability result mobile no overflow [0]
+ok  de hub credit
+ok  de hub tiles
+ok  de hub mobile no overflow [0]
+ok  de guess-item loss after 5
+ok  de guess-item loss survives reload
+problems 0
+

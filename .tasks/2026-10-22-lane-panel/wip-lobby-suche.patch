@@ -1,0 +1,842 @@
+diff --git a/rust/bin/dl-bot/src/main.rs b/rust/bin/dl-bot/src/main.rs
+index b9427ecd..2dc8f1b9 100644
+--- a/rust/bin/dl-bot/src/main.rs
++++ b/rust/bin/dl-bot/src/main.rs
+@@ -1922,11 +1922,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
+             central_pool.clone(),
+             Arc::new(modglue::LanePanelGlue {
+                 lanes: lfg_glue.clone(),
++                rich: router_glue.clone(),
+             }),
+             onboardglue::MAIN_GUILD_ID,
+-            dl_activity::lfg::LFG_CHANNEL_ID,
++            env_u64_default(
++                "DL_LANE_PANEL_CHANNEL_ID",
++                dl_activity::lfg::LANE_PANEL_CHANNEL_ID,
++            ),
+         );
+-        dl_voice::lane_panel::spawn(lane_panel, &dispatcher);
++        let mut lane_panel_cache_ready = dispatcher.subscribe_gateway();
++        tokio::spawn(async move {
++            wait_for_gateway_cache_ready(
++                &mut lane_panel_cache_ready,
++                onboardglue::MAIN_GUILD_ID,
++                "lane_panel",
++            )
++            .await;
++            dl_voice::lane_panel::spawn(lane_panel);
++        });
+         if legacy_lfg_responder_enabled(lfg_cutover_active) {
+             let lfg_responder =
+                 dl_activity::lfg::LfgResponder::new(central_pool.clone(), lfg_glue.clone());
+diff --git a/rust/bin/dl-bot/src/modglue.rs b/rust/bin/dl-bot/src/modglue.rs
+index 2054286a..0790a63a 100644
+--- a/rust/bin/dl-bot/src/modglue.rs
++++ b/rust/bin/dl-bot/src/modglue.rs
+@@ -3918,11 +3918,13 @@ impl LfgGlue {
+                 .voice_states
+                 .iter()
+                 .filter(|(_, vs)| vs.channel_id == Some(channel.id))
+-                .filter_map(|(user_id, _)| {
+-                    guild
++                .map(|(user_id, vs)| {
++                    let is_bot = guild
+                         .members
+                         .get(user_id)
+-                        .map(|member| (user_id.get(), member.user.bot))
++                        .or(vs.member.as_ref())
++                        .is_some_and(|member| member.user.bot);
++                    (user_id.get(), is_bot)
+                 })
+                 .collect();
+             let member_ids = visible_lfg_member_ids(&voice_members);
+@@ -4056,6 +4058,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
+ 
+ pub struct LanePanelGlue {
+     pub lanes: Arc<LfgGlue>,
++    pub rich: Arc<dl_voice::glue::RouterGlue>,
+ }
+ 
+ #[async_trait::async_trait]
+@@ -4064,47 +4067,43 @@ impl dl_voice::lane_panel::LanePanelPort for LanePanelGlue {
+         self.lanes.scan_lanes_with_activity(guild_id, &[]).await
+     }
+ 
+-    async fn post(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String> {
+-        self.lanes.adapter.send_raw_public(channel_id, body).await
++    async fn post(
++        &self,
++        channel_id: u64,
++        body: Map<String, Value>,
++        attachments: &[dl_voice::lfg_panel::LfgPanelAttachment],
++    ) -> Result<u64, String> {
++        dl_voice::lfg_panel::LfgPanelPort::post_rich(
++            self.rich.as_ref(),
++            channel_id,
++            body,
++            attachments,
++        )
++        .await
+     }
+ 
+     async fn edit(
+         &self,
+         channel_id: u64,
+         message_id: u64,
+-        body: &Map<String, Value>,
+-    ) -> Result<(), String> {
+-        self.lanes
+-            .adapter
+-            .edit_raw_public(channel_id, message_id, body)
+-            .await
+-            .map_err(|error| error.to_string())
+-    }
+-
+-    async fn delete(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+-        self.lanes
+-            .adapter
+-            .http
+-            .delete_message(
+-                ChannelId::new(channel_id),
+-                MessageId::new(message_id),
+-                Some("Lane-Panel neu unten gepostet"),
+-            )
+-            .await
+-            .map_err(|error| error.to_string())
+-    }
+-
+-    async fn messages_after(&self, channel_id: u64, message_id: u64) -> Result<usize, String> {
+-        ChannelId::new(channel_id)
+-            .messages(
+-                &self.lanes.adapter.http,
+-                GetMessages::new()
+-                    .after(MessageId::new(message_id))
+-                    .limit(50),
+-            )
+-            .await
+-            .map(|messages| messages.len())
+-            .map_err(|error| error.to_string())
++        body: Map<String, Value>,
++        attachments: &[dl_voice::lfg_panel::LfgPanelAttachment],
++    ) -> Result<(), dl_voice::lane_panel::PanelEditError> {
++        dl_voice::lfg_panel::LfgPanelPort::edit_rich(
++            self.rich.as_ref(),
++            channel_id,
++            message_id,
++            body,
++            attachments,
++        )
++        .await
++        .map_err(|error| {
++            if error.contains("HTTP 404:") {
++                dl_voice::lane_panel::PanelEditError::Missing
++            } else {
++                dl_voice::lane_panel::PanelEditError::Failed(error)
++            }
++        })
+     }
+ }
+ 
+diff --git a/rust/crates/dl-activity/src/lfg.rs b/rust/crates/dl-activity/src/lfg.rs
+index f64cc1f5..48704c3f 100644
+--- a/rust/crates/dl-activity/src/lfg.rs
++++ b/rust/crates/dl-activity/src/lfg.rs
+@@ -406,13 +406,16 @@ pub struct LaneInfo {
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum LaneActivity {
+     Lobby,
+-    Match { minute: i64 },
++    Match { minute: Option<i64> },
+ }
+ 
+ pub fn lane_activity_label(activity: LaneActivity) -> String {
+     match activity {
+         LaneActivity::Lobby => "In der Lobby".to_string(),
+-        LaneActivity::Match { minute } => format!("Im Match · Min {minute}"),
++        LaneActivity::Match {
++            minute: Some(minute),
++        } if minute > 0 => format!("Im Match · Min {minute}"),
++        LaneActivity::Match { .. } => "Im Match".to_string(),
+     }
+ }
+ 
+@@ -726,6 +729,7 @@ pub fn route_to_lane(
+ 
+ pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
+ pub const OUTPUT_CHANNEL_ID: u64 = 1376335502919335936;
++pub const LANE_PANEL_CHANNEL_ID: u64 = 1562819061442941128;
+ pub const LFG_LOG_CHANNEL_ID: u64 = 1374364800817303632;
+ pub const LFG_DECISION_LOG_TITLE_PLACEHOLDER: &str = "LFG Decision Log";
+ pub const LFG_DLOG_PREFIX_MODE: &str = "Mode";
+@@ -1204,6 +1208,11 @@ pub fn build_lfg_reply(
+             }
+         }
+     }
++    fields.push(json!({
++        "name": "Alle Lanes live",
++        "value": format!("Wer gerade in der Lobby oder im Match ist, siehst du in <#{LANE_PANEL_CHANNEL_ID}>."),
++        "inline": false,
++    }));
+     let _ = route;
+     json!({
+         "title": "🎮 Lobby-Finder",
+@@ -1935,11 +1944,15 @@ mod tests {
+         );
+         assert_eq!(reply["title"], "🎮 Lobby-Finder");
+         let fields = reply["fields"].as_array().expect("fields");
+-        assert!(fields.len() >= 2); // Lobby + eigene-Lobby-Hinweis
+-        assert!(fields.last().expect("last")["value"]
++        assert!(fields.len() >= 3);
++        assert!(fields[fields.len() - 2]["value"]
+             .as_str()
+             .expect("str")
+             .contains("**Casual**-Lane"));
++        assert!(fields.last().expect("last")["value"]
++            .as_str()
++            .expect("str")
++            .contains(&format!("<#{LANE_PANEL_CHANNEL_ID}>")));
+     }
+ 
+     #[test]
+diff --git a/rust/crates/dl-core/src/runtime_config.rs b/rust/crates/dl-core/src/runtime_config.rs
+index 8aefea5d..d41bbab8 100644
+--- a/rust/crates/dl-core/src/runtime_config.rs
++++ b/rust/crates/dl-core/src/runtime_config.rs
+@@ -130,6 +130,7 @@ section!(CommunityOptions {
+     steam_voice_nudge: bool => "DL_STEAM_VOICE_NUDGE_ENABLED",
+     lfg_forum_cutover: bool => "DL_LFG_FORUM_CUTOVER",
+     lfg_panel_channel_id: u64 => "DL_LFG_PANEL_CHANNEL_ID",
++    lane_panel_channel_id: u64 => "DL_LANE_PANEL_CHANNEL_ID",
+     lfg_forum_channel_id: u64 => "DL_LFG_FORUM_CHANNEL_ID",
+     router_auto_move: bool => "DL_ROUTER_AUTO_MOVE_ENABLED",
+     router_auto_move_delay_seconds: u64 => "DL_ROUTER_AUTO_MOVE_DELAY_SECONDS",
+@@ -444,6 +445,7 @@ impl RuntimeConfig {
+             self.dashboard.audit_bot_user_id,
+             self.dashboard.insights_guild_id,
+             self.community.lfg_panel_channel_id,
++            self.community.lane_panel_channel_id,
+             self.community.lfg_forum_channel_id,
+             self.community.lfg_freetext_channel_id,
+             self.community.brain_help_channel_id,
+diff --git a/rust/crates/dl-voice/src/lane_panel.rs b/rust/crates/dl-voice/src/lane_panel.rs
+index 82362558..3d31efa1 100644
+--- a/rust/crates/dl-voice/src/lane_panel.rs
++++ b/rust/crates/dl-voice/src/lane_panel.rs
+@@ -1,13 +1,13 @@
+ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ 
+-use dl_activity::lfg::{lane_activity_label, LaneActivity, LaneInfo, LaneLabel};
++use dl_activity::lfg::{LaneActivity, LaneInfo, LaneLabel};
+ use dl_central_db::kv;
+-use dl_discord::Dispatcher;
+ use serde_json::{json, Map, Value};
+ use sqlx::PgPool;
+ use tokio::sync::Mutex;
+ 
++use crate::lfg_panel::{LfgPanelAttachment, LFG_BANNER_DIR};
+ use crate::router::{
+     NON_LANE_CHANNEL_IDS, ROUTER_ACCENT_GOLD, ROUTER_COMPONENTS_V2_FLAG, ROUTER_EMOJI_BRAWL,
+     ROUTER_EMOJI_CASUAL, ROUTER_EMOJI_RANKED, ROUTER_VC_ID,
+@@ -17,31 +17,40 @@ pub const LANE_PANEL_KV_NS: &str = "lane_live_panel";
+ pub const LANE_PANEL_TICK: Duration = Duration::from_secs(15);
+ pub const LANE_PANEL_MIN_EDIT_GAP: Duration = Duration::from_secs(30);
+ pub const LANE_PANEL_HEARTBEAT: Duration = Duration::from_secs(10 * 60);
+-pub const LANE_PANEL_REPOST_AFTER_MESSAGES: usize = 5;
+-pub const LANE_PANEL_REPOST_QUIET: Duration = Duration::from_secs(90);
+-pub const LANE_PANEL_FORCE_REPOST_AFTER_MESSAGES: usize = 20;
+-pub const LANE_PANEL_MAX_ROWS: usize = 12;
++pub const LANE_PANEL_MAX_JOIN_ROWS: usize = 8;
++pub const LANE_PANEL_MAX_TEXT_ROWS: usize = 10;
++pub const LANE_PANEL_BANNER_FILENAME: &str = "divider-mitspieler-finden.png";
++pub const LANE_PANEL_LOGO_FILENAME: &str = "logo-badge.png";
+ const UNLIMITED_LANE_LIMIT: usize = 99;
+ const EMOJI_NEW_PLAYER: (&str, &str) = ("dl_rang_einsteiger", "1522801035922636900");
+ 
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum PanelEditError {
++    Missing,
++    Failed(String),
++}
++
+ #[async_trait::async_trait]
+ pub trait LanePanelPort: Send + Sync {
+     async fn lanes(&self, guild_id: u64) -> Vec<LaneInfo>;
+-    async fn post(&self, channel_id: u64, body: &Map<String, Value>) -> Result<u64, String>;
++    async fn post(
++        &self,
++        channel_id: u64,
++        body: Map<String, Value>,
++        attachments: &[LfgPanelAttachment],
++    ) -> Result<u64, String>;
+     async fn edit(
+         &self,
+         channel_id: u64,
+         message_id: u64,
+-        body: &Map<String, Value>,
+-    ) -> Result<(), String>;
+-    async fn delete(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
+-    async fn messages_after(&self, channel_id: u64, message_id: u64) -> Result<usize, String>;
++        body: Map<String, Value>,
++        attachments: &[LfgPanelAttachment],
++    ) -> Result<(), PanelEditError>;
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum PanelAction {
+     Post,
+-    Repost,
+     Edit,
+     Keep,
+ }
+@@ -52,8 +61,6 @@ struct PanelState {
+     message_id: Option<u64>,
+     last_key: Option<String>,
+     last_edit: Option<Instant>,
+-    messages_since: usize,
+-    last_user_message: Option<Instant>,
+ }
+ 
+ impl PanelState {
+@@ -61,14 +68,6 @@ impl PanelState {
+         if self.message_id.is_none() {
+             return PanelAction::Post;
+         }
+-        let quiet = self
+-            .last_user_message
+-            .is_none_or(|at| now.duration_since(at) >= LANE_PANEL_REPOST_QUIET);
+-        if self.messages_since >= LANE_PANEL_FORCE_REPOST_AFTER_MESSAGES
+-            || (self.messages_since >= LANE_PANEL_REPOST_AFTER_MESSAGES && quiet)
+-        {
+-            return PanelAction::Repost;
+-        }
+         let since_edit = self.last_edit.map(|at| now.duration_since(at));
+         if since_edit.is_some_and(|gap| gap < LANE_PANEL_MIN_EDIT_GAP) {
+             return PanelAction::Keep;
+@@ -83,18 +82,32 @@ impl PanelState {
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++pub enum PanelGroup {
++    LobbyOpen,
++    InMatch,
++    InVoice,
++}
++
++impl PanelGroup {
++    fn heading(self) -> &'static str {
++        match self {
++            PanelGroup::LobbyOpen => "### In der Lobby, freie Plätze",
++            PanelGroup::InMatch => "### Im Match",
++            PanelGroup::InVoice => "### Im Voice",
++        }
++    }
++}
++
+ fn is_full(lane: &LaneInfo) -> bool {
+     lane.member_count >= lane.user_limit
+ }
+ 
+-fn row_tier(lane: &LaneInfo) -> u8 {
+-    if is_full(lane) {
+-        return 3;
+-    }
++pub fn panel_group(lane: &LaneInfo) -> PanelGroup {
+     match lane.activity {
+-        Some(LaneActivity::Lobby) => 0,
+-        None => 1,
+-        Some(LaneActivity::Match { .. }) => 2,
++        Some(LaneActivity::Match { .. }) => PanelGroup::InMatch,
++        Some(LaneActivity::Lobby) if !is_full(lane) => PanelGroup::LobbyOpen,
++        _ => PanelGroup::InVoice,
+     }
+ }
+ 
+@@ -103,7 +116,14 @@ pub fn panel_rows(lanes: &[LaneInfo]) -> Vec<&LaneInfo> {
+         .iter()
+         .filter(|lane| lane.member_count > 0 && !NON_LANE_CHANNEL_IDS.contains(&lane.channel_id))
+         .collect();
+-    rows.sort_by_key(|lane| (row_tier(lane), std::cmp::Reverse(lane.member_count)));
++    rows.sort_by_key(|lane| {
++        (
++            panel_group(lane),
++            is_full(lane),
++            std::cmp::Reverse(lane.member_count),
++            lane.channel_id,
++        )
++    });
+     rows
+ }
+ 
+@@ -119,7 +139,7 @@ fn label_emoji(label: &LaneLabel) -> String {
+ 
+ fn player_count_text(lane: &LaneInfo) -> String {
+     if lane.user_limit >= UNLIMITED_LANE_LIMIT {
+-        format!("{} im Voice", lane.member_count)
++        format!("**{}** im Voice", lane.member_count)
+     } else {
+         format!("**{}/{}**", lane.member_count, lane.user_limit)
+     }
+@@ -130,6 +150,17 @@ fn known_rank_label(lane: &LaneInfo) -> Option<&str> {
+     (lane.avg_rank_value > 0.0 && label != "Leer" && label != "Unbekannt").then_some(label)
+ }
+ 
++fn status_detail(lane: &LaneInfo) -> Option<String> {
++    match lane.activity {
++        Some(LaneActivity::Match {
++            minute: Some(minute),
++        }) if minute > 0 => Some(format!("Min {minute}")),
++        Some(LaneActivity::Lobby) if is_full(lane) => Some("Lobby voll".to_string()),
++        _ if is_full(lane) => Some("voll".to_string()),
++        _ => None,
++    }
++}
++
+ pub fn panel_row_text(lane: &LaneInfo) -> String {
+     let mut parts = vec![
+         format!("{} <#{}>", label_emoji(&lane.label), lane.channel_id),
+@@ -138,45 +169,130 @@ pub fn panel_row_text(lane: &LaneInfo) -> String {
+     if let Some(rank) = known_rank_label(lane) {
+         parts.push(format!("Ø {rank}"));
+     }
+-    if let Some(activity) = lane.activity {
+-        parts.push(lane_activity_label(activity));
++    if let Some(detail) = status_detail(lane) {
++        parts.push(detail);
+     }
+     parts.join(" · ")
+ }
+ 
+-pub fn panel_rows_text(rows: &[&LaneInfo]) -> String {
+-    if rows.is_empty() {
+-        return format!(
+-            "Gerade ist keine Lane besetzt. Tritt <#{ROUTER_VC_ID}> bei, dann bekommst du deine eigene Lane und andere finden dich hier."
+-        );
++fn join_url(guild_id: u64, channel_id: u64) -> String {
++    format!("https://discord.com/channels/{guild_id}/{channel_id}")
++}
++
++fn join_row(guild_id: u64, lane: &LaneInfo) -> Value {
++    json!({
++        "type": 9,
++        "components": [{ "type": 10, "content": panel_row_text(lane) }],
++        "accessory": {
++            "type": 2,
++            "style": 5,
++            "label": "Beitreten",
++            "url": join_url(guild_id, lane.channel_id),
++        },
++    })
++}
++
++pub fn panel_attachments() -> Vec<LfgPanelAttachment> {
++    [LANE_PANEL_BANNER_FILENAME, LANE_PANEL_LOGO_FILENAME]
++        .into_iter()
++        .enumerate()
++        .map(|(id, filename)| LfgPanelAttachment {
++            id: id as u8,
++            filename: filename.to_string(),
++            relative_path: format!("{LFG_BANNER_DIR}/{filename}"),
++        })
++        .collect()
++}
++
++pub fn panel_key(rows: &[&LaneInfo]) -> String {
++    rows.iter()
++        .map(|lane| format!("{:?}|{}", panel_group(lane), panel_row_text(lane)))
++        .collect::<Vec<_>>()
++        .join("\n")
++}
++
++fn header_section(stand_unix: i64) -> Value {
++    json!({
++        "type": 9,
++        "components": [{
++            "type": 10,
++            "content": format!(
++                "## Aktive Lanes\nWer gerade spielt und wo noch Platz ist. Klick auf **Beitreten**, um direkt in die Lane zu kommen.\n-# Stand <t:{stand_unix}:R>"
++            ),
++        }],
++        "accessory": {
++            "type": 11,
++            "media": { "url": format!("attachment://{LANE_PANEL_LOGO_FILENAME}") },
++        },
++    })
++}
++
++fn empty_state_blocks() -> Vec<Value> {
++    vec![json!({
++        "type": 10,
++        "content": format!(
++            "Gerade ist keine Lane besetzt.\n-# Mach selbst eine auf: <#{ROUTER_VC_ID}> beitreten, dann taucht deine Lane hier auf."
++        ),
++    })]
++}
++
++fn group_blocks(guild_id: u64, rows: &[&LaneInfo]) -> Vec<Value> {
++    let mut blocks = Vec::new();
++    let mut join_rows = 0usize;
++    let mut text_rows = 0usize;
++    let mut hidden = 0usize;
++    let mut current: Option<PanelGroup> = None;
++    for lane in rows {
++        let group = panel_group(lane);
++        let joinable = !is_full(lane) && join_rows < LANE_PANEL_MAX_JOIN_ROWS;
++        if !joinable && text_rows >= LANE_PANEL_MAX_TEXT_ROWS {
++            hidden += 1;
++            continue;
++        }
++        if current != Some(group) {
++            if current.is_some() {
++                blocks.push(json!({ "type": 14, "divider": false, "spacing": 1 }));
++            }
++            blocks.push(json!({ "type": 10, "content": group.heading() }));
++            current = Some(group);
++        }
++        if joinable {
++            join_rows += 1;
++            blocks.push(join_row(guild_id, lane));
++        } else {
++            text_rows += 1;
++            blocks.push(json!({ "type": 10, "content": panel_row_text(lane) }));
++        }
+     }
+-    let mut lines: Vec<String> = rows
+-        .iter()
+-        .take(LANE_PANEL_MAX_ROWS)
+-        .map(|lane| panel_row_text(lane))
+-        .collect();
+-    if rows.len() > LANE_PANEL_MAX_ROWS {
+-        lines.push(format!(
+-            "-# und {} weitere",
+-            rows.len() - LANE_PANEL_MAX_ROWS
+-        ));
++    if hidden > 0 {
++        blocks.push(json!({ "type": 10, "content": format!("-# und {hidden} weitere Lanes") }));
+     }
+-    lines.join("\n")
++    blocks
+ }
+ 
+-pub fn panel_body(rows_text: &str, has_rows: bool, stand_unix: i64) -> Map<String, Value> {
++pub fn panel_body(guild_id: u64, rows: &[&LaneInfo], stand_unix: i64) -> Map<String, Value> {
+     let mut blocks = vec![
+-        json!({ "type": 10, "content": format!("## Aktive Lanes\n-# Stand <t:{stand_unix}:R>") }),
+-        json!({ "type": 14, "divider": true, "spacing": 1 }),
+-        json!({ "type": 10, "content": rows_text }),
++        json!({
++            "type": 12,
++            "items": [{ "media": { "url": format!("attachment://{LANE_PANEL_BANNER_FILENAME}") } }],
++        }),
++        header_section(stand_unix),
++        json!({ "type": 14, "divider": true, "spacing": 2 }),
+     ];
+-    if has_rows {
+-        blocks.push(json!({ "type": 14, "divider": false, "spacing": 1 }));
++    if rows.is_empty() {
++        blocks.extend(empty_state_blocks());
++    } else {
++        blocks.extend(group_blocks(guild_id, rows));
++        blocks.push(json!({ "type": 14, "divider": true, "spacing": 1 }));
+         blocks.push(json!({
+             "type": 10,
+-            "content": format!("-# Lobby- und Matchstatus kommt aus Steam, sobald jemand in der Lane sein Konto verknüpft hat. Eigene Lane: <#{ROUTER_VC_ID}>")
++            "content": format!("-# Lobby- und Matchstatus kommt aus Steam, sobald jemand in der Lane sein Konto verknüpft hat. Eigene Lane: <#{ROUTER_VC_ID}>"),
+         }));
+     }
++    let attachments: Vec<Value> = panel_attachments()
++        .iter()
++        .map(|attachment| json!({ "id": attachment.id, "filename": attachment.filename }))
++        .collect();
+     let mut body = Map::new();
+     body.insert("flags".into(), json!(ROUTER_COMPONENTS_V2_FLAG));
+     body.insert("allowed_mentions".into(), json!({ "parse": [] }));
+@@ -184,6 +300,7 @@ pub fn panel_body(rows_text: &str, has_rows: bool, stand_unix: i64) -> Map<Strin
+         "components".into(),
+         json!([{ "type": 17, "accent_color": ROUTER_ACCENT_GOLD, "components": blocks }]),
+     );
++    body.insert("attachments".into(), json!(attachments));
+     body
+ }
+ 
+@@ -216,43 +333,24 @@ impl LanePanel {
+     }
+ 
+     async fn load_state(&self, state: &mut PanelState) {
+-        let stored = match kv::get(&self.pool, LANE_PANEL_KV_NS, &self.kv_key()).await {
+-            Ok(value) => value.and_then(|raw| raw.parse::<u64>().ok()),
+-            Err(err) => {
+-                tracing::warn!(%err, "LanePanel: Message-ID konnte nicht geladen werden");
+-                return;
+-            }
+-        };
+-        state.loaded = true;
+-        state.message_id = stored;
+-        if let Some(message_id) = stored {
+-            match self.port.messages_after(self.channel_id, message_id).await {
+-                Ok(count) => state.messages_since = count,
+-                Err(err) => tracing::warn!(%err, "LanePanel: Nachrichten seit Panel unbekannt"),
++        match kv::get(&self.pool, LANE_PANEL_KV_NS, &self.kv_key()).await {
++            Ok(value) => {
++                state.loaded = true;
++                state.message_id = value.and_then(|raw| raw.parse::<u64>().ok());
+             }
++            Err(err) => tracing::warn!(%err, "LanePanel: Message-ID konnte nicht geladen werden"),
+         }
+     }
+ 
+-    async fn store_message_id(&self, message_id: u64) {
+-        if let Err(err) = kv::set(
++    async fn store_message_id(&self, message_id: u64) -> Result<(), String> {
++        kv::set(
+             &self.pool,
+             LANE_PANEL_KV_NS,
+             &self.kv_key(),
+             &message_id.to_string(),
+         )
+         .await
+-        {
+-            tracing::warn!(%err, "LanePanel: Message-ID konnte nicht gespeichert werden");
+-        }
+-    }
+-
+-    pub async fn note_user_message(&self, channel_id: u64) {
+-        if channel_id != self.channel_id {
+-            return;
+-        }
+-        let mut state = self.state.lock().await;
+-        state.messages_since += 1;
+-        state.last_user_message = Some(Instant::now());
++        .map_err(|err| err.to_string())
+     }
+ 
+     pub async fn tick(&self) {
+@@ -265,71 +363,65 @@ impl LanePanel {
+         }
+         let lanes = self.port.lanes(self.guild_id).await;
+         let rows = panel_rows(&lanes);
+-        let key = panel_rows_text(&rows);
++        let key = panel_key(&rows);
+         let now = Instant::now();
+-        let body = panel_body(&key, !rows.is_empty(), chrono::Utc::now().timestamp());
+-        match state.decide(&key, now) {
+-            PanelAction::Keep => {}
+-            PanelAction::Post | PanelAction::Repost => {
+-                self.repost(&mut state, &body, key, now).await;
+-            }
+-            PanelAction::Edit => {
+-                let Some(message_id) = state.message_id else {
+-                    return;
+-                };
+-                match self.port.edit(self.channel_id, message_id, &body).await {
++        let action = state.decide(&key, now);
++        if action == PanelAction::Keep {
++            return;
++        }
++        let body = panel_body(self.guild_id, &rows, chrono::Utc::now().timestamp());
++        let attachments = panel_attachments();
++        match (action, state.message_id) {
++            (PanelAction::Edit, Some(message_id)) => {
++                match self
++                    .port
++                    .edit(self.channel_id, message_id, body, &attachments)
++                    .await
++                {
+                     Ok(()) => {
+                         state.last_key = Some(key);
+                         state.last_edit = Some(now);
+                     }
+-                    Err(err) => {
+-                        tracing::warn!(%err, message_id, "LanePanel: Edit fehlgeschlagen, poste neu");
+-                        self.repost(&mut state, &body, key, now).await;
++                    Err(PanelEditError::Missing) => {
++                        tracing::warn!(message_id, "LanePanel: Panel fehlt, poste neu");
++                        state.message_id = None;
++                    }
++                    Err(PanelEditError::Failed(err)) => {
++                        tracing::warn!(%err, message_id, "LanePanel: Edit fehlgeschlagen");
++                        state.last_edit = Some(now);
+                     }
+                 }
+             }
++            _ => self.post(&mut state, body, &attachments, key, now).await,
+         }
+     }
+ 
+-    async fn repost(
++    async fn post(
+         &self,
+         state: &mut PanelState,
+-        body: &Map<String, Value>,
++        body: Map<String, Value>,
++        attachments: &[LfgPanelAttachment],
+         key: String,
+         now: Instant,
+     ) {
+-        let message_id = match self.port.post(self.channel_id, body).await {
++        let message_id = match self.port.post(self.channel_id, body, attachments).await {
+             Ok(id) => id,
+             Err(err) => {
+                 tracing::warn!(%err, "LanePanel: Panel konnte nicht gepostet werden");
++                state.last_edit = Some(now);
+                 return;
+             }
+         };
+-        self.store_message_id(message_id).await;
+-        if let Some(old) = state.message_id.replace(message_id) {
+-            if let Err(err) = self.port.delete(self.channel_id, old).await {
+-                tracing::info!(%err, old, "LanePanel: altes Panel nicht gelöscht");
+-            }
++        if let Err(err) = self.store_message_id(message_id).await {
++            tracing::error!(%err, message_id, "LanePanel: Message-ID konnte nicht gespeichert werden");
+         }
++        state.message_id = Some(message_id);
+         state.last_key = Some(key);
+         state.last_edit = Some(now);
+-        state.messages_since = 0;
+-        state.last_user_message = None;
+     }
+ }
+ 
+-pub fn spawn(panel: Arc<LanePanel>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
+-    let mut messages = dispatcher.subscribe_messages();
+-    let listener = panel.clone();
+-    tokio::spawn(async move {
+-        loop {
+-            match messages.recv().await {
+-                Ok(event) => listener.note_user_message(event.channel_id).await,
+-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+-            }
+-        }
+-    });
++pub fn spawn(panel: Arc<LanePanel>) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+         loop {
+             panel.tick().await;
+@@ -361,46 +453,79 @@ mod tests {
+         }
+     }
+ 
++    fn texts(body: &Map<String, Value>) -> String {
++        body["components"].to_string()
++    }
++
+     #[test]
+-    fn rows_order_joinable_lobby_first_full_last() {
++    fn rows_group_lobby_then_match_then_voice() {
+         let lanes = vec![
+             lane(1, 6, 6, Some(LaneActivity::Lobby)),
+-            lane(2, 3, 6, Some(LaneActivity::Match { minute: 14 })),
++            lane(2, 3, 6, Some(LaneActivity::Match { minute: Some(14) })),
+             lane(3, 2, 6, None),
+             lane(4, 4, 6, Some(LaneActivity::Lobby)),
+             lane(5, 0, 6, None),
+             lane(ROUTER_VC_ID, 1, 99, None),
+         ];
+         let order: Vec<u64> = panel_rows(&lanes).iter().map(|l| l.channel_id).collect();
+-        assert_eq!(order, vec![4, 3, 2, 1]);
++        assert_eq!(order, vec![4, 2, 3, 1]);
+     }
+ 
+     #[test]
+-    fn row_without_presence_has_count_only() {
+-        let text = panel_row_text(&lane(3, 2, 6, None));
+-        assert!(text.ends_with("**2/6**"), "{text}");
+-        let text = panel_row_text(&lane(2, 3, 6, Some(LaneActivity::Match { minute: 14 })));
+-        assert!(text.ends_with("**3/6** · Im Match · Min 14"), "{text}");
++    fn match_minute_only_when_known() {
++        let text = panel_row_text(&lane(
++            2,
++            3,
++            6,
++            Some(LaneActivity::Match { minute: Some(14) }),
++        ));
++        assert!(text.ends_with("**3/6** · Min 14"), "{text}");
++        for minute in [None, Some(0)] {
++            let text = panel_row_text(&lane(2, 3, 6, Some(LaneActivity::Match { minute })));
++            assert!(text.ends_with("**3/6**"), "{text}");
++        }
+     }
+ 
+     #[test]
+-    fn repost_needs_enough_messages_and_quiet() {
++    fn body_has_sections_join_buttons_and_banner() {
++        let lanes = vec![
++            lane(4, 4, 6, Some(LaneActivity::Lobby)),
++            lane(2, 3, 6, Some(LaneActivity::Match { minute: None })),
++            lane(3, 6, 6, None),
++        ];
++        let rows = panel_rows(&lanes);
++        let body = panel_body(77, &rows, 1);
++        let rendered = texts(&body);
++        for heading in ["In der Lobby, freie Plätze", "### Im Match", "### Im Voice"] {
++            assert!(rendered.contains(heading), "{heading}");
++        }
++        assert!(rendered.contains("https://discord.com/channels/77/4"));
++        assert!(!rendered.contains("https://discord.com/channels/77/3"));
++        assert!(rendered.contains(&format!("attachment://{LANE_PANEL_BANNER_FILENAME}")));
++        assert_eq!(body["attachments"].as_array().map(Vec::len), Some(2));
++    }
++
++    #[test]
++    fn empty_state_is_quiet() {
++        let rendered = texts(&panel_body(77, &[], 1));
++        assert!(rendered.contains("Gerade ist keine Lane besetzt."));
++        assert!(!rendered.contains("###"));
++    }
++
++    #[test]
++    fn edits_are_debounced_and_skip_unchanged() {
+         let now = Instant::now();
+         let mut state = PanelState {
+             loaded: true,
+             message_id: Some(1),
+             last_key: Some("k".into()),
+             last_edit: Some(now),
+-            messages_since: LANE_PANEL_REPOST_AFTER_MESSAGES,
+-            last_user_message: Some(now),
+         };
+-        assert_eq!(state.decide("k", now), PanelAction::Keep);
+-        state.last_user_message = now.checked_sub(LANE_PANEL_REPOST_QUIET);
+-        assert_eq!(state.decide("k", now), PanelAction::Repost);
+-        state.messages_since = 0;
+         assert_eq!(state.decide("x", now), PanelAction::Keep);
+         state.last_edit = now.checked_sub(LANE_PANEL_MIN_EDIT_GAP);
+         assert_eq!(state.decide("x", now), PanelAction::Edit);
+         assert_eq!(state.decide("k", now), PanelAction::Keep);
++        state.message_id = None;
++        assert_eq!(state.decide("k", now), PanelAction::Post);
+     }
+ }
+diff --git a/rust/crates/dl-voice/src/status.rs b/rust/crates/dl-voice/src/status.rs
+index a279d198..563a5acd 100644
+--- a/rust/crates/dl-voice/src/status.rs
++++ b/rust/crates/dl-voice/src/status.rs
+@@ -325,6 +325,16 @@ pub fn cohort_display_minute(cohort: &Cohort) -> i64 {
+     cohort.minute_values.iter().copied().max().unwrap_or(0) + match_minute_display_offset()
+ }
+ 
++fn known_match_minute(cohort: &Cohort) -> Option<i64> {
++    cohort
++        .minute_values
++        .iter()
++        .copied()
++        .max()
++        .filter(|minute| *minute > 0)
++        .map(|minute| minute + match_minute_display_offset())
++}
++
+ pub fn lane_activity(
+     members: &[u64],
+     steam_map: &HashMap<u64, Vec<String>>,
+@@ -336,7 +346,7 @@ pub fn lane_activity(
+     match cohort.stage.as_str() {
+         "lobby" => Some(LaneActivity::Lobby),
+         "match" => Some(LaneActivity::Match {
+-            minute: cohort_display_minute(&cohort),
++            minute: known_match_minute(&cohort),
+         }),
+         _ => None,
+     }

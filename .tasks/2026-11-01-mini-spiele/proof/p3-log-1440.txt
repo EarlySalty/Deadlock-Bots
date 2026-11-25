@@ -1,0 +1,218 @@
+ok   hub button copies the overview link [https://dead-lock.de/twitch/mini-spiele/ergebnis?d=2026-11-02&r=hw3-6.il5-5.sw1-4.aw2-5.vw12-20.tw8-10.ol4-10]
+ok   confirmation is Link kopiert
+ok   share-confirm-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   trivia button copies the same link [https://dead-lock.de/twitch/mini-spiele/ergebnis?d=2026-11-02&r=hw3-6.il5-5.sw1-4.aw2-5.vw12-20.tw8-10.ol4-10]
+ok   guess-hero button copies the same link [https://dead-lock.de/twitch/mini-spiele/ergebnis?d=2026-11-02&r=hw3-6.il5-5.sw1-4.aw2-5.vw12-20.tw8-10.ol4-10]
+ok   confirmation is Link copied
+ok   copied link opens as a valid overview
+ok   overview shows no answers
+ok   partial day link drops corrupt and unplayed games [https://dead-lock.de/twitch/mini-spiele/ergebnis?d=2026-11-02&r=hw1-6]
+ok   hints-guess-hero-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-hero [{"label":"TYP","value":"Assassin","apart":true,"gap":86.2,"top":494,"labelWidth":25},{"label":"WERT","value":"Basis-Gesundheit: 780","apart":true,"gap":74.4,"top":522,"labelWidth":37},{"label":"HINTERGRUND","value":"Wenn man gegen das Gesetz verstößt, besteht ein wesentlicher Teil eines jeden Unterfangens darin, si…","apart":true,"gap":12,"top":550,"labelWidth":99},{"label":"WAFFE","value":"Schnellfeuer","apart":true,"gap":67.3,"top":598,"labelWidth":44},{"label":"SPIELSTIL","value":"Mit ihren mächtigen Waffen (inklusive einer tödlichen Dosis Gift) schlängelt sich ??? hinter die feindlichen Linien und schaltet mit einem tödlichen Kugelhagel hochrangige Ziele aus.","apart":true,"gap":44.6,"top":626,"labelWidth":66}]
+ok   hints-guess-item-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-item [{"label":"KATEGORIE","value":"Waffe","apart":true,"gap":29.6,"top":454,"labelWidth":75},{"label":"AKTIVIERUNG","value":"Passiv","apart":true,"gap":12,"top":482,"labelWidth":93},{"label":"EIGENSCHAFT","value":"Verzögerung zw. Aufladungen: -1.0 s","apart":true,"gap":12.6,"top":510,"labelWidth":92},{"label":"STUFE","value":"Stufe 3","apart":true,"gap":63.9,"top":538,"labelWidth":41}]
+ok   hints-guess-sound-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-sound [{"label":"HELDENTYP","value":"Brawler","apart":true,"gap":75.5,"top":506,"labelWidth":78},{"label":"HELD","value":"Victor","apart":true,"gap":118.4,"top":534,"labelWidth":35},{"label":"ANFANGSBUCHSTABE","value":"Der Name der Fähigkeit beginnt mit „A“","apart":true,"gap":12,"top":562,"labelWidth":141}]
+ok   hints-guess-ability-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-ability [{"label":"TYP","value":"Signaturfähigkeit","apart":true,"gap":91.1,"top":454,"labelWidth":25},{"label":"HELDENTYP","value":"Mystic","apart":true,"gap":37.8,"top":482,"labelWidth":78},{"label":"HELD","value":"Seven","apart":true,"gap":80.7,"top":510,"labelWidth":35},{"label":"BESCHREIBUNG","value":"Seven überlädt seine Waffe mit elektrischer Energie, wodurch seine Kugeln einem Ziel Schockschaden zufügen. Der Schocksc…","apart":true,"gap":12,"top":538,"labelWidth":104}]
+    de labels measured: guess-hero:TYP, guess-hero:WERT, guess-hero:HINTERGRUND, guess-hero:WAFFE, guess-hero:SPIELSTIL, guess-hero:WERT 2, guess-item:KATEGORIE, guess-item:AKTIVIERUNG, guess-item:EIGENSCHAFT, guess-item:STUFE, guess-sound:HELDENTYP, guess-sound:HELD, guess-sound:ANFANGSBUCHSTABE, guess-ability:TYP, guess-ability:HELDENTYP, guess-ability:HELD, guess-ability:BESCHREIBUNG
+ok   de no hint label overlaps its value [0]
+ok   hints-guess-hero-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-hero [{"label":"TYPE","value":"Assassin","apart":true,"gap":52,"top":494,"labelWidth":32},{"label":"STAT","value":"Base health: 780","apart":true,"gap":53.4,"top":522,"labelWidth":31},{"label":"LORE","value":"Wenn man gegen das Gesetz verstößt, besteht ein wesentlicher Teil eines jeden Unterfangens darin, si…","apart":true,"gap":50.1,"top":550,"labelWidth":34},{"label":"WEAPON","value":"Schnellfeuer","apart":true,"gap":26.2,"top":598,"labelWidth":58},{"label":"PLAYSTYLE","value":"Mit ihren mächtigen Waffen (inklusive einer tödlichen Dosis Gift) schlängelt sich ??? hinter die feindlichen Linien und schaltet mit einem tödlichen Kugelhagel hochrangige Ziele aus.","apart":true,"gap":12,"top":626,"labelWidth":72}]
+ok   hints-guess-item-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-item [{"label":"SLOT","value":"Waffe","apart":true,"gap":61.3,"top":454,"labelWidth":33},{"label":"ACTIVATION","value":"Passiv","apart":true,"gap":12,"top":482,"labelWidth":82},{"label":"PROPERTY","value":"Verzögerung zw. Aufladungen: -1.0 s","apart":true,"gap":25.5,"top":510,"labelWidth":69},{"label":"TIER","value":"Tier 3","apart":true,"gap":64.1,"top":538,"labelWidth":30}]
+ok   hints-guess-sound-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-sound [{"label":"HERO TYPE","value":"Brawler","apart":true,"gap":28.5,"top":518,"labelWidth":74},{"label":"HERO","value":"Victor","apart":true,"gap":65.3,"top":546,"labelWidth":37},{"label":"FIRST LETTER","value":"The ability name starts with \"A\"","apart":true,"gap":12,"top":574,"labelWidth":90}]
+ok   hints-guess-ability-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-ability [{"label":"TYPE","value":"Signaturfähigkeit","apart":true,"gap":53.1,"top":454,"labelWidth":32},{"label":"HERO TYPE","value":"Mystic","apart":true,"gap":12,"top":482,"labelWidth":74},{"label":"HERO","value":"Seven","apart":true,"gap":48.9,"top":510,"labelWidth":37},{"label":"DESC","value":"Seven überlädt seine Waffe mit elektrischer Energie, wodurch seine Kugeln einem Ziel Schockschaden zufügen. Der Schocksc…","apart":true,"gap":52.1,"top":538,"labelWidth":34}]
+    en labels measured: guess-hero:TYPE, guess-hero:STAT, guess-hero:LORE, guess-hero:WEAPON, guess-hero:PLAYSTYLE, guess-hero:STAT 2, guess-item:SLOT, guess-item:ACTIVATION, guess-item:PROPERTY, guess-item:TIER, guess-sound:HERO TYPE, guess-sound:HERO, guess-sound:FIRST LETTER, guess-ability:TYPE, guess-ability:HERO TYPE, guess-ability:HERO, guess-ability:DESC
+ok   en no hint label overlaps its value [0]
+ok   de german result tiles: no mark over text [{"rows":[],"marks":20}]
+ok   item-stats-result-de-german no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de english result tiles: no mark over text [{"rows":[],"marks":20}]
+ok   item-stats-result-de-english no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en german result tiles: no mark over text [{"rows":[],"marks":20}]
+ok   item-stats-result-en-german no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en english result tiles: no mark over text [{"rows":[],"marks":20}]
+ok   item-stats-result-en-english no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    hosts 127.0.0.1:4871, api.deadlock-api.com, assets-bucket.deadlock-api.com, ; aborted 0
+ok   only allowed hosts [127.0.0.1:4871,api.deadlock-api.com,assets-bucket.deadlock-api.com,]
+ok   no page or console errors
+failures: 0
+ok   de no repeats persisted
+ok   de wrong answer marks correct and wrong
+ok   de announcement names the answer after reveal [Falsch. Richtig wäre: Solomon.]
+ok   heroes-wrong-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de number key answers [1]
+ok   de reload keeps progress [{"correct":4,"seen":5,"streak":3,"bestStreak":3}]
+ok   de heroes reach the mastered state [seen 44/44]
+ok   de no correct hero repeated while no repeats is on [0]
+ok   de announcement empty before reveal
+ok   de no hero name in attributes before reveal
+ok   de polled announcement never shows another card's answer [751 samples, 0 mismatched []]
+ok   heroes-mastered-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de final stats {"correct":44,"seen":45,"streak":43,"bestStreak":43} seen 44/44
+ok   reset-confirm-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   reset cancel keeps progress
+ok   reset confirm clears progress
+ok   terms switch keeps the card
+    options german 1Lash,2Seven,3Celeste,4Victor english 1Lash,2Seven,3Celeste,4Victor
+ok   terms switch keeps option order by hero
+ok   dashboard language keeps the card
+ok   dashboard language keeps option names
+FAIL dashboard language changes UI
+ok   corrupt progress falls back to fresh
+ok   corrupt no repeats falls back to off
+ok   unparsable progress falls back to fresh
+ok   unknown stapel shows the deck hub
+    guess-hero de+english TYP=Assassin, TYP=Marksman, TYP=Mystic, TYP=Brawler
+    guess-hero de+german TYP=Assassin, TYP=Marksman, TYP=Mystic, TYP=Brawler
+    guess-hero en+german TYPE=Assassin, TYPE=Marksman, TYPE=Mystic, TYPE=Brawler
+ok   guess-hero English terms on German dashboard show no German term
+ok   guess-hero German terms show no English term
+ok   guess-hero hero types stay English
+ok   guess-hero hero type values seen
+    guess-hero label follows dashboard: de TYP en TYPE
+ok   guess-hero labels follow the dashboard language
+node:internal/modules/run_main:123
+    triggerUncaughtException(
+    ^
+
+page.waitForSelector: Timeout 90000ms exceeded.
+Call log:
+  - waiting for locator('dl dt')
+
+    at hintPage (/tmp/p3-tools/p3-run.mts:480:14)
+    at async hintValues (/tmp/p3-tools/p3-run.mts:509:5)
+    at async termsCheck (/tmp/p3-tools/p3-run.mts:520:23)
+    at async <anonymous> (/tmp/p3-tools/p3-run.mts:590:28) {
+  log: [ "  - waiting for locator('dl dt')" ],
+  name: 'TimeoutError'
+}
+
+Node.js v22.23.2
+ok   reset-confirm-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   reset cancel keeps progress
+ok   reset confirm clears progress
+ok   terms switch keeps the card
+    options german 1Wraith,2Celeste,3Mo & Krill,4Nurse Harrow english 1Wraith,2Celeste,3Mo & Krill,4Nurse Harrow
+ok   terms switch keeps option order by hero
+ok   dashboard language keeps the card
+ok   dashboard language keeps option names
+ok   dashboard language changes UI
+ok   corrupt progress falls back to fresh
+ok   corrupt no repeats falls back to off
+ok   unparsable progress falls back to fresh
+    item options german 1Schwächungsreduzierer,2Glückstreffer,3Antimagische Kugeln,4Zielfernrohr english 1Debuff Reducer,2Lucky Shot,3Spirit Shredder,4Long Range
+ok   terms switch relocalizes item names on the same card [1Debuff Reducer,2Lucky Shot,3Spirit Shredder,4Long Range]
+ok   terms switch keeps progress [0/0|0 %|0|0]
+ok   unknown stapel shows the deck hub
+ok   hints-guess-hero-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-hero [{"label":"TYP","value":"Assassin","apart":true,"gap":131.2,"top":494,"labelWidth":25},{"label":"WERT","value":"Basis-Gesundheit: 780","apart":true,"gap":119.4,"top":522,"labelWidth":37},{"label":"HINTERGRUND","value":"Wenn man gegen das Gesetz verstößt, besteht ein wesentlicher Teil eines jeden Unterfangens darin, si…","apart":true,"gap":57,"top":550,"labelWidth":99},{"label":"WAFFE","value":"Schnellfeuer","apart":true,"gap":112.3,"top":598,"labelWidth":44},{"label":"SPIELSTIL","value":"Mit ihren mächtigen Waffen (inklusive einer tödlichen Dosis Gift) schlängelt sich ??? hinter die feindlichen Linien und schaltet mit einem tödlichen Kugelhagel hochrangige Ziele aus.","apart":true,"gap":89.6,"top":626,"labelWidth":66}]
+ok   hints-guess-item-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-item [{"label":"KATEGORIE","value":"Waffe","apart":true,"gap":81.1,"top":454,"labelWidth":75},{"label":"AKTIVIERUNG","value":"Passiv","apart":true,"gap":63.4,"top":482,"labelWidth":93},{"label":"EIGENSCHAFT","value":"Verzögerung zw. Aufladungen: -1.0 s","apart":true,"gap":64.1,"top":510,"labelWidth":92},{"label":"STUFE","value":"Stufe 3","apart":true,"gap":115.4,"top":538,"labelWidth":41}]
+ok   hints-guess-sound-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-sound [{"label":"HELDENTYP","value":"Brawler","apart":true,"gap":78,"top":506,"labelWidth":78},{"label":"HELD","value":"Victor","apart":true,"gap":120.9,"top":534,"labelWidth":35},{"label":"ANFANGSBUCHSTABE","value":"Der Name der Fähigkeit beginnt mit „A“","apart":true,"gap":14.5,"top":562,"labelWidth":141}]
+ok   hints-guess-ability-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    de guess-ability [{"label":"TYP","value":"Signaturfähigkeit","apart":true,"gap":131.2,"top":454,"labelWidth":25},{"label":"HELDENTYP","value":"Mystic","apart":true,"gap":78,"top":482,"labelWidth":78},{"label":"HELD","value":"Seven","apart":true,"gap":120.9,"top":510,"labelWidth":35},{"label":"BESCHREIBUNG","value":"Seven überlädt seine Waffe mit elektrischer Energie, wodurch seine Kugeln einem Ziel Schockschaden zufügen. Der Schocksc…","apart":true,"gap":52.2,"top":538,"labelWidth":104}]
+    de labels measured: guess-hero:TYP, guess-hero:WERT, guess-hero:HINTERGRUND, guess-hero:WAFFE, guess-hero:SPIELSTIL, guess-hero:WERT 2, guess-item:KATEGORIE, guess-item:AKTIVIERUNG, guess-item:EIGENSCHAFT, guess-item:STUFE, guess-sound:HELDENTYP, guess-sound:HELD, guess-sound:ANFANGSBUCHSTABE, guess-ability:TYP, guess-ability:HELDENTYP, guess-ability:HELD, guess-ability:BESCHREIBUNG
+ok   de no hint label overlaps its value [0]
+ok   hints-guess-hero-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-hero [{"label":"TYPE","value":"Assassin","apart":true,"gap":123.5,"top":494,"labelWidth":32},{"label":"STAT","value":"Base health: 780","apart":true,"gap":125,"top":522,"labelWidth":31},{"label":"LORE","value":"Wenn man gegen das Gesetz verstößt, besteht ein wesentlicher Teil eines jeden Unterfangens darin, si…","apart":true,"gap":121.7,"top":550,"labelWidth":34},{"label":"WEAPON","value":"Schnellfeuer","apart":true,"gap":97.8,"top":598,"labelWidth":58},{"label":"PLAYSTYLE","value":"Mit ihren mächtigen Waffen (inklusive einer tödlichen Dosis Gift) schlängelt sich ??? hinter die feindlichen Linien und schaltet mit einem tödlichen Kugelhagel hochrangige Ziele aus.","apart":true,"gap":83.6,"top":626,"labelWidth":72}]
+ok   hints-guess-item-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-item [{"label":"SLOT","value":"Waffe","apart":true,"gap":123,"top":454,"labelWidth":33},{"label":"ACTIVATION","value":"Passiv","apart":true,"gap":73.7,"top":482,"labelWidth":82},{"label":"PROPERTY","value":"Verzögerung zw. Aufladungen: -1.0 s","apart":true,"gap":87.2,"top":510,"labelWidth":69},{"label":"TIER","value":"Tier 3","apart":true,"gap":125.8,"top":538,"labelWidth":30}]
+ok   hints-guess-sound-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-sound [{"label":"HERO TYPE","value":"Brawler","apart":true,"gap":82.4,"top":510,"labelWidth":74},{"label":"HERO","value":"Victor","apart":true,"gap":119.2,"top":538,"labelWidth":37},{"label":"FIRST LETTER","value":"The ability name starts with \"A\"","apart":true,"gap":65.9,"top":566,"labelWidth":90}]
+ok   hints-guess-ability-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    en guess-ability [{"label":"TYPE","value":"Signaturfähigkeit","apart":true,"gap":123.5,"top":455,"labelWidth":32},{"label":"HERO TYPE","value":"Mystic","apart":true,"gap":82.4,"top":483,"labelWidth":74},{"label":"HERO","value":"Seven","apart":true,"gap":119.2,"top":511,"labelWidth":37},{"label":"DESC","value":"Seven überlädt seine Waffe mit elektrischer Energie, wodurch seine Kugeln einem Ziel Schockschaden zufügen. Der Schocksc…","apart":true,"gap":122.5,"top":539,"labelWidth":34}]
+    en labels measured: guess-hero:TYPE, guess-hero:STAT, guess-hero:LORE, guess-hero:WEAPON, guess-hero:PLAYSTYLE, guess-hero:STAT 2, guess-item:SLOT, guess-item:ACTIVATION, guess-item:PROPERTY, guess-item:TIER, guess-sound:HERO TYPE, guess-sound:HERO, guess-sound:FIRST LETTER, guess-ability:TYPE, guess-ability:HERO TYPE, guess-ability:HERO, guess-ability:DESC
+ok   en no hint label overlaps its value [0]
+    hosts 127.0.0.1:4871, api.deadlock-api.com, assets-bucket.deadlock-api.com, ; aborted 0
+ok   only allowed hosts [127.0.0.1:4871,api.deadlock-api.com,assets-bucket.deadlock-api.com,]
+ok   no page or console errors
+failures: 0
+ok   items-start-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   items-revealed-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de items seeded near end reaches mastered
+ok   items-mastered-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-upgrades-start-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-upgrades-revealed-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de item-upgrades seeded near end reaches mastered
+ok   item-upgrades-mastered-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de items prompt icon from the pool [https://assets-bucket.deadlock-api.com/assets-api-res/images/items/spirit/spirit_snatch.webp]
+ok   de no item name in attributes before reveal
+ok   item-upgrades-idle-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de upgrades deck shows 4 options
+ok   items-start-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   items-revealed-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en items seeded near end reaches mastered
+ok   items-mastered-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-upgrades-start-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-upgrades-revealed-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en item-upgrades seeded near end reaches mastered
+ok   item-upgrades-mastered-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en items prompt icon from the pool [https://assets-bucket.deadlock-api.com/assets-api-res/images/items/weapon/point_blank.webp]
+ok   en no item name in attributes before reveal
+ok   item-upgrades-idle-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en upgrades deck shows 4 options
+ok   item-effects-start-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-effects-revealed-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de item-effects seeded near end reaches mastered
+ok   item-effects-mastered-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de effects to name prompt never contains the full answer name [0]
+ok   item-effects-reverse-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   de exclude legendary keeps tier 5 out of the prompts [0 function]
+    de longest option rendered 427 chars
+ok   item-effects-longest-de no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-effects-start-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item-effects-revealed-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en item-effects seeded near end reaches mastered
+ok   item-effects-mastered-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en effects to name prompt never contains the full answer name [0]
+ok   item-effects-reverse-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   en exclude legendary keeps tier 5 out of the prompts [0 function]
+    en longest option rendered 427 chars
+ok   item-effects-longest-en no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+    guess-hero de+english TYP=Assassin, TYP=Marksman, TYP=Mystic, TYP=Brawler
+    guess-hero de+german TYP=Assassin, TYP=Marksman, TYP=Mystic, TYP=Brawler
+    guess-hero en+german TYPE=Assassin, TYPE=Marksman, TYPE=Mystic, TYPE=Brawler
+ok   guess-hero English terms on German dashboard show no German term
+ok   guess-hero German terms show no English term
+ok   guess-hero hero types stay English
+ok   guess-hero hero type values seen
+    guess-hero label follows dashboard: de TYP en TYPE
+ok   guess-hero labels follow the dashboard language
+    guess-item de+english KATEGORIE=Weapon, AKTIVIERUNG=Passive, KATEGORIE=Spirit, AKTIVIERUNG=Active, KATEGORIE=Vitality
+    guess-item de+german KATEGORIE=Waffe, AKTIVIERUNG=Passiv, KATEGORIE=Geist, AKTIVIERUNG=Aktiv, KATEGORIE=Vitalität
+    guess-item en+german SLOT=Waffe, ACTIVATION=Passiv, SLOT=Geist, ACTIVATION=Aktiv, SLOT=Vitalität
+ok   guess-item English terms on German dashboard show no German term
+ok   guess-item German terms show no English term
+ok   guess-item hero types stay English
+ok   guess-item term values seen
+    guess-item label follows dashboard: de KATEGORIE en SLOT
+ok   guess-item labels follow the dashboard language
+    guess-ability de+english TYP=Signature, TYP=Ultimate, HELDENTYP=Mystic, HELDENTYP=Assassin, HELDENTYP=Brawler, HELDENTYP=Marksman
+    guess-ability de+german TYP=Signaturfähigkeit, TYP=Ultimative Fähigkeit, HELDENTYP=Mystic, HELDENTYP=Assassin, HELDENTYP=Brawler, HELDENTYP=Marksman
+    guess-ability en+german TYPE=Signaturfähigkeit, TYPE=Ultimative Fähigkeit, HERO TYPE=Mystic, HERO TYPE=Assassin, HERO TYPE=Brawler, HERO TYPE=Marksman
+ok   guess-ability English terms on German dashboard show no German term
+ok   guess-ability German terms show no English term
+ok   guess-ability hero types stay English
+ok   guess-ability term values seen
+    guess-ability label follows dashboard: de TYP en TYPE
+ok   guess-ability labels follow the dashboard language
+    guess-sound de+english HELDENTYP=Brawler, HELDENTYP=Assassin, HELDENTYP=Mystic
+    guess-sound de+german HELDENTYP=Brawler, HELDENTYP=Assassin, HELDENTYP=Mystic
+    guess-sound en+german HERO TYPE=Brawler, HERO TYPE=Assassin, HERO TYPE=Mystic
+ok   guess-sound English terms on German dashboard show no German term
+ok   guess-sound German terms show no English term
+ok   guess-sound hero types stay English
+ok   guess-sound hero type values seen
+    guess-sound label follows dashboard: de HELDENTYP en HERO TYPE
+ok   guess-sound labels follow the dashboard language
+ok   item stats tiles English terms on German dashboard
+ok   terms-item-stats-de-english no horizontal overflow at 1440 [{"width":1440,"scroll":1440,"offenders":[]}]
+ok   item stats tiles German terms
+    hosts 127.0.0.1:4871, api.deadlock-api.com, assets-bucket.deadlock-api.com, ; aborted 0
+ok   only allowed hosts [127.0.0.1:4871,api.deadlock-api.com,assets-bucket.deadlock-api.com,]
+ok   no page or console errors
+failures: 0
