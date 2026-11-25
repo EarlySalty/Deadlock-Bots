@@ -1266,10 +1266,12 @@ mod tests {
 
     use sqlx::postgres::PgPoolOptions;
 
+    type MonitoredChannel = (u64, u64, String, Vec<u64>);
+
     #[derive(Default)]
     struct MockStatusPort {
         renamed: StdMutex<Vec<(u64, String)>>,
-        monitored: StdMutex<Vec<(u64, u64, String, Vec<u64>)>>,
+        monitored: StdMutex<Vec<MonitoredChannel>>,
         statuses: StdMutex<HashMap<u64, String>>,
         moved: StdMutex<Vec<(u64, u64, u64)>>,
     }

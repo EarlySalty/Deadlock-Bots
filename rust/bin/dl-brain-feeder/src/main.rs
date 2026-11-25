@@ -16,7 +16,7 @@ use clap::Parser;
 use dl_ai::{FireworksClient, GenerateRequest, TextGenerator};
 use dl_brain_feeder::plan::{
     evaluate_response, render_operating_health, render_plan_markdown, EvaluatedPlan,
-    OperatingHealth, PlanSources, ServiceErrors, DEFAULT_PLAN_MODEL, PLAN_SYSTEM_PROMPT,
+    OperatingHealth, PlanSources, ServiceErrors, PLAN_SYSTEM_PROMPT,
 };
 use dl_brain_feeder::{
     log_entry, pick_digest_relpath, render_digest, AuditAgg, BrainReportExcerpt, DigestData,
@@ -29,7 +29,6 @@ use sqlx::PgPool;
 const DEFAULT_WIKI_ROOT: &str = "/home/naniadm/Documents/Deadlock-2nd-Brain";
 const TWITCH_DSN_ENV: &str = "TWITCH_ANALYTICS_DSN";
 const TURNIER_DSN_ENV: &str = "DEADLOCK_CENTRAL_DSN";
-const PLAN_MODEL_ENV: &str = "DL_BRAIN_PLAN_MODEL";
 
 const PLAN_BASE_PG_TABLES: [&str; 7] = [
     "activity.weekly_pulse",
@@ -708,10 +707,8 @@ async fn run_plan_phase(
     period_end: DateTime<Utc>,
     digest_path: Option<&str>,
 ) -> Result<()> {
-    let model = std::env::var(PLAN_MODEL_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_PLAN_MODEL.to_string());
+    let model = dl_ai::selected_flash_model()
+        .context("Gemeinsame Flash-Modellauswahl für den Wochenplan")?;
     let wiki = wiki_root();
     let Some(digest_path) = digest_path else {
         record_plan_error(pool, period_start, period_end, &model, "Digest-Pfad fehlt").await?;

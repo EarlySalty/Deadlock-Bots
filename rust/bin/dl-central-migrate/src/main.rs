@@ -2,6 +2,8 @@ use std::process::ExitCode;
 
 use dl_central_db::{connect_pool, dsn_from_env};
 
+mod peer_config;
+
 const CANONICAL_SCRIM_1602_SHA384: &str =
     "423022abe243dbe00f81ac78fa7b159d842b5257cd38d67abf1fc4b432c00a471645a5fcb60d9fcfd301c74d625ddd78";
 const TRANSIENT_SCRIM_1602_SHA384: &str =
@@ -50,8 +52,16 @@ async fn main() -> ExitCode {
     eprintln!("dl-central-migrate: wende zentrale DB-Migrationen an …");
 
     let result = async {
-        let dsn = dsn_from_env()?;
-        let pool = connect_pool(&dsn).await?;
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        let pool = if let Some(options) = peer_config::from_args(&args)? {
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await?
+        } else {
+            let dsn = dsn_from_env()?;
+            connect_pool(&dsn).await?
+        };
         if reconcile_transient_scrim_1602_checksum(&pool).await? {
             eprintln!(
                 "dl-central-migrate: kurzzeitig veroeffentlichte Scrim-Migrationspruefsumme abgeglichen."
@@ -60,7 +70,7 @@ async fn main() -> ExitCode {
         sqlx::migrate!("../../crates/dl-central-db/migrations")
             .run(&pool)
             .await?;
-        Ok::<(), dl_central_db::CentralDbError>(())
+        Ok::<(), anyhow::Error>(())
     }
     .await;
 

@@ -533,6 +533,10 @@ impl BotConfig {
         let llm_case = key
             .strip_prefix("DL_LLM_PROVIDER_")
             .or_else(|| key.strip_prefix("DL_LLM_MODEL_"))
+            .or_else(|| key.strip_prefix("DL_LLM_MAX_OUTPUT_TOKENS_"))
+            .or_else(|| key.strip_prefix("DL_LLM_TEMPERATURE_"))
+            .or_else(|| key.strip_prefix("DL_LLM_REASONING_EFFORT_"))
+            .or_else(|| key.strip_prefix("DL_LLM_REQUEST_TIMEOUT_SECONDS_"))
             .and_then(|suffix| match suffix {
                 "BOT_PATE" => Some(UseCase::BotPate),
                 "FAQ" => Some(UseCase::Faq),
@@ -560,8 +564,18 @@ impl BotConfig {
                         }
                         .into()
                     })
-                } else {
+                } else if key.starts_with("DL_LLM_MODEL_") {
                     config.model.clone()
+                } else if key.starts_with("DL_LLM_MAX_OUTPUT_TOKENS_") {
+                    config.max_output_tokens.map(|value| value.to_string())
+                } else if key.starts_with("DL_LLM_TEMPERATURE_") {
+                    config.temperature.map(|value| value.to_string())
+                } else if key.starts_with("DL_LLM_REASONING_EFFORT_") {
+                    config.reasoning_effort.clone()
+                } else {
+                    config
+                        .request_timeout_seconds
+                        .map(|value| value.to_string())
                 }
             });
         }
@@ -629,7 +643,6 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "INTERNAL_API_TOKEN"
         | "TURNIER_INTERNAL_API_TOKEN"
         | "SERVERSYNC_INTERNAL_TOKEN"
-        | "MCP_CONNECTOR_TOKEN"
         | "COACHING_BOT_TOKEN"
         | "DISCORD_OAUTH_CLIENT_SECRET"
         | "PUBLIC_STATS_SESSION_SECRET"
@@ -644,10 +657,19 @@ pub fn secret_value(key: &str) -> Option<String> {
         | "GOOGLE_API_KEY"
         | "MINIMAX_API_KEY"
         | "MINMAX"
-        | "MINIMAX_TOKEN_PLAN_KEY" => std::env::var(key)
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty()),
+        | "MINIMAX_TOKEN_PLAN_KEY" => {
+            // Nach dem privaten Start-Snapshot niemals auf ENV zurückfallen,
+            // auch wenn ein erlaubtes Secret darin fehlt.
+            let value = if crate::token_snapshot::installed() {
+                crate::token_snapshot::value(key).map(str::to_owned)
+            } else {
+                // Unbetroffene Legacy-Binaries behalten ihren Startvertrag.
+                std::env::var(key).ok()
+            };
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        }
         _ => None,
     }
 }

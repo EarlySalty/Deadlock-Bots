@@ -9,7 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 async-trait.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 chrono-tz.workspace = true
 dl-ai.workspace = true
 dl-central-db.workspace = true

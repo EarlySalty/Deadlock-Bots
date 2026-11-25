@@ -1,0 +1,11 @@
+[package]
+name = "uplink-infisical-transport"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+nix = { version = "0.29", default-features = false, features = ["user"] }

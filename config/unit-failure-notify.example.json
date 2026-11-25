@@ -1,0 +1,11 @@
+{
+  "broker_origin": "http://127.0.0.1:8770",
+  "channel_id": 1,
+  "state_directory": "/home/nathanael/.local/state/unit-failure-notify-rust",
+  "legacy_state_directory": "/home/nathanael/.local/state/unit-failure-notify",
+  "infisical_socket": "/run/uplink-infisical/api.sock",
+  "project_id": "bestehendes-bots-projekt",
+  "environment": "prod",
+  "secret_path": "/",
+  "host_label": "v50671"
+}

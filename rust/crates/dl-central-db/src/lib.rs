@@ -1,3 +1,4 @@
+pub mod bearer;
 pub mod core_users;
 pub mod kv;
 mod locks;

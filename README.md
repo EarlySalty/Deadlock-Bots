@@ -1,9 +1,5 @@
 # 🤖 Deutsche Deadlock Community Bot
 
-[![Security: CodeQL](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/codeql.yml/badge.svg)](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/codeql.yml)
-[![Deep Security Scan](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/security-deep-scan.yml/badge.svg)](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/security-deep-scan.yml)
-[![Lint & Type Check](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/lint-and-typecheck.yml/badge.svg)](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/lint-and-typecheck.yml)
-[![Secret Scanning](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/secret-scanning.yml/badge.svg)](https://github.com/NaniDerEchte2/Deadlock/actions/workflows/secret-scanning.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Discord-Bot für die Deutsche Deadlock Community mit umfangreichen Features.

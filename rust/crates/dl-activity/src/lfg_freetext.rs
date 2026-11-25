@@ -1057,7 +1057,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "ranked, elo 6-8".into(),
-            message_created_at: 0,
+            message_created_at: chrono::DateTime::from_timestamp(0, 0).expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,

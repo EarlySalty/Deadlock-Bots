@@ -55,6 +55,8 @@ pub struct BotConfig {
     #[serde(default)]
     pub tempvoice: TempVoiceCleanupConfig,
     #[serde(default)]
+    pub twitch_invites: TwitchInvitesConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
 }
 
@@ -140,7 +142,9 @@ pub struct TempVoiceCleanupConfig {
 
 impl Default for TempVoiceCleanupConfig {
     fn default() -> Self {
-        Self { empty_lane_grace_seconds: 300 }
+        Self {
+            empty_lane_grace_seconds: 300,
+        }
     }
 }
 
@@ -180,19 +184,24 @@ pub struct LlmConfig {
     pub use_cases: BTreeMap<UseCase, UseCaseConfig>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct UseCaseConfig {
-    /// Modell-Pin und Provider-Override bleiben unabhängig voneinander.
+    /// Altbestand für kompatibles Einlesen. Produktive Textpfade nutzen Fireworks.
     pub provider: Option<Provider>,
-    /// Bewusster Pin für diesen Anwendungsfall.
+    /// Altbestand; das produktive Modell kommt aus der gemeinsamen Flash-Auswahl.
     pub model: Option<String>,
+    /// Ohne Override bleiben die bisherigen Parameter des Aufrufers erhalten.
+    pub max_output_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub reasoning_effort: Option<String>,
+    pub request_timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FireworksConfig {
-    /// Ausschließlich ein bewusster Pin; keine automatische Modellwahl.
+    /// Altbestand für kompatibles Einlesen; produktiv gilt die gemeinsame Auswahl.
     pub model: Option<String>,
 }
 
@@ -230,6 +239,28 @@ fn flash_version(model: &str) -> Option<(u32, u32, u32)> {
         return None;
     }
     Some((major, minor.parse::<u32>().ok()?, release))
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TwitchInvitesConfig {
+    pub personal_links_per_channel: u16,
+    pub guild_invite_reserve: u16,
+    pub evaluation_interval_seconds: u64,
+    pub excluded_voice_channel_ids: Vec<u64>,
+    pub sync_dry_run: bool,
+}
+
+impl Default for TwitchInvitesConfig {
+    fn default() -> Self {
+        Self {
+            personal_links_per_channel: 0,
+            guild_invite_reserve: 50,
+            evaluation_interval_seconds: 300,
+            excluded_voice_channel_ids: Vec::new(),
+            sync_dry_run: false,
+        }
+    }
 }
 
 impl BotConfig {
@@ -281,6 +312,19 @@ impl BotConfig {
     pub fn validate(&self) -> Result<(), BotConfigError> {
         self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
+        if self.twitch_invites.personal_links_per_channel > 1000
+            || self.twitch_invites.guild_invite_reserve > 1000
+            || !(1..=86400).contains(&self.twitch_invites.evaluation_interval_seconds)
+            || self
+                .twitch_invites
+                .excluded_voice_channel_ids
+                .iter()
+                .any(|id| *id == 0 || i64::try_from(*id).is_err())
+        {
+            return Err(invalid(
+                "twitch_invites enthält ungültige Grenzen oder Kanal-IDs",
+            ));
+        }
         let steam = url::Url::parse(&self.services.steam_api_url)
             .map_err(|_| invalid("services.steam_api_url ist ungültig"))?;
         if !matches!(steam.scheme(), "http" | "https")
@@ -349,7 +393,9 @@ impl BotConfig {
             ));
         }
         if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
-            return Err(invalid("tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen"));
+            return Err(invalid(
+                "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
+            ));
         }
         let fireworks = &self.llm.fireworks;
         if fireworks
@@ -362,6 +408,22 @@ impl BotConfig {
             ));
         }
         for (use_case, cfg) in &self.llm.use_cases {
+            if cfg
+                .max_output_tokens
+                .is_some_and(|value| !(1..=32_768).contains(&value))
+                || cfg
+                    .temperature
+                    .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+                || cfg
+                    .request_timeout_seconds
+                    .is_some_and(|value| !(1..=110).contains(&value))
+                || cfg
+                    .reasoning_effort
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "none" | "low" | "medium" | "high"))
+            {
+                return Err(invalid("KI-Parameter: 1–32768 Ausgabetokens, Temperatur 0–2, Zeitlimit 1–110 Sekunden; Denkaufwand none/low/medium/high"));
+            }
             if cfg.model.as_deref().is_some_and(|id| {
                 id.is_empty()
                     || id.trim() != id
@@ -462,10 +524,24 @@ mod tests {
 
     #[test]
     fn tempvoice_reconcile_grace_default_und_toml_override() {
-        assert_eq!(BotConfig::parse("schema_version = 1").expect("default").tempvoice.empty_lane_grace_seconds, 300);
-        assert_eq!(BotConfig::parse("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = 120").expect("override").tempvoice.empty_lane_grace_seconds, 120);
+        assert_eq!(
+            BotConfig::parse("schema_version = 1")
+                .expect("default")
+                .tempvoice
+                .empty_lane_grace_seconds,
+            300
+        );
+        assert_eq!(
+            BotConfig::parse("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = 120")
+                .expect("override")
+                .tempvoice
+                .empty_lane_grace_seconds,
+            120
+        );
         for invalid in [0, 86401] {
-            rejected(&format!("schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = {invalid}"));
+            rejected(&format!(
+                "schema_version = 1\n[tempvoice]\nempty_lane_grace_seconds = {invalid}"
+            ));
         }
     }
 
