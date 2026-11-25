@@ -46,6 +46,8 @@ pub const BRAIN_DAILY_USER_LIMIT_RANGE: RangeInclusive<usize> = 1..=i64::MAX as 
 pub const BRAIN_MAX_QUESTION_LEN_RANGE: RangeInclusive<usize> = 1..=65_536;
 pub const BRAIN_IMAGE_MAX_COUNT_RANGE: RangeInclusive<usize> = 1..=4;
 pub const BRAIN_IMAGE_JPEG_QUALITY_RANGE: RangeInclusive<u64> = 40..=95;
+pub const BRAIN_IMAGE_MAX_DOWNLOAD_BYTES_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
+pub const BRAIN_IMAGE_MAX_EDGE_RANGE: RangeInclusive<u64> = 384..=12_000;
 pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
 pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=3600.0;
 pub const UNIT_INTERVAL_RANGE: RangeInclusive<f64> = 0.0..=1.0;
@@ -396,6 +398,14 @@ impl RuntimeConfig {
                 .ai
                 .brain_image_jpeg_quality
                 .is_some_and(|quality| !BRAIN_IMAGE_JPEG_QUALITY_RANGE.contains(&quality))
+            || self
+                .ai
+                .brain_image_max_download_bytes
+                .is_some_and(|bytes| !BRAIN_IMAGE_MAX_DOWNLOAD_BYTES_RANGE.contains(&bytes))
+            || self
+                .ai
+                .brain_image_max_edge
+                .is_some_and(|edge| !BRAIN_IMAGE_MAX_EDGE_RANGE.contains(&edge))
         {
             return Err(invalid());
         }

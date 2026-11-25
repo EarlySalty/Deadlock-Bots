@@ -282,30 +282,49 @@ fn discord_brain_answerer(
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
-        .with_image_limits(brain_image_limits(options))?,
+        .with_image_limits(brain_image_limits(options)?)?,
     ))
 }
 
-fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain::ImageLimits {
+const _: () = {
+    use dl_core::runtime_config as rc;
+    assert!(*rc::BRAIN_IMAGE_MAX_COUNT_RANGE.start() == *dl_brain::IMAGE_COUNT_RANGE.start());
+    assert!(*rc::BRAIN_IMAGE_MAX_COUNT_RANGE.end() == *dl_brain::IMAGE_COUNT_RANGE.end());
+    assert!(*rc::BRAIN_IMAGE_MAX_DOWNLOAD_BYTES_RANGE.start() == dl_brain::DOWNLOAD_BYTES_MIN);
+    assert!(*rc::BRAIN_IMAGE_MAX_EDGE_RANGE.start() == *dl_brain::EDGE_RANGE.start() as u64);
+    assert!(*rc::BRAIN_IMAGE_MAX_EDGE_RANGE.end() == *dl_brain::EDGE_RANGE.end() as u64);
+    assert!(
+        *rc::BRAIN_IMAGE_JPEG_QUALITY_RANGE.start() == *dl_brain::JPEG_QUALITY_RANGE.start() as u64
+    );
+    assert!(
+        *rc::BRAIN_IMAGE_JPEG_QUALITY_RANGE.end() == *dl_brain::JPEG_QUALITY_RANGE.end() as u64
+    );
+};
+
+fn brain_image_limits(
+    options: &dl_core::runtime_config::AiOptions,
+) -> anyhow::Result<dl_brain::ImageLimits> {
     let defaults = dl_brain::ImageLimits::default();
-    dl_brain::ImageLimits {
+    Ok(dl_brain::ImageLimits {
         max_images: options.brain_image_max_count.unwrap_or(defaults.max_images),
         max_download_bytes: options
             .brain_image_max_download_bytes
             .unwrap_or(defaults.max_download_bytes),
         max_edge: options
             .brain_image_max_edge
-            .and_then(|edge| u32::try_from(edge).ok())
+            .map(u32::try_from)
+            .transpose()?
             .unwrap_or(defaults.max_edge),
         jpeg_quality: options
             .brain_image_jpeg_quality
-            .and_then(|quality| u8::try_from(quality).ok())
+            .map(u8::try_from)
+            .transpose()?
             .unwrap_or(defaults.jpeg_quality),
         followup_ttl: options
             .brain_image_followup_seconds
             .map(std::time::Duration::from_secs)
             .unwrap_or(defaults.followup_ttl),
-    }
+    })
 }
 
 struct UnavailableCommunityBrain;

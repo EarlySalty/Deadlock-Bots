@@ -155,6 +155,14 @@ const LOADER_BOUNDS: &[(&[&str], Bounds)] = &[
         u64_bounds(&rc::BRAIN_IMAGE_JPEG_QUALITY_RANGE),
     ),
     (
+        &["runtime.ai.brain_image_max_download_bytes"],
+        u64_bounds(&rc::BRAIN_IMAGE_MAX_DOWNLOAD_BYTES_RANGE),
+    ),
+    (
+        &["runtime.ai.brain_image_max_edge"],
+        u64_bounds(&rc::BRAIN_IMAGE_MAX_EDGE_RANGE),
+    ),
+    (
         &[
             "runtime.bridges.matcher_auto_threshold",
             "runtime.bridges.matcher_review_threshold",
