@@ -908,14 +908,14 @@ fn placeholder_names(text: &str) -> Vec<&str> {
             break;
         };
         let name = &after[..end];
-        if !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
-            if !names.contains(&name) {
-                names.extend([name]);
-            }
-            rest = &after[end + 1..];
-        } else {
+        if name.contains('{') {
             rest = after;
+            continue;
         }
+        if !names.contains(&name) {
+            names.extend([name]);
+        }
+        rest = &after[end + 1..];
     }
     names
 }
@@ -2257,8 +2257,10 @@ enabled = false
                     .contains("[texts].twitch enthält keinen Platzhalter {kanaele}"))
         );
         assert_eq!(
-            placeholder_names("{a} {B} {} {x_y} {stufe2} {Stufen} {mit leer} {ä} {"),
-            vec!["a", "B", "x_y", "stufe2", "Stufen", "ä"]
+            placeholder_names(
+                "{a} {B} {} {x_y} {stufe2} {Stufen} {mit leer} { stufen} {kanaele-} {{a} {ä} {"
+            ),
+            vec!["a", "B", "", "x_y", "stufe2", "Stufen", "mit leer", " stufen", "kanaele-", "ä"]
         );
         let long = "n".repeat(41);
         assert_eq!(
