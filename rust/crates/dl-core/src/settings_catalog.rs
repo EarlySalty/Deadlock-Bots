@@ -297,20 +297,23 @@ fn number_bounds(path: &str) -> Option<&'static std::ops::RangeInclusive<f64>> {
 fn text_values(path: &str) -> Vec<(&'static str, String)> {
     match path {
         "runtime.community.supporter_role_sync_max_revokes" => {
-            vec![("{default}", rc::SUPPORTER_DEFAULT_MAX_REVOKES.to_string())]
+            vec![(
+                "{default}",
+                german_number(rc::SUPPORTER_DEFAULT_MAX_REVOKES),
+            )]
         }
         "runtime.community.supporter_sync_interval_seconds" => vec![(
             "{default}",
-            rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS.to_string(),
+            german_number(rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS),
         )],
         "runtime.community.supporter_funding_goal_cents" => vec![
             (
                 "{default}",
-                rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS.to_string(),
+                german_number(rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS.unsigned_abs()),
             ),
             (
                 "{default_eur}",
-                (rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100).to_string(),
+                german_number((rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100).unsigned_abs()),
             ),
         ],
         SUPPORTER_TIERS_PATH => vec![
@@ -318,7 +321,8 @@ fn text_values(path: &str) -> Vec<(&'static str, String)> {
                 "{default}",
                 rc::SUPPORTER_DEFAULT_TIERS_EUR
                     .iter()
-                    .map(u64::to_string)
+                    .copied()
+                    .map(german_number)
                     .collect::<Vec<_>>()
                     .join(", "),
             ),
@@ -1104,7 +1108,7 @@ mod tests {
                 "runtime.community.supporter_role_sync_max_revokes",
                 format!(
                     "Standard ist {}, höchstens {}. Bei {} wird niemandem",
-                    rc::SUPPORTER_DEFAULT_MAX_REVOKES,
+                    german_number(rc::SUPPORTER_DEFAULT_MAX_REVOKES),
                     german_number(*rc::SUPPORTER_MAX_REVOKES_RANGE.end()),
                     german_number(*rc::SUPPORTER_MAX_REVOKES_RANGE.start())
                 ),
@@ -1115,7 +1119,7 @@ mod tests {
                 "runtime.community.supporter_sync_interval_seconds",
                 format!(
                     "Standard ist {}, mindestens {}, höchstens {}.",
-                    rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS,
+                    german_number(rc::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS),
                     german_number(*rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.start()),
                     german_number(*rc::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE.end())
                 ),
@@ -1126,8 +1130,8 @@ mod tests {
                 "runtime.community.supporter_funding_goal_cents",
                 format!(
                     "Standard ist {}, also {} €. Erlaubt sind {} bis {}.",
-                    rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
-                    rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100,
+                    german_number(rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS.unsigned_abs()),
+                    german_number((rc::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS / 100).unsigned_abs()),
                     german_number(rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.start().unsigned_abs()),
                     german_number(rc::SUPPORTER_FUNDING_GOAL_CENTS_RANGE.end().unsigned_abs())
                 ),
@@ -1140,7 +1144,8 @@ mod tests {
                     "Standard ist {}. Mindestens eine und höchstens {} Stufen, aufsteigend, jede mindestens {} € und höchstens {} €.",
                     rc::SUPPORTER_DEFAULT_TIERS_EUR
                         .iter()
-                        .map(u64::to_string)
+                        .copied()
+                        .map(german_number)
                         .collect::<Vec<_>>()
                         .join(", "),
                     rc::SUPPORTER_MAX_TIERS,

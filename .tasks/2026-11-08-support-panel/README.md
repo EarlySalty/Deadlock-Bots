@@ -20,7 +20,7 @@ Placeholders are filled per block:
 - `pay`: `{stufen}`
 - `twitch`: `{kanaele}`
 
-For every shown block the check warns about a placeholder of that block that the text leaves out and about every other `{name}` made of letters, digits and underscores, once per name, which would appear literally in the panel.
+For every shown block the check warns about a placeholder of that block that the text leaves out and about every other brace pair, once per distinct content, which would appear literally in the panel. Any content between `{` and the next `}` that holds no further `{` counts, also `{}`, `{mit leer}`, `{ stufen}` and `{kanaele-}`; the test in `support_publish.rs` that calls `placeholder_names` pins these cases.
 
 ## Banner
 
