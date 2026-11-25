@@ -7,6 +7,7 @@
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
 mod aiglue;
+mod answer_places;
 mod build_publisher;
 mod journeyglue;
 mod master;
@@ -1091,6 +1092,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_core::runtime_config::secret_value("DISCORD_BRAIN_CLIENT_TOKEN")
     });
 
+    let answer_places = Arc::new(answer_places::AnswerPlaces::default());
     let brain_handler = {
         let options = &operating.runtime.ai;
         let enabled = options.brain_command_enabled.unwrap_or(false);
@@ -1121,6 +1123,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 guide_pending: Default::default(),
                 conversations: Default::default(),
                 message_owners: Default::default(),
+                answer_places: answer_places.clone(),
             }))
         }
     };
@@ -1495,6 +1498,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?
             .with_public_source(adapter.clone(), central_pool.clone(), our_guild_id)
+            .with_answer_places(answer_places.clone())
             .with_public_access(
                 dl_core::runtime_config::secret_value("DISCORD_PUBLIC_FACTS_TOKEN"),
                 tempvoice.clone(),

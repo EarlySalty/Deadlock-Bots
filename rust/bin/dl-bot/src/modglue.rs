@@ -248,6 +248,7 @@ pub struct BrainHandler {
     pub guide_pending: tokio::sync::Mutex<Option<(u64, u64)>>,
     pub conversations: Mutex<BrainConversations>,
     pub message_owners: std::sync::OnceLock<Vec<Arc<dyn BrainMessageOwner>>>,
+    pub answer_places: Arc<crate::answer_places::AnswerPlaces>,
 }
 
 #[async_trait::async_trait]
@@ -1069,6 +1070,10 @@ impl BrainHandler {
             answer_context: replies.answer_context(event),
             images: event_images(event),
         };
+        let _place = self.answer_places.enter(
+            event.author_id,
+            crate::answer_places::AnswerPlace::for_message(event.guild_id, event.channel_id),
+        );
         self.handle_brain_question(event, &context, &question, replies)
             .await;
     }
@@ -1160,6 +1165,10 @@ impl BrainHandler {
             answer_context: replies.answer_context(event),
             images,
         };
+        let _place = self.answer_places.enter(
+            event.author_id,
+            crate::answer_places::AnswerPlace::for_message(event.guild_id, event.channel_id),
+        );
         let reservation = self
             .cooldowns
             .reserve_discord(context.user_id, event.channel_id)
@@ -1343,6 +1352,10 @@ impl InteractionHandler for BrainHandler {
                     .map(ToOwned::to_owned),
             ),
         };
+        let _place = self.answer_places.enter(
+            interaction.user_id,
+            crate::answer_places::AnswerPlace::Channel(interaction.channel_id),
+        );
         let Some(outcome) = self
             .outcome_for_question(&question, &context, interaction.channel_id)
             .await
@@ -5116,6 +5129,7 @@ mod tests {
             guide_pending: Default::default(),
             conversations: Default::default(),
             message_owners: Default::default(),
+            answer_places: Default::default(),
         }
     }
 

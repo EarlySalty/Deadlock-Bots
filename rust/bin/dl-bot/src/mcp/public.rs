@@ -1,4 +1,5 @@
 use super::{discord_call, McpState};
+use crate::answer_places::AnswerPlace;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -92,6 +93,42 @@ pub(super) struct Access {
     roles: Vec<String>,
     base: u64,
     timed_out: bool,
+    ceiling: Option<Ceiling>,
+}
+
+pub(super) struct Ceiling {
+    baseline: Box<Access>,
+    exempt: Option<String>,
+}
+
+fn ceiling_for(places: &[AnswerPlace], baseline: Access) -> Option<Ceiling> {
+    let channels: BTreeSet<u64> = places
+        .iter()
+        .filter_map(|place| match place {
+            AnswerPlace::Channel(id) => Some(*id),
+            AnswerPlace::Requester => None,
+        })
+        .collect();
+    if !places.is_empty() && channels.is_empty() {
+        return None;
+    }
+    let exempt = match channels.len() {
+        1 => channels.first().map(u64::to_string),
+        _ => None,
+    };
+    Some(Ceiling {
+        baseline: Box::new(baseline),
+        exempt,
+    })
+}
+
+pub(super) async fn answer_access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
+    let mut granted = access(st, requested_user).await?;
+    if let Some(user) = granted.user_id {
+        let places = st.answer_places.active(user);
+        granted.ceiling = ceiling_for(&places, access(st, None).await?);
+    }
+    Ok(granted)
 }
 
 pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result<Access> {
@@ -192,10 +229,21 @@ pub(super) async fn access(st: &McpState, requested_user: Option<u64>) -> Result
         roles,
         base,
         timed_out,
+        ceiling: None,
     })
 }
 
 fn effective_permissions(channel: &Value, access: &Access) -> Option<u64> {
+    let own = own_permissions(channel, access)?;
+    match &access.ceiling {
+        Some(ceiling) if channel["id"].as_str() != ceiling.exempt.as_deref() => {
+            Some(own & own_permissions(channel, &ceiling.baseline)?)
+        }
+        _ => Some(own),
+    }
+}
+
+fn own_permissions(channel: &Value, access: &Access) -> Option<u64> {
     if access.base & ADMIN != 0 && access.user_id.is_some() {
         return Some(u64::MAX);
     }
@@ -1191,6 +1239,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antwortort_begrenzt_private_kanaele_des_fragenden() {
+        let raw = vec![
+            json!({"id":"20","name":"scrim-channel","type":0,"position":0,"permission_overwrites":[]}),
+            json!({"id":"21","name":"team","type":0,"position":1,"permission_overwrites":[{"id":"1","type":0,"deny":VIEW.to_string(),"allow":"0"},{"id":"5","type":0,"deny":"0","allow":(VIEW | HISTORY).to_string()}]}),
+        ];
+        let baseline = || Access {
+            user_id: None,
+            guild: "1".into(),
+            roles: vec!["3".into()],
+            base: VIEW | HISTORY,
+            timed_out: false,
+            ceiling: None,
+        };
+        let member = |places: Option<&[AnswerPlace]>| Access {
+            user_id: Some(42),
+            guild: "1".into(),
+            roles: vec!["3".into(), "5".into()],
+            base: VIEW | HISTORY,
+            timed_out: false,
+            ceiling: places.and_then(|places| ceiling_for(places, baseline())),
+        };
+        let visible = |access: Access| -> Vec<String> {
+            raw.iter()
+                .filter(|c| effective_permissions(c, &access).is_some_and(|p| p & VIEW != 0))
+                .filter_map(|c| c["id"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert_eq!(visible(member(None)), ["20", "21"]);
+        assert_eq!(visible(member(Some(&[]))), ["20"]);
+        assert_eq!(visible(member(Some(&[AnswerPlace::Channel(20)]))), ["20"]);
+        assert_eq!(
+            visible(member(Some(&[AnswerPlace::Channel(21)]))),
+            ["20", "21"]
+        );
+        assert_eq!(
+            visible(member(Some(&[AnswerPlace::Requester]))),
+            ["20", "21"]
+        );
+        assert_eq!(
+            visible(member(Some(&[
+                AnswerPlace::Requester,
+                AnswerPlace::Channel(20)
+            ]))),
+            ["20"]
+        );
+        assert_eq!(
+            visible(member(Some(&[
+                AnswerPlace::Channel(21),
+                AnswerPlace::Channel(22)
+            ]))),
+            ["20"]
+        );
+    }
+
+    #[test]
     fn suchgrenzen_und_anzeigenamen_folgen_dem_vertrag() {
         assert_eq!(
             bound_snowflake(&json!("2015-01-01T00:00:01Z")).expect("ISO"),
@@ -1269,6 +1372,7 @@ mod tests {
                 roles: vec!["3".into()],
                 base: HISTORY,
                 timed_out: false,
+                ceiling: None,
             };
             assert_eq!(
                 join_channel_ids(&public_channels(&channels, &access), &config)
@@ -1307,6 +1411,7 @@ mod tests {
             roles: vec!["3".into()],
             base: VIEW | HISTORY,
             timed_out: false,
+            ceiling: None,
         };
         let result = public_channels(&channels, &access);
         assert_eq!(
@@ -1366,6 +1471,7 @@ mod tests {
             roles: vec!["3".into()],
             base: VIEW | HISTORY,
             timed_out: false,
+            ceiling: None,
         };
         let readable: Vec<Value> = public_channels(&raw, &access)
             .iter()

@@ -48,6 +48,7 @@ pub struct McpState {
     export_dir: PathBuf,
     public_source: Option<(Arc<dl_discord::DiscordAdapter>, sqlx::PgPool, u64)>,
     public_cache: tokio::sync::Mutex<Option<public::CachedFacts>>,
+    answer_places: Arc<crate::answer_places::AnswerPlaces>,
 }
 
 impl McpState {
@@ -79,6 +80,7 @@ impl McpState {
                 .unwrap_or_else(|| PathBuf::from("data/mcp_exports")),
             public_source: None,
             public_cache: tokio::sync::Mutex::new(None),
+            answer_places: Arc::default(),
         })
     }
 
@@ -89,6 +91,11 @@ impl McpState {
         guild_id: u64,
     ) -> Self {
         self.public_source = Some((adapter, pool, guild_id));
+        self
+    }
+
+    pub fn with_answer_places(mut self, places: Arc<crate::answer_places::AnswerPlaces>) -> Self {
+        self.answer_places = places;
         self
     }
 
@@ -197,7 +204,7 @@ async fn public_post(
             json!({"content":[{"type":"text","text":serde_json::to_string(&status).expect("Status ist serialisierbar")}],"isError":false})
         }
         Some("tools/call") if req["params"]["name"] == "public_server_facts" => {
-            let Ok(access) = public::access(&st, user).await else {
+            let Ok(access) = public::answer_access(&st, user).await else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             match public::facts_for(&st, &req["params"]["arguments"], &access).await {
@@ -236,7 +243,12 @@ async fn public_post(
                     json!({"error":"invalid_arguments"}),
                 );
             }
-            let Ok(access) = public::access(&st, user).await else {
+            let granted = if req["params"]["name"] == "send_message" {
+                public::access(&st, user).await
+            } else {
+                public::answer_access(&st, user).await
+            };
+            let Ok(access) = granted else {
                 return json_response(StatusCode::FORBIDDEN, json!({"error":"forbidden"}));
             };
             match public::request_tool(
