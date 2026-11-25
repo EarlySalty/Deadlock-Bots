@@ -52,6 +52,9 @@ pub const PRESENCE_STATUS_MAX_CHARS: usize = 128;
 pub const TWITCH_TIMEOUT_SECONDS_RANGE: RangeInclusive<f64> = 0.5..=3600.0;
 pub const UNIT_INTERVAL_RANGE: RangeInclusive<f64> = 0.0..=1.0;
 pub const MATCHER_THRESHOLD_RANGE: RangeInclusive<i64> = 0..=100;
+pub const MATCHER_MAX_AI_PER_SCAN_RANGE: RangeInclusive<u64> = 0..=1000;
+pub const MATCHER_SCAN_INTERVAL_HOURS_RANGE: RangeInclusive<u64> = 0..=8760;
+const _: () = assert!(*MATCHER_SCAN_INTERVAL_HOURS_RANGE.start() == 0);
 pub const DISCORD_ID_RANGE: RangeInclusive<u64> = 1..=i64::MAX as u64;
 pub const PORT_RANGE: RangeInclusive<u16> = 1..=u16::MAX;
 
@@ -580,6 +583,14 @@ impl RuntimeConfig {
             .bridges
             .matcher_fuzzy_floor
             .is_some_and(|value| !value.is_finite() || !UNIT_INTERVAL_RANGE.contains(&value))
+            || self
+                .bridges
+                .matcher_max_ai_per_scan
+                .is_some_and(|count| !MATCHER_MAX_AI_PER_SCAN_RANGE.contains(&count))
+            || self
+                .bridges
+                .matcher_scan_interval_hours
+                .is_some_and(|hours| !MATCHER_SCAN_INTERVAL_HOURS_RANGE.contains(&hours))
         {
             return Err(invalid());
         }

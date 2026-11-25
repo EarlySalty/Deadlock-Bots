@@ -170,6 +170,14 @@ const LOADER_BOUNDS: &[(&[&str], Bounds)] = &[
         i64_bounds(&rc::MATCHER_THRESHOLD_RANGE),
     ),
     (
+        &["runtime.bridges.matcher_max_ai_per_scan"],
+        u64_bounds(&rc::MATCHER_MAX_AI_PER_SCAN_RANGE),
+    ),
+    (
+        &["runtime.bridges.matcher_scan_interval_hours"],
+        u64_bounds(&rc::MATCHER_SCAN_INTERVAL_HOURS_RANGE),
+    ),
+    (
         &["runtime.community.supporter_role_sync_max_revokes"],
         u64_bounds(&rc::SUPPORTER_MAX_REVOKES_RANGE),
     ),
@@ -204,11 +212,6 @@ const LOADER_BOUNDS: &[(&[&str], Bounds)] = &[
         &["tempvoice.empty_lane_grace_seconds"],
         u64_bounds(&bc::TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE),
     ),
-];
-
-const CATALOG_ONLY_BOUNDS: &[(&[&str], Bounds)] = &[
-    (&["runtime.bridges.matcher_max_ai_per_scan"], (0, 1000)),
-    (&["runtime.bridges.matcher_scan_interval_hours"], (1, 8760)),
 ];
 
 const LOADER_NUMBER_BOUNDS: &[(&[&str], &std::ops::RangeInclusive<f64>)] = &[
@@ -272,9 +275,7 @@ fn llm_bound<T: Copy>(table: &[(&str, T)], path: &str) -> Option<T> {
 }
 
 fn integer_bounds(path: &str) -> Option<Bounds> {
-    path_bound(LOADER_BOUNDS, path)
-        .or_else(|| path_bound(CATALOG_ONLY_BOUNDS, path))
-        .or_else(|| llm_bound(LLM_USE_CASE_BOUNDS, path))
+    path_bound(LOADER_BOUNDS, path).or_else(|| llm_bound(LLM_USE_CASE_BOUNDS, path))
 }
 
 fn number_bounds(path: &str) -> Option<&'static std::ops::RangeInclusive<f64>> {
@@ -931,12 +932,8 @@ mod tests {
                 }
             }
         }
-        let catalog_only: BTreeSet<String> = CATALOG_ONLY_BOUNDS
-            .iter()
-            .flat_map(|(paths, _)| paths.iter().map(|path| path.to_string()))
-            .collect();
-        assert!(probed > catalog_only.len());
-        assert_eq!(accepted, catalog_only);
+        assert!(probed > 0);
+        assert_eq!(accepted, BTreeSet::new());
     }
     #[test]
     fn textgrenze_gilt_im_katalog_wie_im_loader() {
@@ -973,7 +970,6 @@ mod tests {
         };
         let table_paths = LOADER_BOUNDS
             .iter()
-            .chain(CATALOG_ONLY_BOUNDS)
             .flat_map(|(paths, _)| paths.iter())
             .chain(
                 LOADER_NUMBER_BOUNDS
