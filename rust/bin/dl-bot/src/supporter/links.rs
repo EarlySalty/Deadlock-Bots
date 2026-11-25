@@ -663,7 +663,10 @@ mod tests {
     }
 
     const TIERS: [u64; 5] = [5, 10, 20, 50, 1000];
-    const TEST_INTERVAL: Duration = Duration::from_secs(300);
+    const TEST_INTERVAL: Duration = Duration::from_secs(600);
+    const _: () = assert!(
+        TEST_INTERVAL.as_secs() != dl_core::runtime_config::SUPPORTER_DEFAULT_SYNC_INTERVAL_SECONDS
+    );
     const CLICKER: u64 = 4_242;
 
     fn failure() -> LinkError {
@@ -816,7 +819,7 @@ mod tests {
         assert_eq!(
             reply.content.as_deref(),
             Some(
-                "Hier geht es zur Zahlung. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.\n-# Die Rolle kommt nach der Zahlung beim nächsten Abgleich, der alle 5 Minuten läuft."
+                "Hier geht es zur Zahlung. Der Link gehört zu deinem Discord-Account, gib ihn bitte nicht weiter.\n-# Die Rolle kommt nach der Zahlung beim nächsten Abgleich, der alle 10 Minuten läuft."
             )
         );
         let manual = click_with_grant(links.clone(), "support:tier:50", false).await;
@@ -1250,7 +1253,7 @@ mod tests {
             assert_eq!(cadence(Duration::from_secs(interval)), expected);
         }
         let range = dl_core::runtime_config::SUPPORTER_SYNC_INTERVAL_SECONDS_RANGE;
-        for configured in [*range.start(), 300, *range.end()] {
+        for configured in [*range.start(), TEST_INTERVAL.as_secs(), *range.end()] {
             let community = dl_core::runtime_config::CommunityOptions {
                 supporter_sync_interval_seconds: Some(configured),
                 ..Default::default()
