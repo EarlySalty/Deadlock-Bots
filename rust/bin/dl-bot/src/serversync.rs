@@ -8,7 +8,7 @@ mod twitch_link;
 pub(crate) mod voice_ux_publish;
 mod welcome_publish;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -2329,6 +2329,9 @@ impl ServerSyncService {
                         author_id,
                         flags: message.flags,
                         has_embeds: !message.embeds.is_empty(),
+                        has_v2_marker: rang_guide_publish::has_rang_guide_v2_marker(
+                            &message.components,
+                        ),
                         custom_ids,
                     };
                     if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(
@@ -2836,7 +2839,17 @@ impl ServerSyncService {
         output: &mut rang_guide_publish::RangGuidePublishOutput,
     ) -> ServerSyncResult<()> {
         let candidates = output.legacy_cleanup_candidates.clone();
+        let protected: BTreeSet<u64> = output
+            .messages
+            .iter()
+            .filter_map(|message| message.message_id)
+            .chain(output.posted_message_ids.iter().copied())
+            .chain(output.edited_message_ids.iter().copied())
+            .collect();
         for candidate in candidates {
+            if protected.contains(&candidate.message_id) {
+                continue;
+            }
             match self
                 .discord_delete(self.discord_api_url(&format!(
                     "/channels/{}/messages/{}",
@@ -11622,6 +11635,46 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         (1..=count)
             .map(|id| fake_discord_message(id, 42, 0, Vec::new(), Vec::new()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn rang_guide_legacy_cleanup_preserves_repaired_messages() {
+        let flag = rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG;
+        let components = vec![json!({
+            "type": 1,
+            "components": [{"type": 2, "custom_id": rang_guide_publish::STEAM_LINK_OPEN_CUSTOM_ID}],
+        })];
+        let history = vec![
+            fake_discord_message(8100, 42, flag, components.clone(), Vec::new()),
+            fake_discord_message(8201, 42, flag, components.clone(), Vec::new()),
+            fake_discord_message(8300, 43, flag, components, Vec::new()),
+        ];
+        let fake = spawn_fake_discord(42, history, Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let mut output = mock_rang_guide_output(false);
+        output.deleted_legacy_message_ids.clear();
+        output.legacy_cleanup_candidates = service
+            .fetch_rang_guide_legacy_cleanup_candidates(42)
+            .await
+            .expect("legacy scan")
+            .candidates;
+        assert_eq!(
+            output
+                .legacy_cleanup_candidates
+                .iter()
+                .map(|candidate| candidate.message_id)
+                .collect::<Vec<_>>(),
+            vec![8100, 8201]
+        );
+        service
+            .cleanup_rang_guide_legacy_messages(&mut output)
+            .await
+            .expect("cleanup");
+        assert_eq!(output.deleted_legacy_message_ids, vec![8100]);
+        assert_eq!(
+            *fake.state.delete_calls.lock().expect("delete calls"),
+            vec![8100]
+        );
     }
 
     #[tokio::test]

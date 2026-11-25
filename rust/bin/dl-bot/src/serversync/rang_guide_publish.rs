@@ -173,6 +173,7 @@ pub struct RangGuideLegacyMessage {
     pub author_id: u64,
     pub flags: u64,
     pub has_embeds: bool,
+    pub has_v2_marker: bool,
     pub custom_ids: Vec<String>,
 }
 
@@ -398,13 +399,22 @@ pub fn is_legacy_rank_guide_cleanup_candidate(
     message: &RangGuideLegacyMessage,
     bot_user_id: u64,
 ) -> bool {
-    message.author_id == bot_user_id
-        && message.has_embeds
-        && message.flags & RANG_GUIDE_COMPONENTS_V2_FLAG == 0
-        && message
-            .custom_ids
-            .iter()
-            .any(|custom_id| custom_id.starts_with("steam_link_panel:"))
+    if message.author_id != bot_user_id {
+        return false;
+    }
+    if !message
+        .custom_ids
+        .iter()
+        .any(|custom_id| custom_id.starts_with("steam_link_panel:"))
+    {
+        return false;
+    }
+    let is_v2 = message.flags & RANG_GUIDE_COMPONENTS_V2_FLAG != 0;
+    if is_v2 {
+        !message.has_v2_marker
+    } else {
+        message.has_embeds
+    }
 }
 
 pub fn is_rang_guide_v2_message(message: &RangGuideV2Message, bot_user_id: u64) -> bool {
@@ -1542,6 +1552,7 @@ step3_body = "{long_step3}"
             author_id: bot_user_id,
             flags: 0,
             has_embeds: true,
+            has_v2_marker: false,
             custom_ids: vec![STEAM_LINK_OPEN_CUSTOM_ID.to_string()],
         };
         assert!(is_legacy_rank_guide_cleanup_candidate(&base, bot_user_id));
@@ -1555,11 +1566,27 @@ step3_body = "{long_step3}"
             bot_user_id
         ));
 
-        let v2 = RangGuideLegacyMessage {
+        let v2_marked = RangGuideLegacyMessage {
             flags: RANG_GUIDE_COMPONENTS_V2_FLAG,
+            has_embeds: false,
+            has_v2_marker: true,
             ..base.clone()
         };
-        assert!(!is_legacy_rank_guide_cleanup_candidate(&v2, bot_user_id));
+        assert!(!is_legacy_rank_guide_cleanup_candidate(
+            &v2_marked,
+            bot_user_id
+        ));
+
+        let clobbered_v2 = RangGuideLegacyMessage {
+            flags: RANG_GUIDE_COMPONENTS_V2_FLAG,
+            has_embeds: false,
+            has_v2_marker: false,
+            ..base.clone()
+        };
+        assert!(is_legacy_rank_guide_cleanup_candidate(
+            &clobbered_v2,
+            bot_user_id
+        ));
 
         let no_embed = RangGuideLegacyMessage {
             has_embeds: false,
