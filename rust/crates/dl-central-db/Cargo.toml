@@ -18,3 +18,6 @@ tokio.workspace = true
 tracing.workspace = true
 hex.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+dl-core.workspace = true

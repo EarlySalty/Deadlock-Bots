@@ -8,6 +8,7 @@
 
 mod aiglue;
 mod build_publisher;
+mod discord_pages;
 mod journeyglue;
 mod master;
 mod mcp;
@@ -17,6 +18,7 @@ mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
 mod serversync;
+mod supporter;
 mod turnierglue;
 mod twitch_invite_sync;
 mod twitch_invites;
@@ -32,12 +34,15 @@ use std::{
 
 use anyhow::Context;
 use dl_core::runtime_config::lookup as operating_value;
+use dl_core::runtime_config::{token_by_names, BROKER_TOKEN_NAMES, TWITCH_TOKEN_NAME};
 use dl_webcore::WebConfig;
 
 fn env(name: &str) -> Option<String> {
-    operating_value(name)
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    token_by_names(operating_value, &[name])
+}
+
+fn broker_token_chain() -> Option<String> {
+    token_by_names(operating_value, &BROKER_TOKEN_NAMES)
 }
 
 fn warn_if_lagebild_token_empty(token: &str) {
@@ -277,30 +282,49 @@ fn discord_brain_answerer(
             "dl-bot-discord".into(),
             std::collections::BTreeSet::from(["bot.public".into()]),
         )?
-        .with_image_limits(brain_image_limits(options))?,
+        .with_image_limits(brain_image_limits(options)?)?,
     ))
 }
 
-fn brain_image_limits(options: &dl_core::runtime_config::AiOptions) -> dl_brain::ImageLimits {
+const _: () = {
+    use dl_core::runtime_config as rc;
+    assert!(*rc::BRAIN_IMAGE_MAX_COUNT_RANGE.start() == *dl_brain::IMAGE_COUNT_RANGE.start());
+    assert!(*rc::BRAIN_IMAGE_MAX_COUNT_RANGE.end() == *dl_brain::IMAGE_COUNT_RANGE.end());
+    assert!(*rc::BRAIN_IMAGE_MAX_DOWNLOAD_BYTES_RANGE.start() == dl_brain::DOWNLOAD_BYTES_MIN);
+    assert!(*rc::BRAIN_IMAGE_MAX_EDGE_RANGE.start() == *dl_brain::EDGE_RANGE.start() as u64);
+    assert!(*rc::BRAIN_IMAGE_MAX_EDGE_RANGE.end() == *dl_brain::EDGE_RANGE.end() as u64);
+    assert!(
+        *rc::BRAIN_IMAGE_JPEG_QUALITY_RANGE.start() == *dl_brain::JPEG_QUALITY_RANGE.start() as u64
+    );
+    assert!(
+        *rc::BRAIN_IMAGE_JPEG_QUALITY_RANGE.end() == *dl_brain::JPEG_QUALITY_RANGE.end() as u64
+    );
+};
+
+fn brain_image_limits(
+    options: &dl_core::runtime_config::AiOptions,
+) -> anyhow::Result<dl_brain::ImageLimits> {
     let defaults = dl_brain::ImageLimits::default();
-    dl_brain::ImageLimits {
+    Ok(dl_brain::ImageLimits {
         max_images: options.brain_image_max_count.unwrap_or(defaults.max_images),
         max_download_bytes: options
             .brain_image_max_download_bytes
             .unwrap_or(defaults.max_download_bytes),
         max_edge: options
             .brain_image_max_edge
-            .and_then(|edge| u32::try_from(edge).ok())
+            .map(u32::try_from)
+            .transpose()?
             .unwrap_or(defaults.max_edge),
         jpeg_quality: options
             .brain_image_jpeg_quality
-            .and_then(|quality| u8::try_from(quality).ok())
+            .map(u8::try_from)
+            .transpose()?
             .unwrap_or(defaults.jpeg_quality),
         followup_ttl: options
             .brain_image_followup_seconds
             .map(std::time::Duration::from_secs)
             .unwrap_or(defaults.followup_ttl),
-    }
+    })
 }
 
 struct UnavailableCommunityBrain;
@@ -606,12 +630,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
+    let supporter_config = supporter::SupporterConfig::new(
+        &operating.runtime.community,
+        &operating.services.steam_api_url,
+        operating_value,
+    );
+    supporter_config.log_effective();
+    let supporter_links = supporter::links::HttpSupporterLinks::new(&supporter_config)
+        .context("HTTP-Client für die Unterstützer-Knöpfe")?;
     let serversync_concrete = serversync::ServerSyncService::new(
         central_pool.clone(),
         adapter.clone(),
         discord_token.clone(),
         serversync::GUILD_ID,
-    );
+        supporter_links.clone(),
+    )
+    .context("HTTP-Client für Discord-Aufrufe der Serversync")?;
     let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_role_port: Arc<dyn dl_community::reaction_roles::ReactionRolePort> =
@@ -651,12 +685,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    supporter::register(&mut router, supporter_links, &supporter_config);
     let concierge_twitch_link = serversync::register_twitch_link_components(
         &mut router,
         format!("http://127.0.0.1:{}", cfg.ports.dashboard),
-        env("MASTER_BROKER_TOKEN")
-            .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-            .or_else(|| env("TWITCH_INTERNAL_API_TOKEN")),
+        broker_token_chain(),
     );
     dl_community::scrim_signup::register(&mut router, scrim_signup);
     let scrim_runtime_gate =
@@ -727,9 +760,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             Some(matcher)
         }
         None => {
-            tracing::warn!(
-                "TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge + Matcher inaktiv"
-            );
+            tracing::warn!("{TWITCH_TOKEN_NAME} fehlt, Twitch-Live-Bridge und Matcher inaktiv");
             None
         }
     };
@@ -1387,11 +1418,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
     };
 
-    // Master-Broker :8770 — Token-Kette wie das Original
-    let broker_token = env("MASTER_BROKER_TOKEN")
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
-        .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let broker_token = broker_token_chain()
+        .with_context(|| format!("Broker-Token fehlt ({})", BROKER_TOKEN_NAMES.join("/")))?;
     let twitch_invites = twitch_invites::TwitchInvites::new(
         central_pool.clone(),
         adapter.clone(),
@@ -1467,14 +1495,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
-    // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN")
-        .or_else(|| env("MASTER_BROKER_TOKEN"))
-        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
-        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"));
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN").or_else(broker_token_chain);
     if serversync_token.is_none() {
         tracing::warn!(
-            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
+            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/{}), Server-Sync-HTTP-Routen liefern 403",
+            BROKER_TOKEN_NAMES.join("/")
         );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);
@@ -1490,7 +1515,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
     // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
-    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
+    let mcp_token = dl_core::runtime_config::secret_value(TWITCH_TOKEN_NAME);
     let mcp_state = Arc::new(
         mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?
@@ -1549,6 +1574,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 matcher.client.clone(),
             );
         }
+        supporter::SupporterSync::new(
+            central_pool.clone(),
+            adapter.http.clone(),
+            serversync::GUILD_ID,
+            serversync_concrete.clone(),
+            supporter_config.clone(),
+        )
+        .spawn();
         master::spawn_control(
             &dispatcher,
             adapter.clone(),

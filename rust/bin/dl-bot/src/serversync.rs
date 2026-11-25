@@ -3,7 +3,7 @@
 pub(crate) mod faq_publish;
 pub(crate) mod rang_guide_publish;
 pub(crate) mod regelwerk_publish;
-mod support_publish;
+pub(crate) mod support_publish;
 mod twitch_link;
 pub(crate) mod voice_ux_publish;
 mod welcome_publish;
@@ -68,6 +68,11 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
+const DISCORD_RETRY_CALL_BOUND: Duration = Duration::from_millis(
+    REGELWERK_DISCORD_MAX_ATTEMPTS as u64 * dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS
+        + dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS,
+);
+const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
@@ -98,6 +103,9 @@ pub enum ServerSyncErrorKind {
 }
 
 const HISTORY_SCAN_MAX_PAGES: usize = 5;
+const LIVE_GUILD_MODEL_DISCORD_CALLS: u32 = 2;
+const DISCORD_HISTORY_PAGE_LIMIT: usize = 100;
+const HISTORY_SCAN_PROBE_LIMIT: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct ServerSyncError {
@@ -432,6 +440,12 @@ fn settle_scan_truncation(
     Ok(())
 }
 
+fn history_scan_cap_error(label: &str) -> ServerSyncError {
+    ServerSyncError::bad_request(format!(
+        "{label}: Der Verlauf ist länger als {HISTORY_SCAN_MAX_PAGES} Seiten und wurde nicht vollständig geprüft. Apply blockiert gegen Duplikate."
+    ))
+}
+
 fn stray_ids_outside_stored(stored: &[u64], discovered: &[u64]) -> Vec<u64> {
     discovered
         .iter()
@@ -629,6 +643,11 @@ struct DiscordMessageWriteResponse {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct DiscordGuildCounts {
+    approximate_member_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct NativeOnboardingPutConfig {
     prompts: Vec<NativeOnboardingPutPrompt>,
@@ -810,28 +829,6 @@ pub trait ServerSyncOps: Send + Sync {
     ) -> ServerSyncResult<OwnMessageScan> {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
-    async fn edit_voice_ux_message(
-        &self,
-        _channel_id: u64,
-        _message_id: u64,
-        _message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn post_voice_ux_message(
-        &self,
-        _channel_id: u64,
-        _message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn replace_voice_ux_target_metadata(
-        &self,
-        _target: &voice_ux_publish::VoiceUxTargetOutput,
-        _message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
     async fn store_voice_ux_target_metadata(
         &self,
         _target: &voice_ux_publish::VoiceUxTargetOutput,
@@ -844,9 +841,6 @@ pub trait ServerSyncOps: Send + Sync {
         _stored_message_ids: &[u64],
         _bot_user_id: u64,
     ) -> ServerSyncResult<StaticV2DeleteOutcome> {
-        unreachable!("only ServerSyncService uses Voice-UX internals")
-    }
-    async fn cleanup_new_voice_ux_posts_best_effort(&self, _channel_id: u64, _message_ids: &[u64]) {
         unreachable!("only ServerSyncService uses Voice-UX internals")
     }
     async fn pin_voice_ux_message_best_effort(
@@ -920,6 +914,176 @@ pub struct ServerSyncService {
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
     panel_apply_lock: tokio::sync::Mutex<()>,
+    supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    support_panel_lock: tokio::sync::Mutex<()>,
+}
+
+pub const SUPPORT_REFRESH_NEW_WARNINGS: &str =
+    "Neue Panel-Optionen zeigen Text mit Warnungen; erst Vorschau prüfen und neu veröffentlichen";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FundingRefresh {
+    Updated,
+    Unchanged,
+    Skipped(&'static str),
+}
+
+fn support_fallback_funding(
+    live: support_publish::SupportFunding,
+    goal_cents: i64,
+) -> support_publish::SupportFunding {
+    support_publish::SupportFunding {
+        raised_cents: live.raised_cents,
+        goal_cents,
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct FixedFundingSource {
+    funding: std::sync::Mutex<Result<support_publish::SupportFunding, String>>,
+    options: std::sync::Mutex<support_publish::SupportPanelOptions>,
+    goal_cents: std::sync::Mutex<i64>,
+}
+
+#[cfg(test)]
+impl FixedFundingSource {
+    pub fn standard() -> Self {
+        Self::new(
+            Ok(Self::standard_funding()),
+            Self::standard_options(),
+            Self::standard_funding().goal_cents,
+        )
+    }
+
+    pub fn new(
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+        goal_cents: i64,
+    ) -> Self {
+        Self {
+            funding: std::sync::Mutex::new(funding),
+            options: std::sync::Mutex::new(options),
+            goal_cents: std::sync::Mutex::new(goal_cents),
+        }
+    }
+
+    pub fn set(
+        &self,
+        funding: Result<support_publish::SupportFunding, String>,
+        options: support_publish::SupportPanelOptions,
+    ) {
+        *self.funding.lock().expect("funding") = funding;
+        *self.options.lock().expect("options") = options;
+    }
+
+    pub fn set_goal(&self, goal_cents: i64) {
+        *self.goal_cents.lock().expect("goal") = goal_cents;
+    }
+
+    pub fn standard_funding() -> support_publish::SupportFunding {
+        support_publish::SupportFunding {
+            raised_cents: 0,
+            goal_cents: dl_core::runtime_config::SUPPORTER_DEFAULT_FUNDING_GOAL_CENTS,
+        }
+    }
+
+    pub fn standard_options() -> support_publish::SupportPanelOptions {
+        support_publish::SupportPanelOptions {
+            tiers_eur: dl_core::runtime_config::SUPPORTER_DEFAULT_TIERS_EUR.to_vec(),
+            twitch: false,
+            role_grant: true,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crate::supporter::FundingSource for FixedFundingSource {
+    async fn funding(&self) -> Result<support_publish::SupportFunding, String> {
+        self.funding.lock().expect("funding").clone()
+    }
+
+    fn missing_config(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn goal_cents(&self) -> i64 {
+        *self.goal_cents.lock().expect("goal")
+    }
+
+    fn panel_options(&self) -> support_publish::SupportPanelOptions {
+        self.options.lock().expect("options").clone()
+    }
+}
+
+pub(crate) fn static_v2_message_id_key(prefix: &str, message_index: usize) -> String {
+    format!("{prefix}{message_index}")
+}
+
+pub(crate) fn static_v2_message_index(prefix: &str, key: &str) -> Option<usize> {
+    let index = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
+    (static_v2_message_id_key(prefix, index) == key).then_some(index)
+}
+
+fn stored_discord_id(id: u64) -> String {
+    id.to_string()
+}
+
+fn parse_stored_discord_id(label: &str, raw: &str) -> ServerSyncResult<u64> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0 && stored_discord_id(*id) == raw)
+        .ok_or_else(|| {
+            ServerSyncError::internal(format!("gespeicherter Wert {label} ist keine Discord-ID"))
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedBanner<B> {
+    pub output: B,
+    pub bytes: Vec<u8>,
+}
+
+pub(crate) fn read_banner_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    match dl_core::optional_file::read(path)? {
+        Some(bytes) if bytes.is_empty() => Err("ist leer".to_string()),
+        bytes => Ok(bytes),
+    }
+}
+
+pub(crate) fn read_optional_banner(
+    repo_root: &std::path::Path,
+    label: &str,
+    relative_path: &str,
+    missing_suffix: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Vec<u8>>, String> {
+    let bytes = read_banner_file(&repo_root.join(relative_path))
+        .map_err(|reason| format!("{label}-Banner `{relative_path}` {reason}"))?;
+    if bytes.is_none() {
+        warnings.push(format!(
+            "{label}-Banner `{relative_path}` fehlt; {missing_suffix}"
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn upsert_serversync_kv<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    key: &str,
+    value: &str,
+) -> ServerSyncResult<()> {
+    sqlx::query(
+        "INSERT INTO bot.kv_store(ns, k, v)
+         VALUES($1, $2, $3)
+         ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
+    )
+    .bind(SERVERSYNC_KV_NS)
+    .bind(key)
+    .bind(value)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 impl ServerSyncService {
@@ -928,19 +1092,22 @@ impl ServerSyncService {
         adapter: Arc<dl_discord::DiscordAdapter>,
         discord_token: String,
         guild_id: u64,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    ) -> Result<Arc<Self>, reqwest::Error> {
+        Ok(Arc::new(Self {
             pool,
             adapter,
             discord_token,
             guild_id,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client()?,
             discord_api_base: DISCORD_API_BASE.to_string(),
             rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             panel_apply_lock: tokio::sync::Mutex::new(()),
-        })
+            supporter_funding,
+            support_panel_lock: tokio::sync::Mutex::new(()),
+        }))
     }
 
     #[cfg(test)]
@@ -949,17 +1116,34 @@ impl ServerSyncService {
         discord_api_base: String,
         rang_guide_repo_root: PathBuf,
     ) -> Arc<Self> {
+        Self::new_for_test_with_funding(
+            pool,
+            discord_api_base,
+            rang_guide_repo_root,
+            Arc::new(FixedFundingSource::standard()),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_for_test_with_funding(
+        pool: PgPool,
+        discord_api_base: String,
+        rang_guide_repo_root: PathBuf,
+        supporter_funding: Arc<dyn crate::supporter::FundingSource>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             pool,
             adapter: dl_discord::DiscordAdapter::new("test-token"),
             discord_token: "test-token".to_string(),
             guild_id: GUILD_ID,
-            http_client: reqwest::Client::new(),
+            http_client: discord_http_client().expect("Discord-HTTP-Client"),
             discord_api_base,
             rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
             panel_apply_lock: tokio::sync::Mutex::new(()),
+            supporter_funding,
+            support_panel_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -1019,42 +1203,61 @@ impl ServerSyncService {
         format!("{}{}", self.discord_api_base.trim_end_matches('/'), path)
     }
 
+    async fn fetch_live_guild_model_bounded(&self) -> ServerSyncResult<GuildModel> {
+        let timeout = crate::discord_pages::discord_call_timeout() * LIVE_GUILD_MODEL_DISCORD_CALLS;
+        tokio::time::timeout(
+            timeout,
+            dl_server_as_code::import::fetch_live_guild_model(
+                self.adapter.http.as_ref(),
+                self.guild_id,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            ServerSyncError::internal(format!(
+                "Discord-Servermodell nicht innerhalb von {} ms geladen",
+                timeout.as_millis()
+            ))
+        })?
+        .map_err(ServerSyncError::from)
+    }
+
+    async fn fetch_guild_members(&self) -> ServerSyncResult<Vec<serenity::all::Member>> {
+        let counts: DiscordGuildCounts = self
+            .discord_get_json(
+                self.discord_api_url(&format!("/guilds/{}?with_counts=true", self.guild_id)),
+            )
+            .await?;
+        crate::discord_pages::fetch_counted_guild_members(
+            &self.adapter.http,
+            GuildId::new(self.guild_id),
+            crate::discord_pages::discord_call_timeout(),
+            counts.approximate_member_count,
+        )
+        .await
+        .map_err(ServerSyncError::internal)
+    }
+
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut assignments = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
-                .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            assignments.extend(page.into_iter().map(|member| {
+        let mut assignments: Vec<MemberRoleAssignment> = self
+            .fetch_guild_members()
+            .await?
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 MemberRoleAssignment {
                     member_id: member.user.id.get(),
                     role_ids,
                 }
-            }));
-            if assignments.last().is_none() || after.is_none() {
-                break;
-            }
-            if assignments.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         assignments.sort_unstable_by_key(|entry| entry.member_id);
         Ok(assignments)
     }
 
     async fn fetch_native_onboarding_config(&self) -> ServerSyncResult<Value> {
-        let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let url = self.discord_api_url(&format!("/guilds/{}/onboarding", self.guild_id));
         let response = self
             .http_client
             .get(url)
@@ -1078,7 +1281,7 @@ impl ServerSyncService {
         &self,
         config: &NativeOnboardingConfig,
     ) -> ServerSyncResult<()> {
-        let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let url = self.discord_api_url(&format!("/guilds/{}/onboarding", self.guild_id));
         let payload = native_onboarding_put_payload(config);
         let response = self
             .http_client
@@ -1103,10 +1306,7 @@ impl ServerSyncService {
     }
 
     async fn fetch_server_guide_config(&self) -> ServerSyncResult<Value> {
-        let url = format!(
-            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
-            self.guild_id
-        );
+        let url = self.discord_api_url(&format!("/guilds/{}/new-member-welcome", self.guild_id));
         let response = self
             .http_client
             .get(url)
@@ -1117,10 +1317,7 @@ impl ServerSyncService {
     }
 
     async fn put_server_guide_config(&self, config: &ServerGuideConfig) -> ServerSyncResult<()> {
-        let url = format!(
-            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
-            self.guild_id
-        );
+        let url = self.discord_api_url(&format!("/guilds/{}/new-member-welcome", self.guild_id));
         let response = self
             .http_client
             .put(url)
@@ -1171,16 +1368,15 @@ impl ServerSyncService {
     }
 
     async fn store_serversync_kv(&self, key: &str, value: &str) -> ServerSyncResult<()> {
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3)
-             ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await?;
+        upsert_serversync_kv(&self.pool, key, value).await
+    }
+
+    async fn store_serversync_kv_pairs(&self, pairs: &[(&str, &str)]) -> ServerSyncResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (key, value) in pairs {
+            upsert_serversync_kv(&mut *tx, key, value).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1205,11 +1401,11 @@ impl ServerSyncService {
             "SELECT k, v
                FROM bot.kv_store
               WHERE ns = $1
-                AND k LIKE $2
+                AND starts_with(k, $2)
               ORDER BY k",
         )
         .bind(SERVERSYNC_KV_NS)
-        .bind(format!("{prefix}%"))
+        .bind(prefix)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1226,22 +1422,20 @@ impl ServerSyncService {
         let indexed = self.load_serversync_kv_prefix(prefix).await?;
         let mut by_index = BTreeMap::<usize, u64>::new();
         for (key, raw) in indexed {
-            let raw_index = key.trim_start_matches(prefix);
-            let Ok(message_index) = raw_index.parse::<usize>() else {
+            let Some(message_index) = static_v2_message_index(prefix, &key) else {
                 continue;
             };
-            by_index.insert(message_index, parse_discord_id(&key, &raw)?);
+            by_index.insert(message_index, parse_stored_discord_id(&key, &raw)?);
         }
         Ok(by_index.into_values().collect())
     }
 
-    async fn store_static_v2_message_id(
+    async fn delete_static_v2_message_id(
         &self,
         prefix: &str,
         message_index: usize,
-        message_id: u64,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(&format!("{prefix}{message_index}"), &message_id.to_string())
+        self.delete_serversync_kv(&static_v2_message_id_key(prefix, message_index))
             .await
     }
 
@@ -1252,29 +1446,40 @@ impl ServerSyncService {
         hash_key: &str,
         payload_hash: &str,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(format_key, payload_format).await?;
-        self.store_serversync_kv(hash_key, payload_hash).await
+        self.store_serversync_kv_pairs(&[(format_key, payload_format), (hash_key, payload_hash)])
+            .await
     }
 
-    async fn replace_static_v2_message_ids_and_metadata(
+    async fn replace_static_v2_message_ids_and_state(
         &self,
         message_id_prefix: &str,
-        format_key: &str,
-        payload_format: &str,
-        hash_key: &str,
-        payload_hash: &str,
         message_ids: &[u64],
+        state: &[(&str, &str)],
     ) -> ServerSyncResult<()> {
         let mut tx = self.pool.begin().await?;
+        let prefixed: Vec<String> = sqlx::query_scalar(
+            "SELECT k FROM bot.kv_store
+              WHERE ns = $1
+                AND starts_with(k, $2)
+              FOR UPDATE",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(message_id_prefix)
+        .fetch_all(&mut *tx)
+        .await?;
+        let replaced_keys: Vec<&str> = prefixed
+            .iter()
+            .map(String::as_str)
+            .filter(|key| static_v2_message_index(message_id_prefix, key).is_some())
+            .chain(state.iter().map(|(key, _)| *key))
+            .collect();
         sqlx::query(
             "DELETE FROM bot.kv_store
               WHERE ns = $1
-                AND (k LIKE $2 OR k = $3 OR k = $4)",
+                AND k = ANY($2::text[])",
         )
         .bind(SERVERSYNC_KV_NS)
-        .bind(format!("{message_id_prefix}%"))
-        .bind(format_key)
-        .bind(hash_key)
+        .bind(&replaced_keys)
         .execute(&mut *tx)
         .await?;
 
@@ -1284,22 +1489,14 @@ impl ServerSyncService {
                  VALUES($1, $2, $3)",
             )
             .bind(SERVERSYNC_KV_NS)
-            .bind(format!("{message_id_prefix}{message_index}"))
-            .bind(message_id.to_string())
+            .bind(static_v2_message_id_key(message_id_prefix, message_index))
+            .bind(stored_discord_id(message_id))
             .execute(&mut *tx)
             .await?;
         }
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3), ($1, $4, $5)",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(format_key)
-        .bind(payload_format)
-        .bind(hash_key)
-        .bind(payload_hash)
-        .execute(&mut *tx)
-        .await?;
+        for (key, value) in state {
+            upsert_serversync_kv(&mut *tx, key, value).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1409,10 +1606,9 @@ impl ServerSyncService {
         // API v10 kennt aktive Threads nur noch guild-weit (der Kanal-Endpoint
         // liefert 404); daher guild-weit holen und auf den Regelwerk-Kanal filtern.
         let active: DiscordThreadPage = self
-            .discord_get_json(format!(
-                "{DISCORD_API_BASE}/guilds/{}/threads/active",
-                self.guild_id
-            ))
+            .discord_get_json(
+                self.discord_api_url(&format!("/guilds/{}/threads/active", self.guild_id)),
+            )
             .await?;
         let rules_channel_id = RULES_CHANNEL_ID.to_string();
         let active_in_rules = active
@@ -1423,25 +1619,26 @@ impl ServerSyncService {
         ids.extend(thread_ids(active_in_rules)?);
 
         for endpoint in ["archived/public", "archived/private"] {
-            let mut before: Option<String> = None;
-            loop {
-                let mut url = format!(
-                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit=100"
-                );
-                if let Some(before) = before.as_deref() {
+            let mut before: Option<DateTime<chrono::FixedOffset>> = None;
+            for page_index in 0.. {
+                if page_index == HISTORY_SCAN_MAX_PAGES {
+                    return Err(history_scan_cap_error("Regelwerk-Threads"));
+                }
+                let mut url = self.discord_api_url(&format!(
+                    "/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit={DISCORD_HISTORY_PAGE_LIMIT}"
+                ));
+                if let Some(before) = before {
                     url.push_str("&before=");
-                    // archive_timestamp enthaelt `+00:00` — das `+` muss
-                    // percent-encodiert werden, sonst liest Discord ein Leerzeichen.
-                    url.push_str(&before.replace('+', "%2B"));
+                    url.push_str(
+                        &before
+                            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+                            .replace('+', "%2B"),
+                    );
                 }
                 let page: DiscordThreadPage = self.discord_get_json(url).await?;
-                let next_before = page
-                    .threads
-                    .last()
-                    .and_then(|thread| thread.thread_metadata.as_ref())
-                    .and_then(|metadata| metadata.archive_timestamp.clone());
+                let next_before = archive_next_cursor(before, &page)?;
                 ids.extend(thread_ids(page.threads)?);
-                if !page.has_more || next_before.is_none() {
+                if next_before.is_none() {
                     break;
                 }
                 before = next_before;
@@ -1459,39 +1656,27 @@ impl ServerSyncService {
         stored_message_id: Option<u64>,
     ) -> ServerSyncResult<Vec<RegelwerkBotMessage>> {
         let mut messages = Vec::new();
-        let mut before: Option<u64> = None;
-        loop {
-            let mut url =
-                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages?limit=100");
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if author_id == bot_user_id && Some(message_id) != stored_message_id {
-                    messages.push(RegelwerkBotMessage {
-                        message_id,
-                        embed_titles: message
-                            .embeds
-                            .iter()
-                            .filter_map(|embed| embed.title.clone())
-                            .collect(),
-                    });
+        let truncated = self
+            .scan_message_history(RULES_CHANNEL_ID, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if author_id == bot_user_id && Some(message_id) != stored_message_id {
+                        messages.push(RegelwerkBotMessage {
+                            message_id,
+                            embed_titles: message
+                                .embeds
+                                .iter()
+                                .filter_map(|embed| embed.title.clone())
+                                .collect(),
+                        });
+                    }
                 }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
+                Ok(())
+            })
+            .await?;
+        if truncated {
+            return Err(history_scan_cap_error("Regelwerk"));
         }
         Ok(messages)
     }
@@ -1499,12 +1684,12 @@ impl ServerSyncService {
     async fn load_regelwerk_message_id(&self) -> ServerSyncResult<Option<u64>> {
         self.load_serversync_kv(REGELWERK_MESSAGE_ID_KEY)
             .await?
-            .map(|value| parse_discord_id("regelwerk_message_id", &value))
+            .map(|value| parse_stored_discord_id(REGELWERK_MESSAGE_ID_KEY, &value))
             .transpose()
     }
 
     async fn store_regelwerk_message_id(&self, message_id: u64) -> ServerSyncResult<()> {
-        self.store_serversync_kv(REGELWERK_MESSAGE_ID_KEY, &message_id.to_string())
+        self.store_serversync_kv(REGELWERK_MESSAGE_ID_KEY, &stored_discord_id(message_id))
             .await
     }
 
@@ -1513,7 +1698,9 @@ impl ServerSyncService {
         message_id: u64,
         content: &str,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{message_id}");
+        let url = self.discord_api_url(&format!(
+            "/channels/{RULES_CHANNEL_ID}/messages/{message_id}"
+        ));
         let payload = json!({ "content": content });
         let response = discord_regelwerk_send_with_retry(
             || {
@@ -1543,7 +1730,7 @@ impl ServerSyncService {
     async fn post_regelwerk_message(&self, content: &str) -> ServerSyncResult<u64> {
         let message: DiscordMessageWriteResponse = self
             .discord_post_json(
-                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages"),
+                self.discord_api_url(&format!("/channels/{RULES_CHANNEL_ID}/messages")),
                 json!({ "content": content }),
             )
             .await?;
@@ -1551,21 +1738,11 @@ impl ServerSyncService {
     }
 
     async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
-        let guild_id = GuildId::new(self.guild_id);
-        let mut after = None;
-        let mut members = Vec::new();
-        loop {
-            let page = self
-                .adapter
-                .http
-                .get_guild_members(guild_id, Some(1000), after)
-                .await
-                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
-            if page.is_empty() {
-                break;
-            }
-            after = page.last().map(|member| member.user.id.get());
-            members.extend(page.into_iter().map(|member| {
+        let mut members: Vec<WelcomeTeamMember> = self
+            .fetch_guild_members()
+            .await?
+            .into_iter()
+            .map(|member| {
                 let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
                 role_ids.sort_unstable();
                 WelcomeTeamMember {
@@ -1573,14 +1750,8 @@ impl ServerSyncService {
                     role_ids,
                     bot: member.user.bot,
                 }
-            }));
-            if members.last().is_none() || after.is_none() {
-                break;
-            }
-            if members.len() % 1000 != 0 {
-                break;
-            }
-        }
+            })
+            .collect();
         members.sort_unstable_by_key(|entry| entry.user_id);
         Ok(members)
     }
@@ -1607,7 +1778,7 @@ impl ServerSyncService {
             let mut by_index = BTreeMap::<usize, u64>::new();
             let legacy_key = welcome_publish::welcome_legacy_message_id_key(section.id);
             if let Some(raw) = indexed.get(&legacy_key) {
-                by_index.insert(0, parse_discord_id(&legacy_key, raw)?);
+                by_index.insert(0, parse_stored_discord_id(&legacy_key, raw)?);
             }
 
             let prefix = welcome_publish::welcome_message_id_key_prefix(section.id);
@@ -1615,11 +1786,10 @@ impl ServerSyncService {
                 .iter()
                 .filter(|(key, _)| key.starts_with(prefix.as_str()))
             {
-                let raw_index = key.trim_start_matches(prefix.as_str());
-                let Ok(message_index) = raw_index.parse::<usize>() else {
+                let Some(message_index) = static_v2_message_index(&prefix, key) else {
                     continue;
                 };
-                by_index.insert(message_index, parse_discord_id(key, raw)?);
+                by_index.insert(message_index, parse_stored_discord_id(key, raw)?);
             }
             if !by_index.is_empty() {
                 ids.insert(section.id.to_string(), by_index.into_values().collect());
@@ -1636,7 +1806,7 @@ impl ServerSyncService {
     ) -> ServerSyncResult<()> {
         self.store_serversync_kv(
             &welcome_publish::welcome_message_id_key(section_id, message_index),
-            &message_id.to_string(),
+            &stored_discord_id(message_id),
         )
         .await?;
         if message_index == 0 {
@@ -1671,95 +1841,17 @@ impl ServerSyncService {
             .await
     }
 
-    async fn load_rang_guide_message_ids(&self) -> ServerSyncResult<Vec<u64>> {
-        let indexed = self
-            .load_serversync_kv_prefix(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX)
-            .await?;
-        let mut by_index = BTreeMap::<usize, u64>::new();
-        for (key, raw) in indexed {
-            let raw_index =
-                key.trim_start_matches(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX);
-            let Ok(message_index) = raw_index.parse::<usize>() else {
-                continue;
-            };
-            by_index.insert(message_index, parse_discord_id(&key, &raw)?);
-        }
-        Ok(by_index.into_values().collect())
-    }
-
-    async fn store_rang_guide_message_id(
-        &self,
-        message_index: usize,
-        message_id: u64,
-    ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            &rang_guide_publish::rang_guide_message_id_key(message_index),
-            &message_id.to_string(),
-        )
-        .await
-    }
-
     async fn store_rang_guide_metadata(
         &self,
         output: &rang_guide_publish::RangGuidePublishOutput,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
+        self.store_static_v2_metadata(
             rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
             rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
             rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
             &output.payload_hash,
         )
         .await
-    }
-
-    async fn replace_rang_guide_message_ids_and_metadata(
-        &self,
-        output: &rang_guide_publish::RangGuidePublishOutput,
-        message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "DELETE FROM bot.kv_store
-              WHERE ns = $1
-                AND (k LIKE $2 OR k = $3 OR k = $4)",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(format!(
-            "{}%",
-            rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX
-        ))
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
-        .execute(&mut *tx)
-        .await?;
-
-        for (message_index, message_id) in message_ids.iter().copied().enumerate() {
-            sqlx::query(
-                "INSERT INTO bot.kv_store(ns, k, v)
-                 VALUES($1, $2, $3)",
-            )
-            .bind(SERVERSYNC_KV_NS)
-            .bind(rang_guide_publish::rang_guide_message_id_key(message_index))
-            .bind(message_id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query(
-            "INSERT INTO bot.kv_store(ns, k, v)
-             VALUES($1, $2, $3), ($1, $4, $5)",
-        )
-        .bind(SERVERSYNC_KV_NS)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT)
-        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
-        .bind(&output.payload_hash)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     async fn delete_rang_guide_messages(
@@ -1848,27 +1940,6 @@ impl ServerSyncService {
         })
     }
 
-    async fn cleanup_new_rang_guide_posts_best_effort(&self, message_ids: &[u64]) {
-        for &message_id in message_ids {
-            match self
-                .discord_delete(self.discord_api_url(&format!(
-                    "/channels/{}/messages/{message_id}",
-                    rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-                )))
-                .await
-            {
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        %err,
-                        message_id,
-                        "Rang-Guide: neu gepostete Message konnte nach Teilfehler nicht bereinigt werden"
-                    );
-                }
-            }
-        }
-    }
-
     fn adopt_rang_guide_message_ids(
         output: &mut rang_guide_publish::RangGuidePublishOutput,
         discovered_message_ids: &[u64],
@@ -1891,133 +1962,16 @@ impl ServerSyncService {
         }
     }
 
-    async fn edit_rang_guide_message(
-        &self,
-        message_id: u64,
-        message: &rang_guide_publish::RangGuideMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-        ));
-        let response = self
-            .send_rang_guide_message_payload("PATCH", url, &message.payload)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_rang_guide_message(
-        &self,
-        message: &rang_guide_publish::RangGuideMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-        ));
-        let response = self
-            .send_rang_guide_message_payload("POST", url, &message.payload)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn send_rang_guide_message_payload(
-        &self,
-        method: &'static str,
-        url: String,
-        payload: &rang_guide_publish::RangGuideMessagePayload,
-    ) -> ServerSyncResult<DiscordRestResponse> {
-        let payload_value = serde_json::to_value(payload)?;
-        if !payload.attachments.is_empty() {
-            let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for attachment in &payload.attachments {
-                let path = self.rang_guide_repo_root.join(&attachment.relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "Rang-Guide-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((attachment.id, attachment.filename.clone(), bytes));
-            }
-            return discord_regelwerk_send_with_retry(
-                || {
-                    let request = match method {
-                        "POST" => self.http_client.post(url.clone()),
-                        "PATCH" => self.http_client.patch(url.clone()),
-                        other => unreachable!("unsupported Discord method {other}"),
-                    }
-                    .header("Authorization", format!("Bot {}", self.discord_token))
-                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
-                    let payload_text = payload_text.clone();
-                    let files = files.clone();
-                    async move {
-                        let mut form =
-                            reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
-                                .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
-                        }
-                        let response = request.multipart(form).send().await?;
-                        DiscordRestResponse::from_response(response).await
-                    }
-                },
-                method,
-            )
-            .await;
-        }
-
-        discord_regelwerk_send_with_retry(
-            || {
-                let request = match method {
-                    "POST" => self.http_client.post(url.clone()),
-                    "PATCH" => self.http_client.patch(url.clone()),
-                    other => unreachable!("unsupported Discord method {other}"),
-                }
-                .header("Authorization", format!("Bot {}", self.discord_token))
-                .header("Content-Type", "application/json")
-                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-                .json(&payload_value);
-                async move {
-                    let response = request.send().await?;
-                    DiscordRestResponse::from_response(response).await
-                }
-            },
-            method,
-        )
-        .await
-    }
-
     async fn send_components_v2_message_payload(
         &self,
-        label: &'static str,
         method: &'static str,
         url: String,
         payload_value: Value,
-        attachments: Vec<(u8, String, String)>,
+        attachments: Vec<UploadFile<'_>>,
     ) -> ServerSyncResult<DiscordRestResponse> {
         if !attachments.is_empty() {
             let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for (id, filename, relative_path) in attachments {
-                let path = self.rang_guide_repo_root.join(&relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "{label}-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((id, filename, bytes));
-            }
+            let files = attachments.as_slice();
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -2028,15 +1982,14 @@ impl ServerSyncService {
                     .header("Authorization", format!("Bot {}", self.discord_token))
                     .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
                     let payload_text = payload_text.clone();
-                    let files = files.clone();
                     async move {
                         let mut form =
                             reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
+                        for file in files {
+                            let part = reqwest::multipart::Part::bytes(file.bytes.to_vec())
+                                .file_name(file.filename.to_string())
                                 .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
+                            form = form.part(format!("files[{}]", file.id), part);
                         }
                         let response = request.multipart(form).send().await?;
                         DiscordRestResponse::from_response(response).await
@@ -2068,35 +2021,19 @@ impl ServerSyncService {
         .await
     }
 
-    async fn edit_regelwerk_v2_message(
+    async fn edit_static_v2_message<M: StaticV2Message>(
         &self,
+        channel_id: u64,
         message_id: u64,
-        message: &regelwerk_publish::RegelwerkMessageOutput,
+        message: &M,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            regelwerk_publish::REGELWERK_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
         let response = self
             .send_components_v2_message_payload(
-                "Regelwerk",
                 "PATCH",
                 url,
-                payload_value,
-                attachments,
+                message.payload_value()?,
+                message.upload_files(),
             )
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -2107,34 +2044,18 @@ impl ServerSyncService {
         parse_discord_id("Message-ID", &written.id).map(Some)
     }
 
-    async fn post_regelwerk_v2_message(
+    async fn post_static_v2_message<M: StaticV2Message>(
         &self,
-        message: &regelwerk_publish::RegelwerkMessageOutput,
+        channel_id: u64,
+        message: &M,
     ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            regelwerk_publish::REGELWERK_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
         let response = self
             .send_components_v2_message_payload(
-                "Regelwerk",
                 "POST",
                 url,
-                payload_value,
-                attachments,
+                message.payload_value()?,
+                message.upload_files(),
             )
             .await?;
         let written: DiscordMessageWriteResponse =
@@ -2142,180 +2063,287 @@ impl ServerSyncService {
         parse_discord_id("Message-ID", &written.id)
     }
 
-    async fn edit_support_message(
+    async fn write_static_v2_messages<M: StaticV2Message>(
         &self,
-        message_id: u64,
-        message: &support_publish::SupportMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            support_publish::SUPPORT_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("Support", "PATCH", url, payload_value, attachments)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        target: StaticV2Target<'_>,
+        messages: &mut [M],
+    ) -> ServerSyncResult<StaticV2Written> {
+        let mut written = StaticV2Written::default();
+        let mut message_ids = Vec::new();
+        let result: ServerSyncResult<()> = async {
+            for message in messages.iter_mut() {
+                if let (Some(edit_action), Some(stored_message_id)) =
+                    (target.edit_action, message.stored_message_id())
+                {
+                    if let Some(message_id) = self
+                        .edit_static_v2_message(target.channel_id, stored_message_id, message)
+                        .await?
+                    {
+                        message_ids.push(message_id);
+                        message.settle(edit_action, message_id);
+                        written.edited.push(message_id);
+                        continue;
+                    }
+                    written
+                        .warnings
+                        .push(target.stale_warning(stored_message_id));
+                }
+                let message_id = self
+                    .post_static_v2_message(target.channel_id, message)
+                    .await?;
+                message_ids.push(message_id);
+                message.settle("posted", message_id);
+                written.posted.push(message_id);
+            }
+            self.replace_static_v2_message_ids_and_state(
+                target.id_prefix,
+                &message_ids,
+                target.state,
+            )
+            .await
         }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_support_message(
-        &self,
-        message: &support_publish::SupportMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            support_publish::SUPPORT_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("Support", "POST", url, payload_value, attachments)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn edit_faq_message(
-        &self,
-        message_id: u64,
-        message: &faq_publish::FaqMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages/{message_id}",
-            faq_publish::FAQ_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("FAQ", "PATCH", url, payload_value, attachments)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        .await;
+        if let Err(err) = result {
+            self.cleanup_new_static_v2_posts_best_effort(
+                target.label,
+                target.channel_id,
+                &written.posted,
+            )
+            .await;
+            return Err(err);
         }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
+        Ok(written)
     }
 
-    async fn post_faq_message(
+    async fn support_funding_for_apply(
         &self,
-        message: &faq_publish::FaqMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!(
-            "/channels/{}/messages",
-            faq_publish::FAQ_CHANNEL_ID
-        ));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("FAQ", "POST", url, payload_value, attachments)
+        source: &dyn crate::supporter::FundingSource,
+    ) -> ServerSyncResult<Result<(support_publish::SupportFunding, Option<String>), String>> {
+        let error = match source.funding().await {
+            Ok(funding) => return Ok(Ok((funding, None))),
+            Err(error) => error,
+        };
+        let Some(raw) = self
+            .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
+            .await?
+        else {
+            return Ok(Err(format!(
+                "{error}; es gibt keinen veröffentlichten Stand"
+            )));
+        };
+        let last_live = match support_publish::SupportFunding::from_kv(&raw) {
+            Ok(last_live) => last_live,
+            Err(decode_error) => {
+                return Ok(Err(format!(
+                    "{error}; veröffentlichter Stand unlesbar: {decode_error}"
+                )))
+            }
+        };
+        let funding = support_fallback_funding(last_live, source.goal_cents());
+        Ok(Ok((
+            funding,
+            Some(format!(
+                "Support: Monatsstand nicht abrufbar ({error}); der Balken zeigt den zuletzt veröffentlichten Stand von {}, bis der nächste Abgleich ihn aktualisiert.",
+                support_publish::format_euro(funding.raised_cents)
+            )),
+        )))
+    }
+
+    pub async fn support_funding_refresh(&self) -> ServerSyncResult<FundingRefresh> {
+        let source = self.supporter_funding.clone();
+        if let Some(missing) = source.missing_config() {
+            return Ok(FundingRefresh::Skipped(missing));
+        }
+        let Ok(_claim) = self.support_panel_lock.try_lock() else {
+            return Ok(FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        };
+        let options = source.panel_options();
+        let stored_payload_format = self
+            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_FORMAT_KEY)
             .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
+        if stored_payload_format.as_deref() != Some(support_publish::SUPPORT_PAYLOAD_FORMAT) {
+            return Ok(FundingRefresh::Skipped("Panel noch im alten Format"));
+        }
+        let stored_message_ids = self
+            .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
+            .await?;
+        if stored_message_ids.is_empty() {
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
+        }
+        let Some(live_raw) = self
+            .load_serversync_kv(support_publish::SUPPORT_FUNDING_LIVE_KEY)
+            .await?
+        else {
+            return Ok(FundingRefresh::Skipped("kein veröffentlichter Monatsstand"));
+        };
+        let live = support_publish::SupportFunding::from_kv(&live_raw).map_err(|error| {
+            ServerSyncError::internal(format!("veröffentlichter Monatsstand unlesbar: {error}"))
+        })?;
+        let Some(options_raw) = self
+            .load_serversync_kv(support_publish::SUPPORT_PANEL_OPTIONS_KEY)
+            .await?
+        else {
+            return Ok(FundingRefresh::Skipped(
+                "keine veröffentlichten Panel-Optionen",
+            ));
+        };
+        let published_options = support_publish::SupportPanelOptions::from_kv(&options_raw)
+            .map_err(|error| {
+                ServerSyncError::internal(format!(
+                    "veröffentlichte Panel-Optionen unlesbar: {error}"
+                ))
+            })?;
+        let stored_payload_hash = self
+            .load_serversync_kv(support_publish::SUPPORT_PAYLOAD_HASH_KEY)
+            .await?;
+        let stored = support_publish::SupportStoredState {
+            message_ids: &stored_message_ids,
+            payload_format: stored_payload_format.as_deref(),
+            payload_hash: stored_payload_hash.as_deref(),
+        };
+        let snapshot = support_publish::load_support_snapshot(&self.rang_guide_repo_root)
+            .map_err(ServerSyncError::internal)?;
+        let current = support_publish::build_support_output_from(
+            &snapshot,
+            &stored,
+            live,
+            &published_options,
+            true,
+        )
+        .map_err(ServerSyncError::internal)?;
+        if current.messages.len() != stored_message_ids.len() {
+            return Ok(FundingRefresh::Skipped("Panel-Nachrichten fehlen"));
+        }
+        if !support_publish::support_payload_is_unchanged(&current) {
+            return Ok(FundingRefresh::Skipped(
+                "Panel-Text weicht vom veröffentlichten Stand ab",
+            ));
+        }
+        let funding = match source.funding().await {
+            Ok(funding) => funding,
+            Err(error) => {
+                let fallback = support_fallback_funding(live, source.goal_cents());
+                if fallback == live && published_options == options {
+                    return Err(ServerSyncError::internal(error));
+                }
+                tracing::warn!(
+                    %error,
+                    raised_cents = fallback.raised_cents,
+                    goal_cents = fallback.goal_cents,
+                    "Support: Monatsstand nicht abrufbar; der Abgleich rechnet mit dem veröffentlichten Betrag"
+                );
+                fallback
+            }
+        };
+        if live == funding && published_options == options {
+            return Ok(FundingRefresh::Unchanged);
+        }
+        let next =
+            support_publish::build_support_output_from(&snapshot, &stored, funding, &options, true)
+                .map_err(ServerSyncError::internal)?;
+        if !support_publish::new_warnings(&current, &next).is_empty() {
+            return Ok(FundingRefresh::Skipped(SUPPORT_REFRESH_NEW_WARNINGS));
+        }
+        let edits = support_publish::changed_messages(&current, &next, &stored_message_ids);
+        let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
+        for (message_id, message) in edits {
+            if self
+                .edit_static_v2_message(support_publish::SUPPORT_CHANNEL_ID, message_id, message)
+                .await?
+                .is_none()
+            {
+                self.delete_static_v2_message_id(
+                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                    message.message_index,
+                )
+                .await?;
+                return Ok(FundingRefresh::Skipped("Panel-Nachricht nicht gefunden"));
+            }
+        }
+        self.store_serversync_kv_pairs(&[
+            (
+                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                &next.payload_hash,
+            ),
+            (support_publish::SUPPORT_FUNDING_LIVE_KEY, &funding.to_kv()),
+            (support_publish::SUPPORT_PANEL_OPTIONS_KEY, &options_kv),
+        ])
+        .await?;
+        Ok(FundingRefresh::Updated)
+    }
+
+    async fn fetch_history_page(
+        &self,
+        channel_id: u64,
+        before: Option<u64>,
+        limit: usize,
+    ) -> ServerSyncResult<Vec<DiscordMessage>> {
+        let mut url =
+            self.discord_api_url(&format!("/channels/{channel_id}/messages?limit={limit}"));
+        if let Some(before) = before {
+            url.push_str("&before=");
+            url.push_str(&before.to_string());
+        }
+        self.discord_get_json(url).await
+    }
+
+    async fn scan_message_history(
+        &self,
+        channel_id: u64,
+        mut visit: impl FnMut(&[DiscordMessage]) -> ServerSyncResult<()> + Send,
+    ) -> ServerSyncResult<bool> {
+        let mut before: Option<u64> = None;
+        for _ in 0..HISTORY_SCAN_MAX_PAGES {
+            let page = self
+                .fetch_history_page(channel_id, before, DISCORD_HISTORY_PAGE_LIMIT)
+                .await?;
+            if page.is_empty() {
+                return Ok(false);
+            }
+            visit(&page)?;
+            before = history_before_cursor(before, &page)?;
+            if page.len() < DISCORD_HISTORY_PAGE_LIMIT {
+                return Ok(false);
+            }
+        }
+        let probe = self
+            .fetch_history_page(channel_id, before, HISTORY_SCAN_PROBE_LIMIT)
+            .await?;
+        Ok(history_before_cursor(before, &probe)?.is_some())
     }
 
     async fn fetch_rang_guide_legacy_cleanup_candidates(
         &self,
         bot_user_id: u64,
     ) -> ServerSyncResult<RangGuideLegacyScan> {
-        let mut before: Option<u64> = None;
         let mut candidates = Vec::new();
-        let mut truncated = false;
-        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url = format!(
-                "{}/channels/{}/messages?limit=100",
-                self.discord_api_base.trim_end_matches('/'),
-                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
-            );
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                let custom_ids =
-                    rang_guide_publish::collect_component_custom_ids(&message.components);
-                let legacy = rang_guide_publish::RangGuideLegacyMessage {
-                    message_id,
-                    author_id,
-                    flags: message.flags,
-                    has_embeds: !message.embeds.is_empty(),
-                    custom_ids,
-                };
-                if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(&legacy, bot_user_id)
-                {
-                    candidates.push(rang_guide_publish::RangGuideLegacyCleanupCandidate {
+        let truncated = self
+            .scan_message_history(rang_guide_publish::RANG_GUIDE_CHANNEL_ID, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    let custom_ids =
+                        rang_guide_publish::collect_component_custom_ids(&message.components);
+                    let legacy = rang_guide_publish::RangGuideLegacyMessage {
                         message_id,
-                        custom_ids: legacy.custom_ids,
-                    });
+                        author_id,
+                        flags: message.flags,
+                        has_embeds: !message.embeds.is_empty(),
+                        custom_ids,
+                    };
+                    if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(
+                        &legacy,
+                        bot_user_id,
+                    ) {
+                        candidates.push(rang_guide_publish::RangGuideLegacyCleanupCandidate {
+                            message_id,
+                            custom_ids: legacy.custom_ids,
+                        });
+                    }
                 }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
-        }
+                Ok(())
+            })
+            .await?;
         candidates.sort_unstable_by_key(|candidate| candidate.message_id);
         candidates.dedup_by_key(|candidate| candidate.message_id);
         Ok(RangGuideLegacyScan {
@@ -2329,36 +2357,20 @@ impl ServerSyncService {
         channel_id: u64,
         is_own: impl Fn(u64, u64, &DiscordMessage) -> bool + Send,
     ) -> ServerSyncResult<OwnMessageScan> {
-        let mut before: Option<u64> = None;
         let mut message_ids = Vec::new();
-        let mut truncated = false;
-        for page_index in 0..HISTORY_SCAN_MAX_PAGES {
-            let mut url =
-                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if is_own(message_id, author_id, message) {
-                    message_ids.push(message_id);
+        let found = &mut message_ids;
+        let truncated = self
+            .scan_message_history(channel_id, move |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if is_own(message_id, author_id, message) {
+                        found.push(message_id);
+                    }
                 }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
-            truncated = page_index + 1 == HISTORY_SCAN_MAX_PAGES;
-        }
+                Ok(())
+            })
+            .await?;
         message_ids.sort_unstable();
         message_ids.dedup();
         Ok(OwnMessageScan {
@@ -2826,12 +2838,11 @@ impl ServerSyncService {
         let candidates = output.legacy_cleanup_candidates.clone();
         for candidate in candidates {
             match self
-                .discord_delete(format!(
-                    "{}/channels/{}/messages/{}",
-                    self.discord_api_base.trim_end_matches('/'),
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{}",
                     rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
                     candidate.message_id
-                ))
+                )))
                 .await
             {
                 Ok(true) => output.deleted_legacy_message_ids.push(candidate.message_id),
@@ -2865,9 +2876,9 @@ impl ServerSyncService {
         let mut deleted = Vec::new();
         for message_id in message_ids {
             if self
-                .discord_delete(format!(
-                    "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
-                ))
+                .discord_delete(
+                    self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}")),
+                )
                 .await?
             {
                 deleted.push(message_id);
@@ -2882,58 +2893,47 @@ impl ServerSyncService {
         bot_user_id: u64,
     ) -> ServerSyncResult<BTreeMap<String, Vec<u64>>> {
         let mut messages = BTreeMap::new();
-        let mut before: Option<u64> = None;
-        loop {
-            let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit=100");
-            if let Some(before) = before {
-                url.push_str("&before=");
-                url.push_str(&before.to_string());
-            }
-            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
-            if page.is_empty() {
-                break;
-            }
-            for message in &page {
-                let message_id = parse_discord_id("Message-ID", &message.id)?;
-                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
-                if author_id != bot_user_id {
-                    continue;
-                }
-                for embed in &message.embeds {
-                    if let Some(marker) = embed
-                        .footer
-                        .as_ref()
-                        .and_then(|footer| footer.text.as_deref())
-                    {
-                        if let Some(section_id) =
-                            welcome_publish::welcome_section_id_from_marker(marker)
+        let truncated = self
+            .scan_message_history(channel_id, |page| {
+                for message in page {
+                    let message_id = parse_discord_id("Message-ID", &message.id)?;
+                    let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                    if author_id != bot_user_id {
+                        continue;
+                    }
+                    for embed in &message.embeds {
+                        if let Some(marker) = embed
+                            .footer
+                            .as_ref()
+                            .and_then(|footer| footer.text.as_deref())
+                        {
+                            if let Some(section_id) =
+                                welcome_publish::welcome_section_id_from_marker(marker)
+                            {
+                                messages
+                                    .entry(section_id.to_string())
+                                    .or_insert_with(Vec::new)
+                                    .push(message_id);
+                                continue;
+                            }
+                        }
+                        if let Some(section_id) = embed
+                            .title
+                            .as_deref()
+                            .and_then(welcome_publish::welcome_section_id_from_title)
                         {
                             messages
                                 .entry(section_id.to_string())
                                 .or_insert_with(Vec::new)
                                 .push(message_id);
-                            continue;
                         }
                     }
-                    if let Some(section_id) = embed
-                        .title
-                        .as_deref()
-                        .and_then(welcome_publish::welcome_section_id_from_title)
-                    {
-                        messages
-                            .entry(section_id.to_string())
-                            .or_insert_with(Vec::new)
-                            .push(message_id);
-                    }
                 }
-            }
-            before = page
-                .last()
-                .map(|message| parse_discord_id("Message-ID", &message.id))
-                .transpose()?;
-            if page.len() < 100 {
-                break;
-            }
+                Ok(())
+            })
+            .await?;
+        if truncated {
+            return Err(history_scan_cap_error("Welcome"));
         }
         for ids in messages.values_mut() {
             ids.sort_unstable();
@@ -2948,7 +2948,7 @@ impl ServerSyncService {
         message_id: u64,
         section: &welcome_publish::WelcomeSectionOutput,
     ) -> ServerSyncResult<Option<u64>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
         let response = self
             .send_welcome_message_payload("PATCH", url, &section.payload)
             .await?;
@@ -2965,7 +2965,7 @@ impl ServerSyncService {
         channel_id: u64,
         section: &welcome_publish::WelcomeSectionOutput,
     ) -> ServerSyncResult<u64> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
         let response = self
             .send_welcome_message_payload("POST", url, &section.payload)
             .await?;
@@ -2980,66 +2980,11 @@ impl ServerSyncService {
         url: String,
         payload: &welcome_publish::WelcomeMessagePayload,
     ) -> ServerSyncResult<DiscordRestResponse> {
-        let payload_value = serde_json::to_value(payload)?;
-        if !payload.attachments.is_empty() {
-            let payload_text = serde_json::to_string(&payload_value)?;
-            let mut files = Vec::new();
-            for attachment in &payload.attachments {
-                let path = welcome_publish::welcome_repo_root().join(&attachment.relative_path);
-                let bytes = std::fs::read(&path).map_err(|err| {
-                    ServerSyncError::internal(format!(
-                        "Welcome-Attachment `{}` konnte nicht gelesen werden: {err}",
-                        path.display()
-                    ))
-                })?;
-                files.push((attachment.id, attachment.filename.clone(), bytes));
-            }
-            return discord_regelwerk_send_with_retry(
-                || {
-                    let request = match method {
-                        "POST" => self.http_client.post(url.clone()),
-                        "PATCH" => self.http_client.patch(url.clone()),
-                        other => unreachable!("unsupported Discord method {other}"),
-                    }
-                    .header("Authorization", format!("Bot {}", self.discord_token))
-                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
-                    let payload_text = payload_text.clone();
-                    let files = files.clone();
-                    async move {
-                        let mut form =
-                            reqwest::multipart::Form::new().text("payload_json", payload_text);
-                        for (id, filename, bytes) in files {
-                            let part = reqwest::multipart::Part::bytes(bytes)
-                                .file_name(filename)
-                                .mime_str("image/png")?;
-                            form = form.part(format!("files[{id}]"), part);
-                        }
-                        let response = request.multipart(form).send().await?;
-                        DiscordRestResponse::from_response(response).await
-                    }
-                },
-                method,
-            )
-            .await;
-        }
-
-        discord_regelwerk_send_with_retry(
-            || {
-                let request = match method {
-                    "POST" => self.http_client.post(url.clone()),
-                    "PATCH" => self.http_client.patch(url.clone()),
-                    other => unreachable!("unsupported Discord method {other}"),
-                }
-                .header("Authorization", format!("Bot {}", self.discord_token))
-                .header("Content-Type", "application/json")
-                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-                .json(&payload_value);
-                async move {
-                    let response = request.send().await?;
-                    DiscordRestResponse::from_response(response).await
-                }
-            },
+        self.send_components_v2_message_payload(
             method,
+            url,
+            serde_json::to_value(payload)?,
+            upload_files(&payload.attachments),
         )
         .await
     }
@@ -3172,12 +3117,10 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         _requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<SnapshotOutput> {
-        let report = dl_server_as_code::import_live_guild_snapshot(
-            &self.pool,
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let model = self.fetch_live_guild_model_bounded().await?;
+        let report =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "serenity_http")
+                .await?;
         Ok(snapshot_output(report))
     }
 
@@ -3185,11 +3128,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RollbackExportOutput> {
-        let model = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let model = self.fetch_live_guild_model_bounded().await?;
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
@@ -3262,11 +3201,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn diff(&self, requested_by_user_id: Option<u64>) -> ServerSyncResult<DiffOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
                 .await?;
@@ -3318,11 +3253,7 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<RestoreOutput> {
         let (rollback_export_id, artifact_hash, artifact) =
             self.load_rollback_artifact(rollback_export_id).await?;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
                 .await?;
@@ -3386,11 +3317,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<OnboardingPreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
                 .await?;
@@ -3465,11 +3392,7 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
         // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
         validate_onboarding_references(&live, &preview.config)
@@ -3563,11 +3486,7 @@ impl ServerSyncOps for ServerSyncService {
         &self,
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<ServerGuidePreviewOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "serverguide_preview")
                 .await?;
@@ -3642,11 +3561,7 @@ impl ServerSyncOps for ServerSyncService {
             )));
         }
 
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         validate_server_guide_config(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -3744,11 +3659,7 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let content = build_regelwerk_text(&live)?;
         let bot_user_id = self.fetch_current_bot_user_id().await?;
         let stored_message_id = self.load_regelwerk_message_id().await?;
@@ -3773,7 +3684,7 @@ impl ServerSyncOps for ServerSyncService {
         let mut threads_deleted = 0usize;
         for (index, thread_id) in thread_ids.iter().enumerate() {
             if self
-                .discord_delete(format!("{DISCORD_API_BASE}/channels/{thread_id}"))
+                .discord_delete(self.discord_api_url(&format!("/channels/{thread_id}")))
                 .await?
             {
                 threads_deleted += 1;
@@ -3786,10 +3697,10 @@ impl ServerSyncOps for ServerSyncService {
         let mut bot_messages_deleted = 0usize;
         for (index, message) in bot_messages.iter().enumerate() {
             if self
-                .discord_delete(format!(
-                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{}",
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{RULES_CHANNEL_ID}/messages/{}",
                     message.message_id
-                ))
+                )))
                 .await?
             {
                 bot_messages_deleted += 1;
@@ -3915,48 +3826,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_regelwerk_v2_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "Regelwerk",
-                            regelwerk_publish::REGELWERK_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
-                    regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+            let state = [
+                (
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
                     regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                ),
+                (
                     regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &posted_message_ids,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Regelwerk",
+                        channel_id: regelwerk_publish::REGELWERK_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "Regelwerk",
-                    regelwerk_publish::REGELWERK_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4008,67 +3903,32 @@ impl ServerSyncOps for ServerSyncService {
                 )
                 .await?;
             } else {
-                let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_regelwerk_v2_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
-                        }
-                        output.warnings.push(format!(
-                        "Regelwerk: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
-
-                    let message_id = self
-                        .post_regelwerk_v2_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
-                    )
-                    .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
-                    self.replace_static_v2_message_ids_and_metadata(
-                        regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                let state = [
+                    (
                         regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
                         regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
+                    ),
+                    (
                         regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                        &message_ids,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Regelwerk",
+                            channel_id: regelwerk_publish::REGELWERK_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: regelwerk_publish::REGELWERK_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
                     .await?;
-                } else {
-                    self.store_static_v2_metadata(
-                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT_KEY,
-                        regelwerk_publish::REGELWERK_PAYLOAD_FORMAT,
-                        regelwerk_publish::REGELWERK_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                    )
-                    .await?;
-                }
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -4080,6 +3940,36 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn support_apply(&self, confirm: bool) -> ServerSyncResult<SupportPublishOutput> {
+        let Ok(_support_claim) = self.support_panel_lock.try_lock() else {
+            return Err(ServerSyncError::bad_request(format!(
+                "Support: {SUPPORT_PANEL_BUSY}; bitte gleich noch einmal versuchen."
+            )));
+        };
+        let source = self.supporter_funding.clone();
+        let options = source.panel_options();
+        let options_kv = options.to_kv().map_err(ServerSyncError::internal)?;
+        let funding_result = self.support_funding_for_apply(source.as_ref()).await?;
+        let (funding, funding_warning) = match funding_result {
+            Ok(found) => found,
+            Err(error) if confirm => {
+                return Err(ServerSyncError::bad_request(format!(
+                    "Support: Monatsstand unbekannt ({error}); Apply blockiert, damit das Panel keinen erfundenen Betrag zeigt."
+                )));
+            }
+            Err(error) => {
+                let preview = support_publish::SupportFunding {
+                    raised_cents: 0,
+                    goal_cents: source.goal_cents(),
+                };
+                (
+                    preview,
+                    Some(format!(
+                        "Support: Monatsstand unbekannt ({error}); die Vorschau zeigt {}, Bestätigen wird abgelehnt.",
+                        support_publish::format_euro(preview.raised_cents)
+                    )),
+                )
+            }
+        };
         let _apply_guard = self.panel_apply_lock.lock().await;
         let stored_message_ids = self
             .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
@@ -4092,12 +3982,17 @@ impl ServerSyncOps for ServerSyncService {
             .await?;
         let mut output = support_publish::build_support_publish_output(
             &self.rang_guide_repo_root,
-            &stored_message_ids,
-            stored_payload_format.as_deref(),
-            stored_payload_hash.as_deref(),
+            &support_publish::SupportStoredState {
+                message_ids: &stored_message_ids,
+                payload_format: stored_payload_format.as_deref(),
+                payload_hash: stored_payload_hash.as_deref(),
+            },
+            funding,
+            &options,
             !confirm,
         )
         .map_err(ServerSyncError::bad_request)?;
+        output.warnings.extend(funding_warning);
         let bot_user_id = self.fetch_current_bot_user_id().await?;
 
         let scan = self.fetch_support_v2_message_ids(bot_user_id).await?;
@@ -4171,50 +4066,45 @@ impl ServerSyncOps for ServerSyncService {
         for warning in &output.warnings {
             tracing::warn!(%warning, "Support-Publish-Warnung");
         }
+        let payload_hash = output.payload_hash.clone();
+        let funding_kv = output.funding.to_kv();
+        let published_state = [
+            (
+                support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
+                support_publish::SUPPORT_PAYLOAD_FORMAT,
+            ),
+            (
+                support_publish::SUPPORT_PAYLOAD_HASH_KEY,
+                payload_hash.as_str(),
+            ),
+            (
+                support_publish::SUPPORT_FUNDING_LIVE_KEY,
+                funding_kv.as_str(),
+            ),
+            (
+                support_publish::SUPPORT_PANEL_OPTIONS_KEY,
+                options_kv.as_str(),
+            ),
+        ];
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_support_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "Support",
-                            support_publish::SUPPORT_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
-                    support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &posted_message_ids,
+            let state = published_state;
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Support",
+                        channel_id: support_publish::SUPPORT_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "Support",
-                    support_publish::SUPPORT_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4258,75 +4148,25 @@ impl ServerSyncOps for ServerSyncService {
                         message.message_id = Some(message_id);
                     }
                 }
-                self.store_static_v2_metadata(
-                    support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                    support_publish::SUPPORT_PAYLOAD_FORMAT,
-                    support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                )
-                .await?;
+                self.store_serversync_kv_pairs(&published_state).await?;
             } else {
-                let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_support_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
-                        }
-                        output.warnings.push(format!(
-                        "Support: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
-
-                    let message_id = self
-                        .post_support_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
+                let state = published_state;
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Support",
+                            channel_id: support_publish::SUPPORT_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: support_publish::SUPPORT_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
                     .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
-                    self.replace_static_v2_message_ids_and_metadata(
-                        support_publish::SUPPORT_MESSAGE_ID_PREFIX,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT,
-                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                        &message_ids,
-                    )
-                    .await?;
-                } else {
-                    self.store_static_v2_metadata(
-                        support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
-                        support_publish::SUPPORT_PAYLOAD_FORMAT,
-                        support_publish::SUPPORT_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                    )
-                    .await?;
-                }
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -4416,46 +4256,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self.post_faq_message(&output.messages[message_index]).await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_static_v2_posts_best_effort(
-                            "FAQ",
-                            faq_publish::FAQ_CHANNEL_ID,
-                            &posted_message_ids,
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_static_v2_message_ids_and_metadata(
-                    faq_publish::FAQ_MESSAGE_ID_PREFIX,
+            let state = [
+                (
                     faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
                     faq_publish::FAQ_PAYLOAD_FORMAT,
+                ),
+                (
                     faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                    &output.payload_hash,
-                    &posted_message_ids,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "FAQ",
+                        channel_id: faq_publish::FAQ_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
                 )
-                .await
-            {
-                self.cleanup_new_static_v2_posts_best_effort(
-                    "FAQ",
-                    faq_publish::FAQ_CHANNEL_ID,
-                    &posted_message_ids,
-                )
-                .await;
-                return Err(err);
-            }
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4507,64 +4333,32 @@ impl ServerSyncOps for ServerSyncService {
                 )
                 .await?;
             } else {
-                let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_faq_message(stored_message_id, &output.messages[message_index])
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
-                        }
-                        output.warnings.push(format!(
-                        "FAQ: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
-
-                    let message_id = self
-                        .post_faq_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_static_v2_message_id(
-                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
-                        message_index,
-                        message_id,
-                    )
-                    .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
-                    self.replace_static_v2_message_ids_and_metadata(
-                        faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                let state = [
+                    (
                         faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
                         faq_publish::FAQ_PAYLOAD_FORMAT,
+                    ),
+                    (
                         faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                        &message_ids,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "FAQ",
+                            channel_id: faq_publish::FAQ_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: faq_publish::FAQ_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
                     )
                     .await?;
-                } else {
-                    self.store_static_v2_metadata(
-                        faq_publish::FAQ_PAYLOAD_FORMAT_KEY,
-                        faq_publish::FAQ_PAYLOAD_FORMAT,
-                        faq_publish::FAQ_PAYLOAD_HASH_KEY,
-                        &output.payload_hash,
-                    )
-                    .await?;
-                }
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -4574,11 +4368,7 @@ impl ServerSyncOps for ServerSyncService {
     }
 
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
@@ -4597,11 +4387,7 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let live = dl_server_as_code::import::fetch_live_guild_model(
-            self.adapter.http.as_ref(),
-            self.guild_id,
-        )
-        .await?;
+        let live = self.fetch_live_guild_model_bounded().await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
         let stored_payload_format = self.load_welcome_payload_format().await?;
@@ -4771,7 +4557,9 @@ impl ServerSyncOps for ServerSyncService {
 
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
         let _apply_guard = self.panel_apply_lock.lock().await;
-        let stored_message_ids = self.load_rang_guide_message_ids().await?;
+        let stored_message_ids = self
+            .load_static_v2_message_ids(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX)
+            .await?;
         let stored_payload_format = self.load_rang_guide_payload_format().await?;
         let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
         let mut output = rang_guide_publish::build_rang_guide_publish_output(
@@ -4856,33 +4644,32 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         if output.repost_required {
-            let mut posted_message_ids = Vec::new();
-            for message_index in 0..output.messages.len() {
-                let post_result = self
-                    .post_rang_guide_message(&output.messages[message_index])
-                    .await;
-                let message_id = match post_result {
-                    Ok(message_id) => message_id,
-                    Err(err) => {
-                        self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
-                            .await;
-                        return Err(err);
-                    }
-                };
-                posted_message_ids.push(message_id);
-                output.messages[message_index].action = "posted".to_string();
-                output.messages[message_index].message_id = Some(message_id);
-                output.messages[message_index].stored_message_id = Some(message_id);
-                output.posted_message_ids.push(message_id);
-            }
-            if let Err(err) = self
-                .replace_rang_guide_message_ids_and_metadata(&output, &posted_message_ids)
-                .await
-            {
-                self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
-                    .await;
-                return Err(err);
-            }
+            let state = [
+                (
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+                ),
+                (
+                    rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+                    output.payload_hash.as_str(),
+                ),
+            ];
+            let written = self
+                .write_static_v2_messages(
+                    StaticV2Target {
+                        label: "Rang-Guide",
+                        channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                        edit_action: None,
+                        stale_in_channel: false,
+                        id_prefix: rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
+                        state: &state,
+                    },
+                    &mut output.messages,
+                )
+                .await?;
+            output.edited_message_ids.extend(written.edited);
+            output.posted_message_ids.extend(written.posted);
+            output.warnings.extend(written.warnings);
             let mut delete_ids = stored_message_ids.clone();
             for message_id in &extra_delete_ids {
                 if !delete_ids.contains(message_id) {
@@ -4928,50 +4715,32 @@ impl ServerSyncOps for ServerSyncService {
                 }
                 self.store_rang_guide_metadata(&output).await?;
             } else {
-                let mut message_ids = Vec::new();
-                for message_index in 0..output.messages.len() {
-                    let stored_message_id = output.messages[message_index].stored_message_id;
-                    if let Some(stored_message_id) = stored_message_id {
-                        if let Some(message_id) = self
-                            .edit_rang_guide_message(
-                                stored_message_id,
-                                &output.messages[message_index],
-                            )
-                            .await?
-                        {
-                            message_ids.push(message_id);
-                            output.messages[message_index].action = if adopted_from_history {
-                                "adopted_edit".to_string()
-                            } else {
-                                "edited".to_string()
-                            };
-                            output.messages[message_index].message_id = Some(message_id);
-                            output.messages[message_index].stored_message_id = Some(message_id);
-                            output.edited_message_ids.push(message_id);
-                            continue;
-                        }
-                        output.warnings.push(format!(
-                        "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
-                    ));
-                    }
-
-                    let message_id = self
-                        .post_rang_guide_message(&output.messages[message_index])
-                        .await?;
-                    message_ids.push(message_id);
-                    self.store_rang_guide_message_id(message_index, message_id)
-                        .await?;
-                    output.messages[message_index].action = "posted".to_string();
-                    output.messages[message_index].message_id = Some(message_id);
-                    output.messages[message_index].stored_message_id = Some(message_id);
-                    output.posted_message_ids.push(message_id);
-                }
-                if adopted_from_history {
-                    self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
-                        .await?;
-                } else {
-                    self.store_rang_guide_metadata(&output).await?;
-                }
+                let state = [
+                    (
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+                    ),
+                    (
+                        rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+                        output.payload_hash.as_str(),
+                    ),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Rang-Guide",
+                            channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                            edit_action: Some(static_v2_edit_action(adopted_from_history)),
+                            stale_in_channel: false,
+                            id_prefix: rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX,
+                            state: &state,
+                        },
+                        &mut output.messages,
+                    )
+                    .await?;
+                output.edited_message_ids.extend(written.edited);
+                output.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
             }
         }
 
@@ -5027,7 +4796,9 @@ impl ServerSyncOps for ServerSyncService {
     async fn load_voice_ux_lfg_forum_thread_id(&self) -> ServerSyncResult<Option<u64>> {
         self.load_serversync_kv(voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY)
             .await?
-            .map(|value| parse_discord_id("voice_ux_lfg_forum_thread_id", &value))
+            .map(|value| {
+                parse_stored_discord_id(voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY, &value)
+            })
             .transpose()
     }
 
@@ -5045,86 +4816,6 @@ impl ServerSyncOps for ServerSyncService {
             };
             voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id)
         })
-        .await
-    }
-
-    async fn edit_voice_ux_message(
-        &self,
-        channel_id: u64,
-        message_id: u64,
-        message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<Option<u64>> {
-        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload(
-                "Voice-UX",
-                "PATCH",
-                url,
-                payload_value,
-                attachments,
-            )
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "PATCH")?;
-        parse_discord_id("Message-ID", &written.id).map(Some)
-    }
-
-    async fn post_voice_ux_message(
-        &self,
-        channel_id: u64,
-        message: &voice_ux_publish::VoiceUxMessageOutput,
-    ) -> ServerSyncResult<u64> {
-        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
-        let payload_value = serde_json::to_value(&message.payload)?;
-        let attachments = message
-            .payload
-            .attachments
-            .iter()
-            .map(|attachment| {
-                (
-                    attachment.id,
-                    attachment.filename.clone(),
-                    attachment.relative_path.clone(),
-                )
-            })
-            .collect();
-        let response = self
-            .send_components_v2_message_payload("Voice-UX", "POST", url, payload_value, attachments)
-            .await?;
-        let written: DiscordMessageWriteResponse =
-            discord_regelwerk_json_response(response, "POST")?;
-        parse_discord_id("Message-ID", &written.id)
-    }
-
-    async fn replace_voice_ux_target_metadata(
-        &self,
-        target: &voice_ux_publish::VoiceUxTargetOutput,
-        message_ids: &[u64],
-    ) -> ServerSyncResult<()> {
-        self.replace_static_v2_message_ids_and_metadata(
-            &voice_ux_publish::voice_ux_message_id_prefix(target.channel_id),
-            &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
-            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
-            &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
-            &target.payload_hash,
-            message_ids,
-        )
         .await
     }
 
@@ -5226,11 +4917,6 @@ impl ServerSyncOps for ServerSyncService {
         })
     }
 
-    async fn cleanup_new_voice_ux_posts_best_effort(&self, channel_id: u64, message_ids: &[u64]) {
-        self.cleanup_new_static_v2_posts_best_effort("Voice-UX", channel_id, message_ids)
-            .await;
-    }
-
     async fn pin_voice_ux_message_best_effort(
         &self,
         channel_id: u64,
@@ -5305,7 +4991,7 @@ impl ServerSyncOps for ServerSyncService {
         .await
         {
             if let Ok(message_id) =
-                parse_discord_id("tempvoice_router.components_v2_message_id", &raw)
+                parse_stored_discord_id("tempvoice_router.components_v2_message_id", &raw)
             {
                 raw_candidates.push((
                     voice_ux_publish::VOICE_UX_CHANNEL_ID,
@@ -5321,7 +5007,9 @@ impl ServerSyncOps for ServerSyncService {
         )
         .await
         {
-            if let Ok(message_id) = parse_discord_id("lfg_panel.components_v2_message_id", &raw) {
+            if let Ok(message_id) =
+                parse_stored_discord_id("lfg_panel.components_v2_message_id", &raw)
+            {
                 raw_candidates.push((
                     voice_ux_publish::VOICE_UX_CHANNEL_ID,
                     message_id,
@@ -5478,13 +5166,7 @@ impl ServerSyncOps for ServerSyncService {
         let url = self.discord_api_url(&format!("/channels/{thread_id}/messages/{thread_id}"));
         let payload_value = serde_json::to_value(&forum.payload)?;
         let response = self
-            .send_components_v2_message_payload(
-                "Voice-UX-Forum",
-                "PATCH",
-                url,
-                payload_value,
-                Vec::new(),
-            )
+            .send_components_v2_message_payload("PATCH", url, payload_value, Vec::new())
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -5499,20 +5181,20 @@ impl ServerSyncOps for ServerSyncService {
         thread_id: u64,
         payload_hash: &str,
     ) -> ServerSyncResult<()> {
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
-            &thread_id.to_string(),
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
-            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
-        )
-        .await?;
-        self.store_serversync_kv(
-            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
-            payload_hash,
-        )
+        self.store_serversync_kv_pairs(&[
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+                &stored_discord_id(thread_id),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
+                voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            ),
+            (
+                voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+                payload_hash,
+            ),
+        ])
         .await
     }
 
@@ -5664,12 +5346,8 @@ impl ServerSyncOps for ServerSyncService {
             .await?;
         if let Some(thread_id) = output.forum_post.thread_id {
             if output.forum_post.stored_thread_id != Some(thread_id) {
-                voice_ux_publish::relink_voice_ux_forum_thread(
-                    &self.rang_guide_repo_root,
-                    &mut output,
-                    thread_id,
-                )
-                .map_err(ServerSyncError::bad_request)?;
+                voice_ux_publish::relink_voice_ux_forum_thread(&mut output, thread_id)
+                    .map_err(ServerSyncError::bad_request)?;
             }
         }
 
@@ -5677,45 +5355,33 @@ impl ServerSyncOps for ServerSyncService {
             if output.targets[target_index].repost_required {
                 let channel_id = output.targets[target_index].channel_id;
                 let old_ids = output.targets[target_index].stored_message_ids.clone();
-                let mut posted_message_ids = Vec::new();
-                for message_index in 0..output.targets[target_index].messages.len() {
-                    let post_result = self
-                        .post_voice_ux_message(
+                let id_prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
+                let format_key = voice_ux_publish::voice_ux_payload_format_key(channel_id);
+                let hash_key = voice_ux_publish::voice_ux_payload_hash_key(channel_id);
+                let target = &mut output.targets[target_index];
+                let state = [
+                    (
+                        format_key.as_str(),
+                        voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+                    ),
+                    (hash_key.as_str(), target.payload_hash.as_str()),
+                ];
+                let written = self
+                    .write_static_v2_messages(
+                        StaticV2Target {
+                            label: "Voice-UX",
                             channel_id,
-                            &output.targets[target_index].messages[message_index],
-                        )
-                        .await;
-                    let message_id = match post_result {
-                        Ok(message_id) => message_id,
-                        Err(err) => {
-                            self.cleanup_new_voice_ux_posts_best_effort(
-                                channel_id,
-                                &posted_message_ids,
-                            )
-                            .await;
-                            return Err(err);
-                        }
-                    };
-                    posted_message_ids.push(message_id);
-                    let message = &mut output.targets[target_index].messages[message_index];
-                    message.action = "posted".to_string();
-                    message.message_id = Some(message_id);
-                    message.stored_message_id = Some(message_id);
-                    output.targets[target_index]
-                        .posted_message_ids
-                        .push(message_id);
-                }
-                if let Err(err) = self
-                    .replace_voice_ux_target_metadata(
-                        &output.targets[target_index],
-                        &posted_message_ids,
+                            edit_action: None,
+                            stale_in_channel: true,
+                            id_prefix: &id_prefix,
+                            state: &state,
+                        },
+                        &mut target.messages,
                     )
-                    .await
-                {
-                    self.cleanup_new_voice_ux_posts_best_effort(channel_id, &posted_message_ids)
-                        .await;
-                    return Err(err);
-                }
+                    .await?;
+                target.edited_message_ids.extend(written.edited);
+                target.posted_message_ids.extend(written.posted);
+                output.warnings.extend(written.warnings);
                 let mut delete_ids = old_ids;
                 for message_id in extra_delete_ids {
                     if !delete_ids.contains(message_id) {
@@ -5770,60 +5436,33 @@ impl ServerSyncOps for ServerSyncService {
                         .await?;
                 } else {
                     let channel_id = output.targets[target_index].channel_id;
-                    let mut message_ids = Vec::new();
-                    for message_index in 0..output.targets[target_index].messages.len() {
-                        let stored_message_id =
-                            output.targets[target_index].messages[message_index].stored_message_id;
-                        if let Some(stored_message_id) = stored_message_id {
-                            if let Some(message_id) = self
-                                .edit_voice_ux_message(
-                                    channel_id,
-                                    stored_message_id,
-                                    &output.targets[target_index].messages[message_index],
-                                )
-                                .await?
-                            {
-                                message_ids.push(message_id);
-                                let message =
-                                    &mut output.targets[target_index].messages[message_index];
-                                message.action = "edited".to_string();
-                                message.message_id = Some(message_id);
-                                message.stored_message_id = Some(message_id);
-                                output.targets[target_index]
-                                    .edited_message_ids
-                                    .push(message_id);
-                                continue;
-                            }
-                            output.warnings.push(format!(
-                            "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
-                        ));
-                        }
-                        let message_id = self
-                            .post_voice_ux_message(
+                    let id_prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
+                    let format_key = voice_ux_publish::voice_ux_payload_format_key(channel_id);
+                    let hash_key = voice_ux_publish::voice_ux_payload_hash_key(channel_id);
+                    let target = &mut output.targets[target_index];
+                    let state = [
+                        (
+                            format_key.as_str(),
+                            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+                        ),
+                        (hash_key.as_str(), target.payload_hash.as_str()),
+                    ];
+                    let written = self
+                        .write_static_v2_messages(
+                            StaticV2Target {
+                                label: "Voice-UX",
                                 channel_id,
-                                &output.targets[target_index].messages[message_index],
-                            )
-                            .await?;
-                        message_ids.push(message_id);
-                        self.store_static_v2_message_id(
-                            &voice_ux_publish::voice_ux_message_id_prefix(channel_id),
-                            message_index,
-                            message_id,
+                                edit_action: Some(static_v2_edit_action(false)),
+                                stale_in_channel: true,
+                                id_prefix: &id_prefix,
+                                state: &state,
+                            },
+                            &mut target.messages,
                         )
                         .await?;
-                        let message = &mut output.targets[target_index].messages[message_index];
-                        message.action = "posted".to_string();
-                        message.message_id = Some(message_id);
-                        message.stored_message_id = Some(message_id);
-                        output.targets[target_index]
-                            .posted_message_ids
-                            .push(message_id);
-                    }
-                    self.replace_voice_ux_target_metadata(
-                        &output.targets[target_index],
-                        &message_ids,
-                    )
-                    .await?;
+                    target.edited_message_ids.extend(written.edited);
+                    target.posted_message_ids.extend(written.posted);
+                    output.warnings.extend(written.warnings);
                 }
             }
 
@@ -5880,6 +5519,120 @@ impl ServerSyncOps for ServerSyncService {
     }
 }
 
+struct UploadFile<'a> {
+    id: u8,
+    filename: &'a str,
+    bytes: &'a [u8],
+}
+
+trait UploadAttachment {
+    fn upload_file(&self) -> UploadFile<'_>;
+}
+
+macro_rules! upload_attachment {
+    ($($attachment:ty),+ $(,)?) => {
+        $(impl UploadAttachment for $attachment {
+            fn upload_file(&self) -> UploadFile<'_> {
+                UploadFile {
+                    id: self.id,
+                    filename: &self.filename,
+                    bytes: &self.bytes,
+                }
+            }
+        })+
+    };
+}
+
+upload_attachment!(
+    faq_publish::FaqPayloadAttachment,
+    rang_guide_publish::RangGuidePayloadAttachment,
+    regelwerk_publish::RegelwerkPayloadAttachment,
+    support_publish::SupportPayloadAttachment,
+    voice_ux_publish::VoiceUxPayloadAttachment,
+    welcome_publish::WelcomePayloadAttachment,
+);
+
+fn upload_files<A: UploadAttachment>(attachments: &[A]) -> Vec<UploadFile<'_>> {
+    attachments
+        .iter()
+        .map(UploadAttachment::upload_file)
+        .collect()
+}
+
+trait StaticV2Message {
+    fn payload_value(&self) -> serde_json::Result<Value>;
+    fn upload_files(&self) -> Vec<UploadFile<'_>>;
+    fn stored_message_id(&self) -> Option<u64>;
+    fn settle(&mut self, action: &str, message_id: u64);
+}
+
+macro_rules! static_v2_message {
+    ($($message:ty),+ $(,)?) => {
+        $(impl StaticV2Message for $message {
+            fn payload_value(&self) -> serde_json::Result<Value> {
+                serde_json::to_value(&self.payload)
+            }
+            fn upload_files(&self) -> Vec<UploadFile<'_>> {
+                upload_files(&self.payload.attachments)
+            }
+            fn stored_message_id(&self) -> Option<u64> {
+                self.stored_message_id
+            }
+            fn settle(&mut self, action: &str, message_id: u64) {
+                self.action = action.to_string();
+                self.message_id = Some(message_id);
+                self.stored_message_id = Some(message_id);
+            }
+        })+
+    };
+}
+
+static_v2_message!(
+    faq_publish::FaqMessageOutput,
+    rang_guide_publish::RangGuideMessageOutput,
+    regelwerk_publish::RegelwerkMessageOutput,
+    support_publish::SupportMessageOutput,
+    voice_ux_publish::VoiceUxMessageOutput,
+);
+
+struct StaticV2Target<'a> {
+    label: &'static str,
+    channel_id: u64,
+    edit_action: Option<&'static str>,
+    stale_in_channel: bool,
+    id_prefix: &'a str,
+    state: &'a [(&'a str, &'a str)],
+}
+
+impl StaticV2Target<'_> {
+    fn stale_warning(&self, message_id: u64) -> String {
+        let place = if self.stale_in_channel {
+            format!(" in Kanal {}", self.channel_id)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}: gespeicherte Message-ID {message_id}{place} ist stale (404); es wird neu gepostet.",
+            self.label
+        )
+    }
+}
+
+#[derive(Default)]
+struct StaticV2Written {
+    edited: Vec<u64>,
+    posted: Vec<u64>,
+    warnings: Vec<String>,
+}
+
+fn static_v2_edit_action(adopted_from_history: bool) -> &'static str {
+    if adopted_from_history {
+        "adopted_edit"
+    } else {
+        "edited"
+    }
+}
+
 fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
     SnapshotOutput {
         snapshot_id: report.snapshot_id,
@@ -5933,14 +5686,104 @@ impl DiscordRestResponse {
     }
 }
 
+pub(crate) fn discord_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(
+            dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS,
+        ))
+        .build()
+}
+
+fn archive_next_cursor(
+    before: Option<DateTime<chrono::FixedOffset>>,
+    page: &DiscordThreadPage,
+) -> ServerSyncResult<Option<DateTime<chrono::FixedOffset>>> {
+    if !page.has_more {
+        return Ok(None);
+    }
+    archive_before_cursor(before, &page.threads)?
+        .map(Some)
+        .ok_or_else(|| {
+            ServerSyncError::internal(
+                "Discord-Thread-Archiv meldet weitere Seiten, liefert aber keine Threads"
+                    .to_string(),
+            )
+        })
+}
+
+fn archive_before_cursor(
+    before: Option<DateTime<chrono::FixedOffset>>,
+    threads: &[DiscordThread],
+) -> ServerSyncResult<Option<DateTime<chrono::FixedOffset>>> {
+    let oldest = threads
+        .last()
+        .map(|thread| {
+            let stamp = thread
+                .thread_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.archive_timestamp.as_deref())
+                .ok_or_else(|| {
+                    ServerSyncError::internal(
+                        "Discord-Thread-Archiv liefert keinen Archivzeitpunkt".to_string(),
+                    )
+                })?;
+            DateTime::parse_from_rfc3339(stamp).map_err(|err| {
+                ServerSyncError::internal(format!(
+                    "Discord-Thread-Archiv liefert ungültigen Zeitstempel `{stamp}`: {err}"
+                ))
+            })
+        })
+        .transpose()?;
+    crate::discord_pages::advance_before(before.as_ref(), oldest).map_err(|_| {
+        ServerSyncError::internal("Discord-Thread-Archiv blättert nicht weiter".to_string())
+    })
+}
+
+fn history_before_cursor(
+    before: Option<u64>,
+    page: &[DiscordMessage],
+) -> ServerSyncResult<Option<u64>> {
+    let oldest = page
+        .iter()
+        .map(|message| parse_discord_id("Message-ID", &message.id))
+        .collect::<ServerSyncResult<Vec<_>>>()?
+        .into_iter()
+        .min();
+    crate::discord_pages::advance_before(before.as_ref(), oldest).map_err(|_| {
+        ServerSyncError::internal("Discord-Nachrichtenverlauf blättert nicht weiter".to_string())
+    })
+}
+
 async fn discord_regelwerk_send_with_retry<S, Fut>(
-    mut send: S,
+    send: S,
     method: &str,
 ) -> ServerSyncResult<DiscordRestResponse>
 where
     S: FnMut() -> Fut,
     Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
 {
+    let bound = DISCORD_RETRY_CALL_BOUND;
+    let budget = Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS);
+    tokio::time::timeout(bound, discord_send_within_wait_budget(send, method, budget))
+        .await
+        .map_err(|_| {
+            ServerSyncError::internal(format!(
+                "Discord {method} lief länger als {} ms",
+                bound.as_millis()
+            ))
+        })?
+}
+
+async fn discord_send_within_wait_budget<S, Fut>(
+    mut send: S,
+    method: &str,
+    budget: Duration,
+) -> ServerSyncResult<DiscordRestResponse>
+where
+    S: FnMut() -> Fut,
+    Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
+{
+    let mut waited = Duration::ZERO;
     for attempt in 1..=REGELWERK_DISCORD_MAX_ATTEMPTS {
         let response = send().await?;
         if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -5950,6 +5793,17 @@ where
             return Ok(response);
         }
         let retry_after = regelwerk_retry_after(&response).unwrap_or(Duration::from_secs(1));
+        if waited.saturating_add(retry_after) > budget {
+            tracing::warn!(
+                method,
+                attempt,
+                retry_after_ms = retry_after.as_millis(),
+                waited_ms = waited.as_millis(),
+                "Discord REST rate-limited; Wartebudget erschöpft"
+            );
+            return Ok(response);
+        }
+        waited += retry_after;
         tracing::warn!(
             method,
             attempt,
@@ -5983,9 +5837,8 @@ fn regelwerk_retry_after(response: &DiscordRestResponse) -> Option<Duration> {
 }
 
 fn retry_after_duration(seconds: f64) -> Option<Duration> {
-    seconds
-        .is_finite()
-        .then(|| Duration::from_secs_f64(seconds.max(0.0)))
+    (!seconds.is_nan())
+        .then(|| Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or(Duration::MAX))
 }
 
 fn retry_after_from_body(body: &[u8]) -> Option<f64> {
@@ -8201,9 +8054,6 @@ pub struct HttpState {
 }
 
 pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
-    let token = token
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     Router::new()
         .route("/serversync/snapshot", post(http_snapshot))
         .route("/serversync/rollback-export", post(http_rollback_export))
@@ -8274,7 +8124,7 @@ fn authorize(
     if !peer.ip().is_loopback() {
         return Err(ServerSyncError::forbidden("loopback requests only"));
     }
-    let Some(expected) = state.token.as_deref().filter(|token| !token.is_empty()) else {
+    let Some(expected) = state.token.as_deref() else {
         return Err(ServerSyncError::forbidden(
             "SERVERSYNC_INTERNAL_TOKEN ist nicht konfiguriert",
         ));
@@ -8752,6 +8602,141 @@ mod tests {
     type WelcomeApplyCall = bool;
     type RouterApplyCall = bool;
 
+    #[tokio::test]
+    async fn live_guild_model_fetch_makes_as_many_discord_calls_as_its_bound_allows() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let channels = calls.clone();
+        let roles = calls.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/v10/guilds/{guild}/channels",
+                axum::routing::get(move || {
+                    channels.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!([])) }
+                }),
+            )
+            .route(
+                "/api/v10/guilds/{guild}/roles",
+                axum::routing::get(move || {
+                    roles.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!([])) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let http = serenity::http::HttpBuilder::new("test-only")
+            .proxy(format!("http://{address}"))
+            .ratelimiter_disabled(true)
+            .build();
+        let model = dl_server_as_code::import::fetch_live_guild_model(&http, GUILD_ID).await;
+        server.abort();
+        assert!(model.is_ok(), "{:?}", model.err());
+        assert_eq!(calls.load(Ordering::SeqCst), LIVE_GUILD_MODEL_DISCORD_CALLS);
+    }
+
+    #[test]
+    fn panel_id_index_reads_only_what_the_key_writer_produces() {
+        let prefix = "panel_message_id_";
+        for index in [0, 1, 9, 10, usize::MAX] {
+            assert_eq!(
+                static_v2_message_index(prefix, &static_v2_message_id_key(prefix, index)),
+                Some(index)
+            );
+        }
+        for suffix in ["+1", "01", "00", "", " 1", "1 ", "-0", "1a"] {
+            assert_eq!(
+                static_v2_message_index(prefix, &format!("{prefix}{suffix}")),
+                None,
+                "{suffix:?}"
+            );
+        }
+        assert_eq!(
+            static_v2_message_index(prefix, &format!("{prefix}{prefix}1")),
+            None
+        );
+        assert_eq!(static_v2_message_index(prefix, "other_message_id_1"), None);
+        for id in [1, 9101, u64::MAX] {
+            assert_eq!(
+                parse_stored_discord_id("k", &stored_discord_id(id)).ok(),
+                Some(id)
+            );
+        }
+        for raw in [
+            "+9101",
+            "09101",
+            " 9101",
+            "9101 ",
+            "0",
+            "",
+            "-1",
+            "18446744073709551616",
+        ] {
+            assert!(parse_stored_discord_id("k", raw).is_err(), "{raw:?}");
+        }
+        let welcome_prefix = welcome_publish::welcome_message_id_key_prefix("start");
+        assert_eq!(
+            static_v2_message_index(
+                &welcome_prefix,
+                &welcome_publish::welcome_message_id_key("start", 3)
+            ),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn banner_ohne_datei_fehlt_kaputter_link_und_ordner_brechen_ab() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let banner_dir = temp.path().join("banners");
+        std::fs::create_dir_all(banner_dir.join("ordner.png")).expect("ordner");
+        std::fs::write(banner_dir.join("leer.png"), b"").expect("leer");
+        std::os::unix::fs::symlink(banner_dir.join("ziel-weg.png"), banner_dir.join("link.png"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(temp.path().join("weg"), temp.path().join("verlinkt"))
+            .expect("ancestor symlink");
+        let mut warnings = Vec::new();
+
+        let missing = read_optional_banner(
+            temp.path(),
+            "Test",
+            "banners/abwesend.png",
+            "ohne",
+            &mut warnings,
+        );
+        assert_eq!(missing, Ok(None));
+        assert_eq!(
+            warnings,
+            vec!["Test-Banner `banners/abwesend.png` fehlt; ohne".to_string()]
+        );
+
+        for (relative_path, reason) in [
+            ("banners/link.png", "ist ein Link ohne Ziel".to_string()),
+            ("banners/ordner.png", "ist keine Datei".to_string()),
+            ("banners/leer.png", "ist leer".to_string()),
+            (
+                "verlinkt/banner.png",
+                format!(
+                    "liegt unter dem Link ohne Ziel `{}`",
+                    temp.path().join("verlinkt").display()
+                ),
+            ),
+        ] {
+            let mut warnings = Vec::new();
+            let result =
+                read_optional_banner(temp.path(), "Test", relative_path, "ohne", &mut warnings);
+            assert_eq!(
+                result,
+                Err(format!("Test-Banner `{relative_path}` {reason}"))
+            );
+            assert!(warnings.is_empty(), "{relative_path}: {warnings:?}");
+        }
+    }
+
     #[derive(Clone)]
     struct FakeDiscord {
         base_url: String,
@@ -8769,6 +8754,7 @@ mod tests {
         patch_bodies: Mutex<Vec<(u64, Value)>>,
         get_overrides: Mutex<BTreeMap<u64, StatusCode>>,
         missing_on_delete: Mutex<HashSet<u64>>,
+        patch_overrides: Mutex<BTreeMap<u64, StatusCode>>,
         pin_calls: Mutex<Vec<(u64, u64)>>,
         patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
@@ -9148,6 +9134,7 @@ mod tests {
             patch_bodies: Mutex::new(Vec::new()),
             get_overrides: Mutex::new(BTreeMap::new()),
             missing_on_delete: Mutex::new(HashSet::new()),
+            patch_overrides: Mutex::new(BTreeMap::new()),
             pin_calls: Mutex::new(Vec::new()),
             patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
@@ -9264,7 +9251,7 @@ mod tests {
             .lock()
             .expect("post calls")
             .push(channel_id);
-        let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        let parsed_body = fake_request_payload(&body);
         state
             .post_bodies
             .lock()
@@ -9307,6 +9294,18 @@ mod tests {
                 (status, Json(json!({"message": "forced failure"}))).into_response()
             }
         }
+    }
+
+    fn fake_request_payload(body: &[u8]) -> Value {
+        if let Ok(parsed) = serde_json::from_slice::<Value>(body) {
+            return parsed;
+        }
+        let text = String::from_utf8_lossy(body);
+        text.split_once("name=\"payload_json\"")
+            .and_then(|(_, part)| part.split_once("\r\n\r\n"))
+            .and_then(|(_, rest)| rest.split_once("\r\n--"))
+            .and_then(|(json, _)| serde_json::from_str::<Value>(json).ok())
+            .unwrap_or(Value::Null)
     }
 
     async fn fake_discord_create_thread(
@@ -9355,21 +9354,28 @@ mod tests {
             .lock()
             .expect("patch calls")
             .push(message_id);
-        state.patch_bodies.lock().expect("patch bodies").push((
-            message_id,
-            serde_json::from_slice::<Value>(&body)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
-        ));
-        if state
-            .messages
+        let parsed_body = fake_request_payload(&body);
+        state
+            .patch_bodies
             .lock()
-            .expect("messages")
-            .contains_key(&message_id)
+            .expect("patch bodies")
+            .push((message_id, parsed_body.clone()));
+        if let Some(status) = state
+            .patch_overrides
+            .lock()
+            .expect("patch overrides")
+            .get(&message_id)
         {
-            Json(json!({"id": message_id.to_string()})).into_response()
-        } else {
-            (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
+            return (*status, Json(json!({"message": "forced failure"}))).into_response();
         }
+        let mut messages = state.messages.lock().expect("messages");
+        let Some(message) = messages.get_mut(&message_id) else {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response();
+        };
+        if let Some(components) = parsed_body.get("components") {
+            message["components"] = components.clone();
+        }
+        Json(json!({"id": message_id.to_string()})).into_response()
     }
 
     async fn fake_discord_delete_message(
@@ -9510,6 +9516,26 @@ title = "**📜 Regelwerk · Deutsche Deadlock Community**"
         std::fs::write(banner_path, b"regelwerk-banner").expect("write banner");
     }
 
+    fn build_support_for_test(
+        repo_root: &std::path::Path,
+        message_ids: &[u64],
+        payload_format: Option<&str>,
+        payload_hash: Option<&str>,
+        dry_run: bool,
+    ) -> Result<SupportPublishOutput, String> {
+        support_publish::build_support_publish_output(
+            repo_root,
+            &support_publish::SupportStoredState {
+                message_ids,
+                payload_format,
+                payload_hash,
+            },
+            FixedFundingSource::standard_funding(),
+            &FixedFundingSource::standard_options(),
+            dry_run,
+        )
+    }
+
     fn write_test_support_repo(repo_root: &std::path::Path) {
         let texts_path = repo_root.join(support_publish::SUPPORT_TEXTS_FILE);
         std::fs::create_dir_all(texts_path.parent().expect("texts parent"))
@@ -9518,7 +9544,7 @@ title = "**📜 Regelwerk · Deutsche Deadlock Community**"
             texts_path,
             r#"
 [texts]
-title = "**💜 Server unterstützen**"
+thanks = "Danke fürs Mittragen"
 "#,
         )
         .expect("write texts");
@@ -9689,11 +9715,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![rang_guide_publish::RangGuidePayloadAttachment {
                 id: 0,
                 filename: rang_guide_publish::RANG_GUIDE_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    rang_guide_publish::RANG_GUIDE_BANNER_DIR,
-                    rang_guide_publish::RANG_GUIDE_HERO_FILENAME
-                ),
+                bytes: Vec::new(),
             }],
         };
         RangGuidePublishOutput {
@@ -9774,11 +9796,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![regelwerk_publish::RegelwerkPayloadAttachment {
                 id: 0,
                 filename: regelwerk_publish::REGELWERK_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    regelwerk_publish::REGELWERK_BANNER_DIR,
-                    regelwerk_publish::REGELWERK_HERO_FILENAME
-                ),
+                bytes: Vec::new(),
             }],
         };
         regelwerk_publish::RegelwerkPublishOutput {
@@ -9828,7 +9846,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn mock_support_output(dry_run: bool) -> SupportPublishOutput {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let stored = [8401, 8402, 8403];
-        let planned = support_publish::build_support_publish_output(
+        let planned = build_support_for_test(
             &repo,
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -9836,7 +9854,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             true,
         )
         .expect("support fixture");
-        let mut output = support_publish::build_support_publish_output(
+        let mut output = build_support_for_test(
             &repo,
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -9899,11 +9917,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             attachments: vec![faq_publish::FaqPayloadAttachment {
                 id: 0,
                 filename: faq_publish::FAQ_HERO_FILENAME.to_string(),
-                relative_path: format!(
-                    "{}/{}",
-                    faq_publish::FAQ_BANNER_DIR,
-                    faq_publish::FAQ_HERO_FILENAME
-                ),
+                bytes: Vec::new(),
             }],
         };
         FaqPublishOutput {
@@ -10611,6 +10625,86 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(*attempts.lock().expect("attempts"), 2);
     }
 
+    #[tokio::test]
+    async fn regelwerk_discord_retry_gibt_429_zurueck_wenn_wartezeit_das_budget_sprengt() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_sender = Arc::clone(&attempts);
+        let over_budget =
+            dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS as f64 / 1_000.0 + 1.0;
+
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts_for_call = Arc::clone(&attempts_for_sender);
+                async move {
+                    *attempts_for_call.lock().expect("attempts") += 1;
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        json!({"retry_after": over_budget}).to_string(),
+                    ))
+                }
+            },
+            "GET",
+        )
+        .await
+        .expect("429 response");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 1);
+    }
+
+    #[test]
+    fn verlaufs_cursor_bricht_ab_wenn_discord_nicht_aelter_wird() {
+        let message = |id: &str| -> DiscordMessage {
+            serde_json::from_value(json!({"id": id, "author": {"id": "1"}})).expect("message")
+        };
+        assert_eq!(
+            history_before_cursor(None, &[message("30"), message("20")]).expect("first page"),
+            Some(20)
+        );
+        assert!(history_before_cursor(Some(20), &[message("25"), message("20")]).is_err());
+        assert_eq!(
+            history_before_cursor(Some(20), &[]).expect("empty page"),
+            None
+        );
+
+        let thread = |stamp: &str| -> DiscordThread {
+            serde_json::from_value(json!({
+                "id": "1",
+                "thread_metadata": {"archive_timestamp": stamp}
+            }))
+            .expect("thread")
+        };
+        let first = archive_before_cursor(None, &[thread("2026-11-02T10:00:00+00:00")])
+            .expect("first archive page");
+        assert!(
+            archive_before_cursor(first, &[thread("2026-11-02T10:00:00.000000+00:00")]).is_err()
+        );
+        assert!(archive_before_cursor(first, &[thread("kein Datum")]).is_err());
+        let without_metadata: DiscordThread =
+            serde_json::from_value(json!({"id": "2"})).expect("thread without metadata");
+        assert!(archive_before_cursor(first, &[without_metadata]).is_err());
+        assert_eq!(archive_before_cursor(first, &[]).expect("empty page"), None);
+
+        let archive_page = |has_more: bool, threads: Value| -> DiscordThreadPage {
+            serde_json::from_value(json!({"threads": threads, "has_more": has_more}))
+                .expect("thread page")
+        };
+        let last_page = archive_page(false, json!([{"id": "3"}]));
+        assert_eq!(
+            archive_next_cursor(first, &last_page).expect("last page needs no cursor"),
+            None
+        );
+        let more = archive_page(
+            true,
+            json!([{"id": "4", "thread_metadata": {"archive_timestamp": "2026-11-01T10:00:00+00:00"}}]),
+        );
+        assert!(archive_next_cursor(first, &more)
+            .expect("older page")
+            .is_some());
+        assert!(archive_next_cursor(first, &archive_page(true, json!([]))).is_err());
+        assert!(archive_next_cursor(first, &archive_page(true, json!([{"id": "5"}]))).is_err());
+    }
+
     #[test]
     fn regelwerk_retry_after_nutzt_header_fallback() {
         let mut response =
@@ -10623,6 +10717,117 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let retry_after = regelwerk_retry_after(&response).expect("retry-after header");
 
         assert_eq!(retry_after.as_millis(), 250);
+        for (raw, expected) in [
+            ("inf", Some(Duration::MAX)),
+            ("1e30", Some(Duration::MAX)),
+            ("-3", Some(Duration::ZERO)),
+            ("NaN", None),
+        ] {
+            response.headers.insert(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_static(raw),
+            );
+            assert_eq!(regelwerk_retry_after(&response), expected, "{raw}");
+        }
+    }
+
+    fn rate_limited_sender(
+        retry_after: f64,
+        attempts: Arc<Mutex<usize>>,
+    ) -> impl FnMut() -> std::pin::Pin<
+        Box<dyn Future<Output = ServerSyncResult<DiscordRestResponse>> + Send>,
+    > {
+        move || {
+            let attempts = Arc::clone(&attempts);
+            Box::pin(async move {
+                *attempts.lock().expect("attempts") += 1;
+                Ok(DiscordRestResponse::for_test(
+                    reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    json!({"retry_after": retry_after}).to_string(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_retry_gibt_429_bei_riesiger_wartezeit_ohne_panik_zurueck() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let response = discord_regelwerk_send_with_retry(
+            rate_limited_sender(1e30, Arc::clone(&attempts)),
+            "GET",
+        )
+        .await
+        .expect("429 response");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 1);
+    }
+
+    #[tokio::test]
+    async fn discord_retry_summiert_die_wartezeiten_gegen_das_budget() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let response = discord_send_within_wait_budget(
+            rate_limited_sender(0.006, Arc::clone(&attempts)),
+            "GET",
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("429 response");
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(*attempts.lock().expect("attempts"), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discord_retry_bound_traegt_alle_versuche_mit_vollem_wartebudget() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let sender_attempts = Arc::clone(&attempts);
+        let request = Duration::from_millis(dl_core::runtime_config::DISCORD_REQUEST_TIMEOUT_MS)
+            - Duration::from_millis(1);
+        let waits = u32::try_from(REGELWERK_DISCORD_MAX_ATTEMPTS - 1).expect("wait count");
+        let wait =
+            Duration::from_millis(dl_core::runtime_config::DISCORD_RATE_LIMIT_WAIT_BUDGET_MS)
+                / waits;
+        let started = tokio::time::Instant::now();
+
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts = Arc::clone(&sender_attempts);
+                async move {
+                    tokio::time::sleep(request).await;
+                    *attempts.lock().expect("attempts") += 1;
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::TOO_MANY_REQUESTS,
+                        json!({"retry_after": wait.as_secs_f64()}).to_string(),
+                    ))
+                }
+            },
+            "GET",
+        )
+        .await
+        .expect("429 after the last attempt");
+
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            *attempts.lock().expect("attempts"),
+            REGELWERK_DISCORD_MAX_ATTEMPTS
+        );
+        assert!(elapsed > crate::discord_pages::discord_call_timeout());
+        assert!(elapsed <= DISCORD_RETRY_CALL_BOUND, "{elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discord_retry_bricht_einen_haengenden_aufruf_am_bound_ab() {
+        let started = tokio::time::Instant::now();
+        let Err(error) = discord_regelwerk_send_with_retry(
+            std::future::pending::<ServerSyncResult<DiscordRestResponse>>,
+            "GET",
+        )
+        .await
+        else {
+            panic!("hanging call must end at the bound");
+        };
+        assert!(error.to_string().contains("lief länger als"), "{error}");
+        assert!(started.elapsed() >= DISCORD_RETRY_CALL_BOUND);
     }
 
     #[test]
@@ -11421,10 +11626,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
     #[tokio::test]
     async fn history_scans_melden_den_abbruch_nach_der_letzten_seite() {
-        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
-        for (count, expected_ids, expected_truncated) in
-            [(cap - 1, cap - 1, false), (cap + 1, cap, true)]
-        {
+        let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
+        for (count, expected_ids, expected_truncated) in [
+            (cap - 1, cap - 1, false),
+            (cap, cap, false),
+            (cap + 1, cap, true),
+        ] {
             let fake = spawn_fake_discord(42, own_history(count), Vec::new()).await;
             let service = service_without_database(fake.base_url.clone());
 
@@ -11440,6 +11647,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .await
                 .expect("legacy scan");
             assert_eq!(legacy.truncated, expected_truncated);
+
+            let welcome = service.fetch_welcome_marker_message_ids(7, 42).await;
+            let regelwerk = service.fetch_regelwerk_bot_messages(42, None).await;
+            assert_eq!(welcome.is_err(), expected_truncated, "{:?}", welcome.err());
+            assert_eq!(
+                regelwerk.is_err(),
+                expected_truncated,
+                "{:?}",
+                regelwerk.err()
+            );
+            if let Ok(regelwerk) = regelwerk {
+                assert_eq!(regelwerk.len() as u64, expected_ids);
+            }
         }
     }
 
@@ -11550,8 +11770,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let pay_row = pay_children.last().expect("pay buttons");
         assert_eq!(pay_row["type"], 1);
         assert_eq!(
-            pay_row["components"][0]["url"],
-            support_publish::SUPPORT_DONATE_URL_DEFAULT
+            pay_row["components"][0]["custom_id"],
+            support_publish::SUPPORT_BUTTON_BECOME
         );
 
         let confirmed = app
@@ -11944,6 +12164,108 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
+    async fn service_v2_edit_teilfehler_loescht_neu_gepostete_und_laesst_altes_kv_stehen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let long_step2 = "x".repeat(2700);
+        write_test_rang_repo(repo.path(), Some(&long_step2));
+        let planned = rang_guide_publish::build_rang_guide_publish_output(
+            repo.path(),
+            &[9101, 9102, 9103],
+            Some(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT),
+            Some("old-hash"),
+            true,
+        )
+        .expect("planned");
+        let stored: Vec<u64> = [9101_u64, 9102, 9103]
+            .into_iter()
+            .take(planned.messages.len())
+            .collect();
+        assert!(stored.len() >= 2, "test setup needs at least two posts");
+        for (index, message_id) in stored.iter().enumerate() {
+            set_serversync_kv(
+                db.pool(),
+                &rang_guide_publish::rang_guide_message_id_key(index),
+                &message_id.to_string(),
+            )
+            .await;
+        }
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            "old-hash",
+        )
+        .await;
+        let old_messages = stored
+            .iter()
+            .zip(planned.messages.iter())
+            .map(|(message_id, message)| {
+                fake_discord_message(
+                    *message_id,
+                    42,
+                    rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let fake = spawn_fake_discord(42, old_messages, vec![FakePostResponse::Ok(9201)]).await;
+        fake.state
+            .patch_overrides
+            .lock()
+            .expect("patch overrides")
+            .extend([
+                (stored[0], StatusCode::NOT_FOUND),
+                (stored[1], StatusCode::FORBIDDEN),
+            ]);
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let err = service
+            .rang_guide_apply(true)
+            .await
+            .expect_err("failed edit must fail");
+
+        assert!(err.to_string().contains("PATCH"), "{err}");
+        assert_eq!(fake.state.post_calls.lock().expect("post calls").len(), 1);
+        assert_eq!(
+            fake.state
+                .delete_calls
+                .lock()
+                .expect("delete calls")
+                .as_slice(),
+            &[9201]
+        );
+        for (index, message_id) in stored.iter().enumerate() {
+            assert_eq!(
+                get_serversync_kv(
+                    db.pool(),
+                    &rang_guide_publish::rang_guide_message_id_key(index)
+                )
+                .await,
+                Some(message_id.to_string())
+            );
+        }
+        assert_eq!(
+            get_serversync_kv(db.pool(), rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+                .await
+                .as_deref(),
+            Some("old-hash")
+        );
+    }
+
+    #[tokio::test]
     async fn service_v2_stored_delete_loescht_fremd_autor_message_nicht() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -12159,7 +12481,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let repo = tempfile::tempdir().expect("repo");
         write_test_support_repo(repo.path());
         let stored = [9701_u64, 9702, 9703];
-        let planned = support_publish::build_support_publish_output(
+        let planned = build_support_for_test(
             repo.path(),
             &stored,
             Some(support_publish::SUPPORT_PAYLOAD_FORMAT),
@@ -12210,6 +12532,456 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .iter()
             .all(|message| message.action != "no_op"));
         assert_eq!(output.posted_message_ids.len(), stored.len());
+    }
+
+    fn patches_since(fake: &FakeDiscord, before: usize) -> Vec<String> {
+        fake.state
+            .patch_bodies
+            .lock()
+            .expect("patch bodies")
+            .iter()
+            .skip(before)
+            .map(|(_, body)| body.to_string())
+            .collect()
+    }
+
+    fn support_perks_shown(fake: &FakeDiscord, message_id: u64) -> Option<bool> {
+        let perks_heading = support_publish::SUPPORT_PERKS
+            .lines()
+            .find(|line| line.starts_with("**"))
+            .expect("perks line");
+        fake.state
+            .messages
+            .lock()
+            .expect("messages")
+            .get(&message_id)
+            .map(|message| message["components"].to_string().contains(perks_heading))
+    }
+
+    fn patch_count(fake: &FakeDiscord) -> usize {
+        fake.state.patch_bodies.lock().expect("patch bodies").len()
+    }
+
+    async fn delete_serversync_kv_for_test(pool: &PgPool, key: &str) {
+        dl_central_db::kv::delete(pool, SERVERSYNC_KV_NS, key)
+            .await
+            .expect("delete kv");
+    }
+
+    #[tokio::test]
+    async fn gespeicherte_panel_ids_lesen_und_ersetzen_nur_was_der_schreiber_erzeugt() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            "http://127.0.0.1:9".to_string(),
+            repo.path().to_path_buf(),
+        );
+        let prefix = "stored_id_probe_message_id_";
+        let first = static_v2_message_id_key(prefix, 0);
+        let foreign = [
+            "stored_id_probe_message_id_x",
+            "stored_id_probe_messageXid_0",
+        ];
+        for key in foreign {
+            dl_central_db::kv::set(db.pool(), SERVERSYNC_KV_NS, key, "bleibt")
+                .await
+                .expect("set foreign");
+        }
+        dl_central_db::kv::set(db.pool(), SERVERSYNC_KV_NS, &first, "+9811")
+            .await
+            .expect("set id");
+        assert!(service.load_static_v2_message_ids(prefix).await.is_err());
+
+        service
+            .replace_static_v2_message_ids_and_state(prefix, &[9811, 9812], &[])
+            .await
+            .expect("replace");
+        assert_eq!(
+            service
+                .load_static_v2_message_ids(prefix)
+                .await
+                .expect("ids"),
+            vec![9811, 9812]
+        );
+        for key in foreign {
+            assert_eq!(
+                dl_central_db::kv::get(db.pool(), SERVERSYNC_KV_NS, key)
+                    .await
+                    .expect("get foreign")
+                    .as_deref(),
+                Some("bleibt"),
+                "{key}"
+            );
+        }
+        for key in foreign
+            .into_iter()
+            .map(str::to_string)
+            .chain([first, static_v2_message_id_key(prefix, 1)])
+        {
+            delete_serversync_kv_for_test(db.pool(), &key).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn support_panel_wartet_nie_auf_die_eigene_sperre_und_meldet_belegt() {
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = service_without_database(fake.base_url.clone());
+        let claim = service.support_panel_lock.try_lock().expect("frei");
+        let wait = std::time::Duration::from_secs(1);
+
+        let refresh = tokio::time::timeout(wait, service.support_funding_refresh())
+            .await
+            .expect("wartet nicht")
+            .expect("refresh");
+        assert_eq!(refresh, FundingRefresh::Skipped(SUPPORT_PANEL_BUSY));
+        let apply = tokio::time::timeout(wait, service.support_apply(false))
+            .await
+            .expect("wartet nicht");
+        assert!(apply
+            .expect_err("belegt")
+            .to_string()
+            .contains(SUPPORT_PANEL_BUSY));
+        assert_eq!(patch_count(&fake), 0);
+
+        drop(claim);
+        assert!(service.support_panel_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn service_support_monatsziel_und_optionen_folgen_dem_veroeffentlichten_stand() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(
+            42,
+            Vec::new(),
+            vec![
+                FakePostResponse::Ok(9801),
+                FakePostResponse::Ok(9802),
+                FakePostResponse::Ok(9803),
+            ],
+        )
+        .await;
+        let source = Arc::new(FixedFundingSource::standard());
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source.clone(),
+        );
+
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+        );
+        let blocked = service.support_apply(true).await;
+        assert!(blocked.is_err());
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        let dry_run = service.support_apply(false).await.expect("dry-run");
+        assert!(dry_run
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Steam Bot nicht erreichbar")));
+
+        source.set(
+            Ok(FixedFundingSource::standard_funding()),
+            FixedFundingSource::standard_options(),
+        );
+        let published = service.support_apply(true).await.expect("apply");
+        assert_eq!(published.posted_message_ids, vec![9801, 9802, 9803]);
+        let stored_hash = get_serversync_kv(db.pool(), support_publish::SUPPORT_PAYLOAD_HASH_KEY)
+            .await
+            .expect("hash");
+        assert_eq!(stored_hash, published.payload_hash);
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(FixedFundingSource::standard_funding().to_kv().as_str())
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            FixedFundingSource::standard_options().to_kv().ok()
+        );
+
+        delete_serversync_kv_for_test(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY).await;
+        delete_serversync_kv_for_test(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await;
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("kein veröffentlichter Monatsstand")
+        );
+        let patches_before_repair = patch_count(&fake);
+        let repaired = service.support_apply(true).await.expect("second apply");
+        assert_eq!(repaired.payload_hash, stored_hash);
+        assert!(repaired.posted_message_ids.is_empty());
+        assert!(repaired
+            .messages
+            .iter()
+            .all(|message| message.action == "no_op"));
+        assert_eq!(patch_count(&fake), patches_before_repair);
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(FixedFundingSource::standard_funding().to_kv().as_str())
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            FixedFundingSource::standard_options().to_kv().ok()
+        );
+
+        let raised = support_publish::SupportFunding {
+            raised_cents: 5_000,
+            goal_cents: FixedFundingSource::standard_funding().goal_cents,
+        };
+        source.set(Ok(raised), FixedFundingSource::standard_options());
+        let before = patch_count(&fake);
+        let calls_before = fake.state.patch_calls.lock().expect("patch calls").len();
+        let refreshed = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(refreshed, FundingRefresh::Updated);
+        assert_eq!(
+            fake.state.patch_calls.lock().expect("patch calls")[calls_before..],
+            [9803]
+        );
+        assert_eq!(patches_since(&fake, before).len(), 1);
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(raised.to_kv().as_str())
+        );
+        let refreshed_hash =
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PAYLOAD_HASH_KEY).await;
+        assert_ne!(refreshed_hash.as_deref(), Some(stored_hash.as_str()));
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Unchanged
+        );
+
+        let mut changed_tiers = FixedFundingSource::standard_options();
+        changed_tiers.tiers_eur = vec![5, 15];
+        let tier_text = support_publish::format_tier_list(&changed_tiers.tiers_eur);
+        source.set(Ok(raised), changed_tiers.clone());
+        let before = patch_count(&fake);
+        let tiers_refresh = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(tiers_refresh, FundingRefresh::Updated);
+        assert!(patches_since(&fake, before)
+            .iter()
+            .any(|body| body.contains(&tier_text)));
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            changed_tiers.to_kv().ok()
+        );
+
+        let mut without_role = changed_tiers.clone();
+        without_role.role_grant = false;
+        source.set(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            without_role.clone(),
+        );
+        let before = patch_count(&fake);
+        assert_eq!(support_perks_shown(&fake, 9801), Some(true));
+        let options_only = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(options_only, FundingRefresh::Updated);
+        assert!(!patches_since(&fake, before).is_empty());
+        assert_eq!(support_perks_shown(&fake, 9801), Some(false));
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_PANEL_OPTIONS_KEY).await,
+            without_role.to_kv().ok()
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(raised.to_kv().as_str())
+        );
+        assert!(service.support_funding_refresh().await.is_err());
+
+        let new_goal = raised.goal_cents + 1_000;
+        source.set_goal(new_goal);
+        let goal_text = support_publish::format_euro(new_goal);
+        let before = patch_count(&fake);
+        let goal_only = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(goal_only, FundingRefresh::Updated);
+        assert!(patches_since(&fake, before)
+            .iter()
+            .any(|body| body.contains(&goal_text)));
+        let with_new_goal = support_publish::SupportFunding {
+            raised_cents: raised.raised_cents,
+            goal_cents: new_goal,
+        };
+        assert_eq!(
+            get_serversync_kv(db.pool(), support_publish::SUPPORT_FUNDING_LIVE_KEY)
+                .await
+                .as_deref(),
+            Some(with_new_goal.to_kv().as_str())
+        );
+        assert!(service.support_funding_refresh().await.is_err());
+
+        source.set(Ok(with_new_goal), changed_tiers.clone());
+        let before = patch_count(&fake);
+        let restored = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(restored, FundingRefresh::Updated);
+        assert!(!patches_since(&fake, before).is_empty());
+        assert_eq!(support_perks_shown(&fake, 9801), Some(true));
+
+        std::fs::write(
+            repo.path().join(support_publish::SUPPORT_TEXTS_FILE),
+            "[texts]\nthanks = \"Danke, dass du mitträgst\"\n",
+        )
+        .expect("rewrite texts");
+        let changed_tiers_for_twitch = changed_tiers.clone();
+        source.set(
+            Ok(support_publish::SupportFunding {
+                raised_cents: 6_000,
+                goal_cents: new_goal,
+            }),
+            changed_tiers,
+        );
+        let before = patch_count(&fake);
+        let text_refresh = service.support_funding_refresh().await.expect("refresh");
+        assert_eq!(
+            text_refresh,
+            FundingRefresh::Skipped("Panel-Text weicht vom veröffentlichten Stand ab")
+        );
+        assert_eq!(patch_count(&fake), before);
+
+        std::fs::write(
+            repo.path().join(support_publish::SUPPORT_TEXTS_FILE),
+            "[texts]\nthanks = \"Danke fürs Mittragen\"\ntwitch = \"**Twitch-Sub.** Zählt auch.\"\n",
+        )
+        .expect("hidden twitch text without placeholder");
+        let mut with_twitch = changed_tiers_for_twitch;
+        with_twitch.twitch = true;
+        source.set(Ok(with_new_goal), with_twitch);
+        let before = patch_count(&fake);
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped(SUPPORT_REFRESH_NEW_WARNINGS)
+        );
+        assert_eq!(patch_count(&fake), before);
+    }
+
+    #[tokio::test]
+    async fn service_support_refresh_vergisst_eine_verschwundene_nachricht_statt_sie_endlos_zu_suchen(
+    ) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(
+            42,
+            Vec::new(),
+            vec![
+                FakePostResponse::Ok(9811),
+                FakePostResponse::Ok(9812),
+                FakePostResponse::Ok(9813),
+            ],
+        )
+        .await;
+        let source = Arc::new(FixedFundingSource::standard());
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source.clone(),
+        );
+        service.support_apply(true).await.expect("apply");
+        fake.state.messages.lock().expect("messages").remove(&9813);
+        source.set(
+            Ok(support_publish::SupportFunding {
+                raised_cents: 7_000,
+                goal_cents: FixedFundingSource::standard_funding().goal_cents,
+            }),
+            FixedFundingSource::standard_options(),
+        );
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("Panel-Nachricht nicht gefunden")
+        );
+        assert_eq!(
+            service
+                .load_static_v2_message_ids(support_publish::SUPPORT_MESSAGE_ID_PREFIX)
+                .await
+                .expect("ids"),
+            vec![9811, 9812]
+        );
+        let before = patch_count(&fake);
+        assert_eq!(
+            service.support_funding_refresh().await.expect("refresh"),
+            FundingRefresh::Skipped("Panel-Nachrichten fehlen")
+        );
+        assert_eq!(patch_count(&fake), before);
+        let repaired = service.support_apply(true).await.expect("repost");
+        assert_eq!(repaired.posted_message_ids.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn service_support_monatsziel_faellt_auf_den_veroeffentlichten_stand_mit_aktuellem_ziel_zurueck(
+    ) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_support_repo(repo.path());
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let configured_goal = FixedFundingSource::standard_funding().goal_cents + 1_234;
+        let source = Arc::new(FixedFundingSource::new(
+            Err("Steam Bot nicht erreichbar".to_string()),
+            FixedFundingSource::standard_options(),
+            configured_goal,
+        ));
+        let service = ServerSyncService::new_for_test_with_funding(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+            source,
+        );
+        let published = support_publish::SupportFunding {
+            raised_cents: 4_321,
+            goal_cents: FixedFundingSource::standard_funding().goal_cents,
+        };
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            &published.to_kv(),
+        )
+        .await;
+
+        let preview = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(
+            preview.funding,
+            support_publish::SupportFunding {
+                raised_cents: published.raised_cents,
+                goal_cents: configured_goal,
+            }
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&format!(
+                "zuletzt veröffentlichten Stand von {},",
+                support_publish::format_euro(4321)
+            ))));
+
+        set_serversync_kv(
+            db.pool(),
+            support_publish::SUPPORT_FUNDING_LIVE_KEY,
+            "kaputt",
+        )
+        .await;
+        let unreadable = service.support_apply(false).await.expect("dry-run");
+        assert_eq!(unreadable.funding.raised_cents, 0);
+        assert!(unreadable
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("veröffentlichter Stand unlesbar")));
     }
 
     async fn seed_static_panel_kv(
@@ -12473,7 +13245,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 }
             }
 
-            let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+            let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
             for index in 0..stored.len() {
                 dl_central_db::kv::delete(db.pool(), SERVERSYNC_KV_NS, &$id_key(index))
                     .await
@@ -12583,7 +13355,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         static_panel_scan_edges!(
             write_test_support_repo,
-            support_publish::build_support_publish_output,
+            build_support_for_test,
             support_apply,
             support_publish::support_message_id_key,
             support_publish::SUPPORT_PAYLOAD_FORMAT_KEY,
@@ -13476,7 +14248,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             );
         }
 
-        let cap = HISTORY_SCAN_MAX_PAGES as u64 * 100;
+        let cap = (HISTORY_SCAN_MAX_PAGES * DISCORD_HISTORY_PAGE_LIMIT) as u64;
         let planned = seed_voice_ux_matching_panel(db.pool(), repo.path()).await;
         let mut long_full = own_history(cap + 1);
         long_full.extend(voice_ux_fake_panel_messages(&planned));

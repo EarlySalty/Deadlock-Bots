@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use brain_contracts::image::{
@@ -16,6 +17,10 @@ pub const IMAGE_ONLY_QUESTION: &str = "Was sagst du zu meinem Bild?";
 const MAX_DECODE_EDGE: u32 = 12_000;
 const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
 const MIN_EDGE: u32 = 384;
+pub const IMAGE_COUNT_RANGE: RangeInclusive<usize> = 1..=MAX_QUERY_IMAGES;
+pub const DOWNLOAD_BYTES_MIN: u64 = 1;
+pub const EDGE_RANGE: RangeInclusive<u32> = MIN_EDGE..=MAX_DECODE_EDGE;
+pub const JPEG_QUALITY_RANGE: RangeInclusive<u8> = 40..=95;
 const MAX_REMEMBERED: usize = 512;
 const MAX_REMEMBERED_BYTES: usize = 64 * 1024 * 1024;
 
@@ -90,10 +95,14 @@ impl Default for ImageLimits {
 impl ImageLimits {
     fn bounded(self) -> Self {
         Self {
-            max_images: self.max_images.clamp(1, MAX_QUERY_IMAGES),
-            max_download_bytes: self.max_download_bytes.max(1),
-            max_edge: self.max_edge.max(MIN_EDGE),
-            jpeg_quality: self.jpeg_quality.clamp(40, 95),
+            max_images: self
+                .max_images
+                .clamp(*IMAGE_COUNT_RANGE.start(), *IMAGE_COUNT_RANGE.end()),
+            max_download_bytes: self.max_download_bytes.max(DOWNLOAD_BYTES_MIN),
+            max_edge: self.max_edge.clamp(*EDGE_RANGE.start(), *EDGE_RANGE.end()),
+            jpeg_quality: self
+                .jpeg_quality
+                .clamp(*JPEG_QUALITY_RANGE.start(), *JPEG_QUALITY_RANGE.end()),
             followup_ttl: self.followup_ttl,
         }
     }

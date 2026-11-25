@@ -1932,6 +1932,111 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     let migration_2026100114_signature_after_first =
         migration_row_signature(&pool, 2026100114, "streamer suggestions").await;
 
+    let mut reference = pool.begin().await.expect("begin index reference");
+    sqlx::query(
+        "CREATE TEMP TABLE billing_index_reference (LIKE steam.plus_billing_events) ON COMMIT DROP",
+    )
+    .execute(&mut *reference)
+    .await
+    .expect("create index reference table");
+    for (index_name, method, key) in [
+        (
+            "plus_billing_events_object_id_idx",
+            "btree",
+            "object_id".to_string(),
+        ),
+        (
+            "plus_billing_events_subscription_idx",
+            "hash",
+            "(payload #>> '{data,object,subscription}')".to_string(),
+        ),
+        (
+            "plus_billing_events_subscription_object_idx",
+            "hash",
+            "(payload #>> '{data,object,subscription,id}')".to_string(),
+        ),
+        (
+            "plus_billing_events_invoice_subscription_idx",
+            "hash",
+            "(payload #>> '{data,object,parent,subscription_details,subscription}')".to_string(),
+        ),
+        (
+            "plus_billing_events_invoice_subscription_object_idx",
+            "hash",
+            "(payload #>> '{data,object,parent,subscription_details,subscription,id}')".to_string(),
+        ),
+        (
+            "plus_billing_events_payment_intent_idx",
+            "hash",
+            "(payload #>> '{data,object,payment_intent}')".to_string(),
+        ),
+        (
+            "plus_billing_events_payment_intent_object_idx",
+            "hash",
+            "(payload #>> '{data,object,payment_intent,id}')".to_string(),
+        ),
+    ] {
+        let reference_name = format!("reference_{index_name}");
+        sqlx::query(&format!(
+            "CREATE INDEX {reference_name} ON billing_index_reference USING {method} ({key})"
+        ))
+        .execute(&mut *reference)
+        .await
+        .unwrap_or_else(|error| panic!("{reference_name}: {error}"));
+        let shape = "SELECT am.amname, index.indnatts::int4, index.indisunique,
+                            index.indpred IS NULL, pg_get_indexdef(index.indexrelid, 1, false),
+                            (SELECT opcname::text FROM pg_opclass WHERE oid = index.indclass[0]),
+                            (SELECT collname::text FROM pg_collation
+                              WHERE oid = index.indcollation[0])
+                       FROM pg_index index
+                       JOIN pg_class class ON class.oid = index.indexrelid
+                       JOIN pg_am am ON am.oid = class.relam
+                      WHERE index.indexrelid = to_regclass($1)";
+        type Shape = (
+            String,
+            i32,
+            bool,
+            bool,
+            String,
+            Option<String>,
+            Option<String>,
+        );
+        let actual: Option<Shape> = sqlx::query_as(shape)
+            .bind(format!("steam.{index_name}"))
+            .fetch_optional(&mut *reference)
+            .await
+            .expect("read billing index");
+        let expected: Shape = sqlx::query_as(shape)
+            .bind(&reference_name)
+            .fetch_one(&mut *reference)
+            .await
+            .expect("read reference index");
+        let actual = actual.unwrap_or_else(|| panic!("{index_name} fehlt"));
+        assert_eq!(actual, expected, "{index_name}");
+        assert_eq!(
+            (actual.0.as_str(), actual.1, actual.2, actual.3),
+            (method, 1, false, true),
+            "{index_name}"
+        );
+    }
+    reference.rollback().await.expect("drop index reference");
+    let oversized = sqlx::query(
+        "INSERT INTO steam.plus_billing_events (stripe_event_id, event_type, object_id, payload)
+         SELECT 'evt_oversized', 'invoice.paid', NULL,
+                jsonb_build_object('data', jsonb_build_object('object', jsonb_build_object(
+                    'subscription', big, 'payment_intent', big)))
+           FROM (SELECT string_agg(md5(i::text), '') AS big
+                   FROM generate_series(1, 400) AS i) AS value",
+    )
+    .execute(&pool)
+    .await
+    .expect("expanded payload larger than a btree row");
+    assert_eq!(oversized.rows_affected(), 1);
+    sqlx::query("DELETE FROM steam.plus_billing_events WHERE stripe_event_id = 'evt_oversized'")
+        .execute(&pool)
+        .await
+        .expect("remove oversized billing row");
+
     run_migrator(&db_dsn, "second run");
 
     let migration_count_after_second = scalar_i64(

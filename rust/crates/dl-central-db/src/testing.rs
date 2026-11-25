@@ -22,6 +22,22 @@ pub struct TestDb {
     db_name: String,
 }
 
+pub async fn block_member(
+    pool: &PgPool,
+    user_id: i64,
+    deleted: bool,
+) -> Result<(), CentralDbError> {
+    sqlx::query(
+        "INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
+         VALUES ($1, NOT $2, CASE WHEN $2 THEN now() END, 'test', now())",
+    )
+    .bind(user_id)
+    .bind(deleted)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn set_scrim_runtime_turniere(pool: &PgPool) -> Result<(), CentralDbError> {
     for (expected_epoch, mode) in [(0_i64, "draining"), (1_i64, "turniere")] {
         let applied: bool = sqlx::query_scalar(

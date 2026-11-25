@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use dl_server_as_code::{ChannelKind, ChannelSpec, GuildModel, OverwriteKey, RoleSpec, TargetKind};
@@ -523,7 +521,7 @@ pub struct WelcomeTeamMember {
     pub bot: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomePublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -541,7 +539,7 @@ pub struct WelcomePublishOutput {
     pub edited_message_ids: BTreeMap<String, Vec<u64>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeTeamRoleOutput {
     pub key: String,
     pub aliases: Vec<String>,
@@ -551,7 +549,7 @@ pub struct WelcomeTeamRoleOutput {
     pub member_mentions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeTeamBotOutput {
     pub user_id: u64,
     pub mention: String,
@@ -559,7 +557,7 @@ pub struct WelcomeTeamBotOutput {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeSectionOutput {
     pub section_id: String,
     pub message_index: usize,
@@ -572,33 +570,33 @@ pub struct WelcomeSectionOutput {
     pub payload: WelcomeMessagePayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeMessagePayload {
     pub flags: u64,
     pub allowed_mentions: WelcomeAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<WelcomePayloadAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomeAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WelcomePayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -675,19 +673,13 @@ fn load_welcome_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedWelcomeConfig, String> {
     let path = repo_root.join(WELCOME_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedWelcomeConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
+        .map_err(|reason| format!("Welcome-Textdatei `{WELCOME_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedWelcomeConfig::from_defaults());
     };
 
     let file = toml::from_str::<WelcomeTextsToml>(&raw).map_err(|err| {
@@ -850,7 +842,10 @@ pub fn welcome_legacy_message_id_key(section_id: &str) -> String {
 }
 
 pub fn welcome_message_id_key(section_id: &str, message_index: usize) -> String {
-    format!("welcome_message_id_{section_id}_{message_index}")
+    crate::serversync::static_v2_message_id_key(
+        &welcome_message_id_key_prefix(section_id),
+        message_index,
+    )
 }
 
 pub fn welcome_message_id_key_prefix(section_id: &str) -> String {
@@ -934,7 +929,7 @@ pub fn build_welcome_publish_output(
     let urls = &config.urls;
     let team_roles = resolve_team_roles(model, team_members, &mut warnings);
     let bot_team = bot_team_output(bot_user_id, texts, &mut warnings);
-    let navigation_messages = navigation_messages(model, repo_root, texts, &mut warnings);
+    let mut navigation_messages = navigation_messages(model, repo_root, texts, &mut warnings)?;
     let quickstart_buttons = quickstart_buttons(model, texts, urls)?;
     let hero_message_id = stored_message_ids
         .get("hero")
@@ -949,8 +944,8 @@ pub fn build_welcome_publish_output(
     let mut sections = Vec::new();
     for definition in WELCOME_SECTION_DEFINITIONS {
         let built_messages = match definition.id {
-            "hero" => vec![hero_message(repo_root, texts, definition, &mut warnings)],
-            "navigation" => navigation_messages.clone(),
+            "hero" => vec![hero_message(repo_root, texts, definition, &mut warnings)?],
+            "navigation" => std::mem::take(&mut navigation_messages),
             "team" => vec![team_message(
                 repo_root,
                 &team_roles,
@@ -958,15 +953,15 @@ pub fn build_welcome_publish_output(
                 texts,
                 definition,
                 &mut warnings,
-            )],
-            "paten" => vec![paten_message(repo_root, texts, definition, &mut warnings)],
+            )?],
+            "paten" => vec![paten_message(repo_root, texts, definition, &mut warnings)?],
             "socials" => vec![socials_message(
                 repo_root,
                 texts,
                 urls,
                 definition,
                 &mut warnings,
-            )],
+            )?],
             "quickstart" => vec![quickstart_message(
                 repo_root,
                 texts,
@@ -974,7 +969,7 @@ pub fn build_welcome_publish_output(
                 quickstart_buttons.clone(),
                 hero_jump_url.as_deref(),
                 &mut warnings,
-            )],
+            )?],
             other => return Err(format!("Unbekannte Welcome-Sektion `{other}`")),
         };
         append_section_outputs(
@@ -1134,19 +1129,24 @@ fn hero_message(
     texts: &ResolvedWelcomeTextTable,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> WelcomeBuiltMessage {
-    let banner = section_banner(repo_root, definition, warnings);
+) -> Result<WelcomeBuiltMessage, String> {
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.hero, texts.hero_intro
     )));
-    WelcomeBuiltMessage {
+    Ok(WelcomeBuiltMessage {
         banner,
         payload: welcome_payload(vec![container(components)], attachments),
-    }
+    })
 }
 
 fn team_message(
@@ -1156,11 +1156,16 @@ fn team_message(
     texts: &ResolvedWelcomeTextTable,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> WelcomeBuiltMessage {
-    let banner = section_banner(repo_root, definition, warnings);
+) -> Result<WelcomeBuiltMessage, String> {
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
 
     let mut role_blocks = team_roles
         .iter()
@@ -1201,10 +1206,10 @@ fn team_message(
         components.push(text_display(block));
     }
 
-    WelcomeBuiltMessage {
+    Ok(WelcomeBuiltMessage {
         banner,
         payload: welcome_payload(vec![container(components)], attachments),
-    }
+    })
 }
 
 fn paten_message(
@@ -1212,20 +1217,25 @@ fn paten_message(
     texts: &ResolvedWelcomeTextTable,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> WelcomeBuiltMessage {
-    let banner = section_banner(repo_root, definition, warnings);
+) -> Result<WelcomeBuiltMessage, String> {
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.paten, texts.paten_intro
     )));
 
-    WelcomeBuiltMessage {
+    Ok(WelcomeBuiltMessage {
         banner,
         payload: welcome_payload(vec![container(components)], attachments),
-    }
+    })
 }
 
 fn socials_message(
@@ -1234,11 +1244,16 @@ fn socials_message(
     urls: &ResolvedWelcomeLinkUrls,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> WelcomeBuiltMessage {
-    let banner = section_banner(repo_root, definition, warnings);
+) -> Result<WelcomeBuiltMessage, String> {
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(texts.socials_intro.clone()));
     components.push(button_row(vec![
         link_button(&texts.buttons.website, &urls.website),
@@ -1247,10 +1262,10 @@ fn socials_message(
         link_button(&texts.buttons.server_invite, &urls.server_invite),
     ]));
 
-    WelcomeBuiltMessage {
+    Ok(WelcomeBuiltMessage {
         banner,
         payload: welcome_payload(vec![container(components)], attachments),
-    }
+    })
 }
 
 fn quickstart_message(
@@ -1260,28 +1275,32 @@ fn quickstart_message(
     primary_buttons: Vec<Value>,
     hero_jump_url: Option<&str>,
     warnings: &mut Vec<String>,
-) -> WelcomeBuiltMessage {
-    let banner = section_banner(repo_root, definition, warnings);
+) -> Result<WelcomeBuiltMessage, String> {
+    let (banner, banner_bytes) = section_banner(repo_root, definition, warnings)?;
     let mut attachments = Vec::new();
     let mut components = Vec::new();
-    push_media_gallery_for_banner(&mut components, &mut attachments, banner.as_ref());
+    push_media_gallery_for_banner(
+        &mut components,
+        &mut attachments,
+        banner.as_ref(),
+        banner_bytes,
+    );
     components.push(text_display(format!(
         "## {}\n{}",
         texts.section_titles.quickstart, texts.quickstart_intro
     )));
     components.extend(quickstart_components(primary_buttons, hero_jump_url));
 
-    WelcomeBuiltMessage {
+    Ok(WelcomeBuiltMessage {
         banner,
         payload: welcome_payload(vec![container(components)], attachments),
-    }
+    })
 }
 
 #[derive(Debug, Clone)]
 struct NavigationCategoryMessage {
     category_name: String,
-    divider_filename: Option<String>,
-    divider_relative_path: Option<String>,
+    divider: Option<WelcomePayloadAttachment>,
     channel_list: String,
 }
 
@@ -1308,13 +1327,24 @@ impl NavigationChunk {
     fn can_add(&self, category: &NavigationCategoryMessage) -> bool {
         self.text_chars + category.text_chars() <= NAVIGATION_TEXT_CHAR_BUDGET
             && self.component_count + category.component_count() <= NAVIGATION_COMPONENT_BUDGET
-            && self.attachments.len() + usize::from(category.divider_filename.is_some())
+            && self.attachments.len() + usize::from(category.divider.is_some())
                 <= NAVIGATION_ATTACHMENT_BUDGET
     }
 
-    fn push_header(&mut self, banner: Option<&WelcomeBannerOutput>, title: &str, intro: &str) {
+    fn push_header(
+        &mut self,
+        banner: &WelcomeBannerOutput,
+        bytes: Option<Vec<u8>>,
+        title: &str,
+        intro: &str,
+    ) {
         let mut container_components = Vec::new();
-        push_media_gallery_for_banner(&mut container_components, &mut self.attachments, banner);
+        push_media_gallery_for_banner(
+            &mut container_components,
+            &mut self.attachments,
+            Some(banner),
+            bytes,
+        );
         if container_components.is_empty() {
             let content = format!("## {title}");
             self.text_chars += content.chars().count();
@@ -1336,24 +1366,21 @@ impl NavigationChunk {
         self.components.push(component);
     }
 
-    fn push_category(&mut self, category: &NavigationCategoryMessage) {
+    fn push_category(&mut self, category: NavigationCategoryMessage) {
+        self.text_chars += category.text_chars();
         let mut container_components = Vec::new();
-        if let (Some(filename), Some(relative_path)) = (
-            category.divider_filename.as_deref(),
-            category.divider_relative_path.as_deref(),
-        ) {
+        if let Some(divider) = category.divider {
             push_media_gallery_for_attachment(
                 &mut container_components,
                 &mut self.attachments,
-                filename,
-                relative_path,
+                &divider.filename,
+                divider.bytes,
             );
         } else {
             container_components.push(text_display(format!("### {}", category.category_name)));
         }
-        container_components.push(text_display(category.channel_list.clone()));
+        container_components.push(text_display(category.channel_list));
         let component = container(container_components);
-        self.text_chars += category.text_chars();
         self.component_count += count_component(&component);
         self.components.push(component);
         self.category_count += 1;
@@ -1369,7 +1396,7 @@ impl NavigationChunk {
 
 impl NavigationCategoryMessage {
     fn title_chars(&self) -> usize {
-        if self.divider_filename.is_some() {
+        if self.divider.is_some() {
             0
         } else {
             format!("### {}", self.category_name).chars().count()
@@ -1390,12 +1417,13 @@ fn navigation_messages(
     repo_root: &Path,
     texts: &ResolvedWelcomeTextTable,
     warnings: &mut Vec<String>,
-) -> Vec<WelcomeBuiltMessage> {
-    let header_banner = Some(welcome_banner(repo_root, "navigation.png", warnings));
-    let categories = navigation_category_messages(model, repo_root, texts, warnings);
+) -> Result<Vec<WelcomeBuiltMessage>, String> {
+    let (header, header_bytes) = welcome_banner(repo_root, "navigation.png", warnings)?;
+    let categories = navigation_category_messages(model, repo_root, texts, warnings)?;
     let mut first = NavigationChunk::new();
     first.push_header(
-        header_banner.as_ref(),
+        &header,
+        header_bytes,
         &texts.section_titles.navigation,
         &texts.navigation_intro,
     );
@@ -1403,46 +1431,37 @@ fn navigation_messages(
     if categories.is_empty() {
         warnings.push("Welcome-Navigation enthaelt keine oeffentlichen Kanaele".to_string());
         first.push_empty_navigation(&texts.empty_navigation);
-        return vec![WelcomeBuiltMessage {
-            banner: header_banner,
+        return Ok(vec![WelcomeBuiltMessage {
+            banner: Some(header),
             payload: welcome_payload(first.components, first.attachments),
-        }];
+        }]);
     }
 
-    let mut chunks = vec![first];
-    for category in categories {
-        if !chunks.last().expect("nav chunk").can_add(&category) {
-            chunks.push(NavigationChunk::new());
+    let mut chunks = Vec::new();
+    let mut current = first;
+    for mut category in categories {
+        if !current.can_add(&category) {
+            chunks.push(std::mem::replace(&mut current, NavigationChunk::new()));
         }
-        if !chunks.last().expect("nav chunk").can_add(&category)
-            && chunks.last().expect("nav chunk").category_count == 0
-        {
-            let mut truncated = category.clone();
-            let list_budget = NAVIGATION_TEXT_CHAR_BUDGET.saturating_sub(truncated.title_chars());
-            truncated.channel_list = truncate_to_char_budget(&truncated.channel_list, list_budget);
-            chunks
-                .last_mut()
-                .expect("nav chunk")
-                .push_category(&truncated);
-            continue;
+        if !current.can_add(&category) && current.category_count == 0 {
+            let list_budget = NAVIGATION_TEXT_CHAR_BUDGET.saturating_sub(category.title_chars());
+            category.channel_list = truncate_to_char_budget(&category.channel_list, list_budget);
         }
-        chunks
-            .last_mut()
-            .expect("nav chunk")
-            .push_category(&category);
+        current.push_category(category);
     }
+    chunks.push(current);
 
-    chunks
+    Ok(chunks
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
             let mut message = chunk.into_message();
             if index == 0 {
-                message.banner = header_banner.clone();
+                message.banner = Some(header.clone());
             }
             message
         })
-        .collect()
+        .collect())
 }
 
 fn navigation_category_messages(
@@ -1450,7 +1469,7 @@ fn navigation_category_messages(
     repo_root: &Path,
     texts: &ResolvedWelcomeTextTable,
     warnings: &mut Vec<String>,
-) -> Vec<NavigationCategoryMessage> {
+) -> Result<Vec<NavigationCategoryMessage>, String> {
     let mut messages = Vec::new();
     let mut categories = model.categories.values().collect::<Vec<_>>();
     categories.sort_by_key(|category| (category.position, category.category_id));
@@ -1482,68 +1501,75 @@ fn navigation_category_messages(
             .join("\n\n");
         let channel_list = truncate_to_char_budget(&channel_list, NAVIGATION_TEXT_CHAR_BUDGET);
 
-        let (divider_filename, divider_relative_path) =
-            divider_attachment_for_category(repo_root, &category.name, warnings)
-                .map_or((None, None), |attachment| {
-                    (Some(attachment.filename), Some(attachment.relative_path))
-                });
+        let divider = divider_attachment_for_category(repo_root, &category.name, warnings)?;
         messages.push(NavigationCategoryMessage {
             category_name: category.name.clone(),
-            divider_filename,
-            divider_relative_path,
+            divider,
             channel_list,
         });
     }
-    messages
+    Ok(messages)
 }
 
 fn section_banner(
     repo_root: &Path,
     definition: &WelcomeSectionDefinition,
     warnings: &mut Vec<String>,
-) -> Option<WelcomeBannerOutput> {
-    definition
-        .banner_filename
-        .map(|filename| welcome_banner(repo_root, filename, warnings))
+) -> Result<(Option<WelcomeBannerOutput>, Option<Vec<u8>>), String> {
+    let Some(filename) = definition.banner_filename else {
+        return Ok((None, None));
+    };
+    let (banner, bytes) = welcome_banner(repo_root, filename, warnings)?;
+    Ok((Some(banner), bytes))
 }
 
 fn welcome_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> WelcomeBannerOutput {
+) -> Result<(WelcomeBannerOutput, Option<Vec<u8>>), String> {
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    let present = repo_root.join(&relative_path).is_file();
-    if !present {
-        warnings.push(format!(
-            "Welcome-Banner `{relative_path}` fehlt; Sektion wird ohne Bild gebaut"
-        ));
-    }
-    WelcomeBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present,
-    }
+    let bytes = crate::serversync::read_optional_banner(
+        repo_root,
+        "Welcome",
+        &relative_path,
+        "Sektion wird ohne Bild gebaut",
+        warnings,
+    )?;
+    Ok((
+        WelcomeBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: bytes.is_some(),
+        },
+        bytes,
+    ))
 }
 
 fn divider_attachment_for_category(
     repo_root: &Path,
     category_name: &str,
     warnings: &mut Vec<String>,
-) -> Option<WelcomePayloadAttachment> {
-    let filename = divider_filename_for_category(category_name)?;
+) -> Result<Option<WelcomePayloadAttachment>, String> {
+    let Some(filename) = divider_filename_for_category(category_name) else {
+        return Ok(None);
+    };
     let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
-    if !repo_root.join(&relative_path).is_file() {
-        warnings.push(format!(
-            "Welcome-Divider `{relative_path}` fehlt; Kategorie `{category_name}` wird ohne Bild gebaut"
-        ));
-        return None;
-    }
-    Some(WelcomePayloadAttachment {
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Welcome-Divider",
+        &relative_path,
+        &format!("Kategorie `{category_name}` wird ohne Bild gebaut"),
+        warnings,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(WelcomePayloadAttachment {
         id: 0,
         filename: filename.to_string(),
-        relative_path,
-    })
+        bytes,
+    }))
 }
 
 fn divider_filename_for_category(category_name: &str) -> Option<&'static str> {
@@ -1608,29 +1634,25 @@ fn push_media_gallery_for_banner(
     components: &mut Vec<Value>,
     attachments: &mut Vec<WelcomePayloadAttachment>,
     banner: Option<&WelcomeBannerOutput>,
+    bytes: Option<Vec<u8>>,
 ) {
-    let Some(banner) = banner.filter(|banner| banner.present) else {
+    let (Some(banner), Some(bytes)) = (banner, bytes) else {
         return;
     };
-    push_media_gallery_for_attachment(
-        components,
-        attachments,
-        &banner.filename,
-        &banner.relative_path,
-    );
+    push_media_gallery_for_attachment(components, attachments, &banner.filename, bytes);
 }
 
 fn push_media_gallery_for_attachment(
     components: &mut Vec<Value>,
     attachments: &mut Vec<WelcomePayloadAttachment>,
     filename: &str,
-    relative_path: &str,
+    bytes: Vec<u8>,
 ) {
     let id = u8::try_from(attachments.len()).unwrap_or(u8::MAX);
     attachments.push(WelcomePayloadAttachment {
         id,
         filename: filename.to_string(),
-        relative_path: relative_path.to_string(),
+        bytes,
     });
     components.push(media_gallery(filename));
 }
@@ -2245,6 +2267,40 @@ description = "Custom allgemein"
         assert!(!text.contains("<#27>"));
         assert!(!text.contains("<#28>"));
         assert!(!text.contains("Street Brawl"));
+    }
+
+    #[test]
+    fn welcome_banner_und_divider_als_kaputter_link_brechen_ab() {
+        let model = base_model();
+        for (filename, label) in [
+            ("hero.png", "Welcome-Banner"),
+            ("divider-information.png", "Welcome-Divider-Banner"),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let banner_dir = temp.path().join(WELCOME_BANNER_DIR);
+            std::fs::create_dir_all(&banner_dir).expect("banner dir");
+            std::os::unix::fs::symlink(
+                banner_dir.join("ziel-fehlt.png"),
+                banner_dir.join(filename),
+            )
+            .expect("symlink");
+            let result = build_welcome_publish_output(
+                &model,
+                &[],
+                temp.path(),
+                &BTreeMap::new(),
+                None,
+                true,
+                Some(999),
+            );
+            assert_eq!(
+                result.err(),
+                Some(format!(
+                    "{label} `{WELCOME_BANNER_DIR}/{filename}` ist ein Link ohne Ziel"
+                )),
+                "{filename} muss den Build abbrechen"
+            );
+        }
     }
 
     #[test]
