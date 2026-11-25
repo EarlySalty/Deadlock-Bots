@@ -1,6 +1,6 @@
 # Support-Panel, 2026-11-08
 
-State document of the support panel as built by branch `feat/supporter-p1-slim-20261116`. The Ko-fi and Stripe link buttons of the earlier branch `feat/support-panel-20261108` are gone. `.tasks/2026-11-11-supporter-panel/dry-run.md` is one rendered dry-run of the cards; the test `dry_run_doku_entspricht_dem_render` fails when it differs from the render.
+State document of the support panel as built by branch `feat/supporter-slim-land-20261117`. The Ko-fi and Stripe link buttons of the earlier branch `feat/support-panel-20261108` are gone. `.tasks/2026-11-11-supporter-panel/dry-run.md` is one rendered dry-run of the cards; the test `dry_run_doku_entspricht_dem_render` fails when it differs from the render.
 
 ## Messages
 

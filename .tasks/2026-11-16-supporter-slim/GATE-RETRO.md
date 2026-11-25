@@ -1,6 +1,6 @@
 # Supporter P1 slim: round-four review
 
-Four counted gate rounds without ALLOW (95, 54, 261, 394 blocking lines). This file records the triage of round 4 and the one fixer pass that follows it.
+Four counted gate rounds without ALLOW (95, 54, 261, 394 blocking lines). This file records the triage of round 4, the landing pass on `feat/supporter-slim-land-20261117`, the gate runs after it and the fixer pass for the round-10 verdict.
 
 ## REAL
 
@@ -108,7 +108,7 @@ The reviewer named three BLOCKING findings and two NITs in `serversync.rs` befor
 - REAL 4 the funding goal compared with itself: 8dea0d4c (`TEST_GOAL_CENTS` literal, mutation checked).
 - REAL 5 SHAs from before the message reword in this file: mapped by tree hash to the current commits in this commit.
 - NIT 6 tier ids "+5" and "05": 8dea0d4c (`tier_from_custom_id` matches against `tier_button_id`).
-- FALSE twin `rust/bin/dl-bot/vanity.rs:119`: the file does not exist at 3387bbad.
+- REAL twin `rust/bin/dl-bot/src/vanity.rs:119` (the reviewer left out `src/`, and an earlier version of this file called it FALSE because of that): it formats its own `DISCORD_API_BASE` by hand (`vanity.rs:7`, `:119`, `:344`). `vanity.rs` is origin/main at HEAD and outside this branch; see Backlog outside this branch.
 
 ### Open
 
@@ -140,18 +140,52 @@ Corrections to earlier commit messages:
 - 65fcb08a said the roles.rs tests build Http with `ratelimiter_disabled(true)` and make no ratelimiter claim. At that commit `rate_limiter_waits_are_bounded` in roles.rs already installed `serenity::http::Ratelimiter` (`git show 65fcb08a:rust/bin/dl-bot/src/supporter/roles.rs`, line 382), and it claims that ratelimiter waits are bounded.
 - 5e24d534 said every Discord test in dl-bot built Http with `ratelimiter_disabled(true)`. The same roles.rs test turned the ratelimiter on at that commit (line 382).
 - e7bef533 recorded a twin search that only matched a parse within three lines after `strip_prefix(` or `split_once(`. The class search is every integer or text parse in the touched Rust files: `git diff --name-only origin/main...HEAD | grep '\.rs$' | xargs grep -nE '\.parse(::<[^>]*>)?\(\)|from_str(_radix)?\('`, 63 hits at a4d8882a:
-  - Readers of strings the bot writes and stores: `serversync.rs:1019` (`static_v2_message_index`, the owner) and `support_publish.rs:202` (`SupportFunding::from_kv`), both strict since e7bef533.
+  - Readers of strings the bot writes and stores: `serversync.rs:1019` (`static_v2_message_index`, the owner) and `support_publish.rs:202` (`SupportFunding::from_kv`), both strict since e7bef533, and the `bot.kv_store` id reads through `parse_discord_id` (`serversync.rs:5849`), strict since 7466fde5 through `parse_stored_discord_id`. An earlier version of this file filed `:5849` under rate limit headers.
   - Whole documents through serde, toml, `PgConnectOptions` or `IpAddr`: `serversync.rs:2995 7006 7060`, `support_publish.rs:146`, `privacy.rs:3488`, `bot_config.rs:280 344`, `runtime_config.rs:708`, `testing.rs:190 262`.
-  - Discord rate limit headers: `serversync.rs:5808 5816 5849`.
+  - Discord rate limit headers: `serversync.rs:5808 5816`.
   - Channel and role ids from the server-as-code config and the live onboarding: `serversync.rs:6102 6130 6184 6523 6542 6640 6687 6702`.
   - Environment and config values written by people: `main.rs:110 138 161 167 255 1084 1857`, `bot_config.rs:219 233 245 249`, `runtime_config.rs:466`.
   - Settings catalog: `settings_catalog.rs:408` (TSV type column), `492` and `768` (paths from the TSV and the admin request), `540` (admin form value, already strict by its round trip), `548 553 596 601` (the catalog's own in-memory bound strings, no stored copy).
   - Privacy erasure matching of user ids in other bots' data, lenient on purpose so an erasure finds every spelling: `privacy.rs:1711 1725 1732 1884 1911`.
   - Test code: `serversync.rs:9067 9137 9141 11155`, `settings_catalog.rs:805 813 834 869 885 886 1170 1176 1183 1202 1205`.
-  Backlog outside the touched files: `rust/bin/dl-bot/src/mcp/public.rs:897` and `:912`.
+  Backlog outside the touched files: `rust/bin/dl-bot/src/mcp/public.rs:897` (key suffix without a round trip) and `:913` (stored id without a round trip). The index parse at `:912` is strict through the round trip at `:914`; an earlier version of this file and e7bef533 called it lenient.
 - 8dea0d4c checked its class (a reader that accepts more spellings than the bot writes) only in `supporter/links.rs` and `supporter.rs`. `load_static_v2_message_ids` and the welcome id loader in `serversync.rs` and `SupportFunding::from_kv` had the same shape; fixed in e7bef533.
 - bae09016 said the Voice UX banner outputs are metadata only and the bytes stay in the payload attachment only. `VoiceUxPublishOutput.banners` (`voice_ux_publish.rs:82`) keeps the `LoadedBanner` bytes behind `serde(skip)`, and `voice_ux_publish.rs:812` clones them into each attachment. The B10 twin check above states this HEAD state.
-- 507582ff said `RuntimeConfig::validate` enforces `matcher_max_ai_per_scan` and `matcher_scan_interval_hours` and that bot_config, operating_config and runtime_config share the new ranges. 3ccdf17d reverted that to origin/main. At HEAD both matcher rows have no loader check and keep catalog-only bounds (`CATALOG_ONLY_BOUNDS` in `settings_catalog.rs`), `operating_config.rs` is origin/main, and the bot_config ranges are named again since 08470994.
-- 22a0cc1f said its named ranges, `MATCHER_SCAN_INTERVAL_HOURS_RANGE` starting at 0, the u64 matcher reader, `DISCORD_STRING_OPTION_MAX_LENGTH` for the /brain question length and the admin_settings probe test are in place. 3ccdf17d reverted all of them: `MATCHER_SCAN_INTERVAL_HOURS_RANGE`, `RUNTIME_POSITIVE_SPAN_RANGE` and `DISCORD_STRING_OPTION_MAX_LENGTH` do not exist at HEAD, `admin_settings.rs`, `modglue.rs` and `dl-bridges` `matcher.rs` are origin/main, and `BRAIN_MAX_QUESTION_LEN_RANGE` ends at 65 536. The catalog probe test lives in `settings_catalog.rs` since 02a96cd0.
-- 02a96cd0 said the rows that `BotConfig::validate` checks keep literal catalog bounds, `bot_config.rs` is not touched and keeps its literal id rule, `presence_status` is outside the class, the Brain image rows have no loader rule, and its placeholder test rejects bound literals in texts. Since 08470994 the bot_config rows use named consts in `bot_config.rs` for validate and the catalog, the id rule uses `DISCORD_ID_RANGE`, `PRESENCE_STATUS_MAX_CHARS` bounds `presence_status` in the loader and the catalog, and `BRAIN_IMAGE_MAX_COUNT_RANGE` and `BRAIN_IMAGE_JPEG_QUALITY_RANGE` are loader rules. The 02a96cd0 placeholder test let TSV lines 23, 159 and 162 keep their literal bounds.
-- 5404b9eb and the B26 row: 08470994 removed the catalog bounds of `runtime.start.mcp_port` and `runtime.bridges.twitch_port`, because both rows are protected and the admin form cannot write them. At HEAD only `RuntimeConfig::validate` checks the two ports against `PORT_RANGE` (`runtime_config.rs:513`).
+- 507582ff said `RuntimeConfig::validate` enforces `matcher_max_ai_per_scan` and `matcher_scan_interval_hours` and that bot_config, operating_config and runtime_config share the new ranges. 3ccdf17d reverted that to origin/main, and until 789129be both matcher rows had no loader check and catalog-only bounds (`CATALOG_ONLY_BOUNDS`). Since 789129be `RuntimeConfig::validate` checks both rows against `MATCHER_MAX_AI_PER_SCAN_RANGE` and `MATCHER_SCAN_INTERVAL_HOURS_RANGE`, which the catalog takes as its bounds, and `CATALOG_ONLY_BOUNDS` is gone. `operating_config.rs` is origin/main, and the bot_config ranges are named again since 08470994.
+- 22a0cc1f said its named ranges, `MATCHER_SCAN_INTERVAL_HOURS_RANGE` starting at 0, the u64 matcher reader, `DISCORD_STRING_OPTION_MAX_LENGTH` for the /brain question length and the admin_settings probe test are in place. 3ccdf17d reverted all of them: `RUNTIME_POSITIVE_SPAN_RANGE` and `DISCORD_STRING_OPTION_MAX_LENGTH` do not exist at HEAD, `MATCHER_SCAN_INTERVAL_HOURS_RANGE` exists again since 789129be as a dl-core loader range starting at 0, `admin_settings.rs`, `modglue.rs` and `dl-bridges` `matcher.rs` are origin/main, and `BRAIN_MAX_QUESTION_LEN_RANGE` ends at 65 536. The catalog probe test lives in `settings_catalog.rs` since 02a96cd0.
+- 02a96cd0 said the rows that `BotConfig::validate` checks keep literal catalog bounds, `bot_config.rs` is not touched and keeps its literal id rule, `presence_status` is outside the class, the Brain image rows have no loader rule, and its placeholder test rejects bound literals in texts. Since 08470994 the bot_config rows use named consts in `bot_config.rs` for validate and the catalog, the id rule uses `DISCORD_ID_RANGE`, `PRESENCE_STATUS_MAX_CHARS` bounds `presence_status` in the loader and the catalog (and since c0e0e954 the catalog also applies the loader's blank rule through `presence_status_valid`), and `BRAIN_IMAGE_MAX_COUNT_RANGE` and `BRAIN_IMAGE_JPEG_QUALITY_RANGE` are loader rules. The 02a96cd0 placeholder test let TSV lines 23, 159 and 162 keep their literal bounds.
+- 5404b9eb and the B26 row: 08470994 removed the catalog bounds of `runtime.start.mcp_port` and `runtime.bridges.twitch_port`, because both rows are protected and the admin form cannot write them. At HEAD only `RuntimeConfig::validate` checks the two ports against `PORT_RANGE` (`runtime_config.rs:540`).
+- 32939e92 said the pager search "now finds only the helper"; 9fc9bca1 said `EMPTY_MEMBER_LIST` "covers every REST member reader (supporter role sync, serversync role assignments, modglue coach fallback and role members, vanity sweep, adapter role members)"; 09e742f6 said every Discord REST client comes from `serversync::discord_http_client` "(serversync, vanity snapshots, coaching post and edit)" and every Discord cursor loop stops through `dl_discord::adapter`; aac0ffc8 said the pager, its limit "and the fixture exist once, in dl-bot". c71e8e16 and 866f264e reverted `modglue.rs` and `vanity.rs` to origin/main, and `dl-discord` has no diff against origin/main. At HEAD the shared pager in `discord_pages.rs` serves the supporter role sync (`supporter/roles.rs:57`) and the serversync member scan (`serversync.rs:1231`); `modglue.rs:2641` and `:3443` and `vanity.rs:294` page by hand without a page timeout or stall guard, `adapter.rs:1072` keeps its own pager with the literal 1000, `vanity.rs:46` and `:83` build `reqwest::Client::new()`, and `advance_after` has no caller outside `discord_pages.rs`. See Backlog outside this branch.
+- 8dea0d4c said in its why-unnoticed layer that every tier id in the tests came from `tier_button_id`. Before 8dea0d4c the stale-id list in `supporter/links.rs` already held hand-written ids ("support:tier:3", "support:tier:", "support:tier:x", "support:tier:-5"), and the button tests used the literals "support:tier:20" and "support:tier:50". The tests fed malformed ids, but none in a spelling that `u64::from_str` accepts and the writer never builds, such as "+50" or "050"; 8dea0d4c added those.
+
+### Fixer pass for the round-10 verdict (2026-11-18 to 2026-11-25)
+
+Round 10 ended in BLOCK with 40 blocking lines, most of them hook twins. Each class below names its fix commit; every fix commit carries its own Ursache block with the twin search and its output.
+
+- Stored Discord ids read leniently (BLOCKING 5-17, 27-29): 7466fde5, `parse_stored_discord_id` and `stored_discord_id` in `serversync.rs`, key replacement limited to the keys the id writer wrote.
+- Member scan without a bound on the whole scan: bfefb444, bounded by the page count from `approximate_member_count`.
+- Mode-000 banner test failing as root (BLOCKING 18): 6e12ecbc probes permission enforcement first.
+- Placeholder lint skipping brace contents (BLOCKING 19): b749cb43.
+- Banner bytes copied into outputs and attachments: 2fc07b43 moves them.
+- Sync interval test equal to the default: 928303e6.
+- Stripe tip rows without a schema bound on their validity: 47034252, CHECK `valid_until <= paid_at + 744 hours` in the not yet applied migration 20261116130000.
+- Port rules through the literal 0 and invite range texts without an owner (BLOCKING 31, 34, 35): daed4a0e.
+- Brain image edge and download size clamped silently by the reader (BLOCKING 32, 33, 38, 40): d4b86694. Its twin list named `modglue.rs:1812` and `:4231`; those hits came from a run over the working tree, and the stated command over `origin/main...HEAD` does not list `modglue.rs` (corrected in 789129be).
+- Matcher rows with catalog-only bounds (BLOCKING 36): 789129be.
+- Writable text rows without the loader's rule (BLOCKING 37, 39): c0e0e954.
+- Retro and README claims (BLOCKING 1-4, 10, 26): this commit, see the corrections above and below.
+
+Live checks, read-only:
+
+- 2026-11-18 (round 11): the privacy trigger on `core.supporter_sources` has `tgenabled` 'O'; role `deadlock` has `rolbypassrls` true, `twitchdash` false; the stored panel option values and the 17 stored serversync message ids are canonical, so the strict readers reject none of them; the 35 serversync keys have no LIKE prefix collision; every tip row lies within 31 days of its payment.
+- 2026-11-25: `_sqlx_migrations` ends at 20261116120000, so 20261116130000 is not applied and could still be changed; 2 tip rows, none with a NULL `valid_until` or one beyond 744 hours after `paid_at`; `/etc/deadlock-svc/master/bot.toml` sets none of the `brain_image_*` or matcher keys, and its `presence_status` "DM Support", `log_filter` "info", the five service ports and `personal_links_per_channel` 10 pass the loader rules of this pass.
+
+### Backlog outside this branch
+
+These twins sit in files that are origin/main at HEAD and belong to a repo review, not to this branch:
+
+- `rust/bin/dl-bot/src/vanity.rs:7`, `:119`, `:344`: own `DISCORD_API_BASE` and hand-built Discord URLs on `reqwest::Client::new()` without a timeout (`:46`, `:83`).
+- `rust/bin/dl-bot/src/modglue.rs:2641`, `:3443` and `vanity.rs:294`: member pagers by hand without a page timeout or stall guard; `rust/crates/dl-discord/src/adapter.rs:1072`: own pager with the literal page size 1000.
+- `rust/bin/dl-bot/src/mcp/public.rs:897` and `:913`: stored key suffix and stored id parsed without a round trip.
+- `rust/bin/dl-bot/src/twitch_invites_personal.rs:148`: the literal 1000 next to `DISCORD_GUILD_INVITE_LIMIT`.
+- `rust/crates/dl-bridges/src/matcher.rs:361`: the reader's own `.max(0)` next to the dl-core matcher ranges.
