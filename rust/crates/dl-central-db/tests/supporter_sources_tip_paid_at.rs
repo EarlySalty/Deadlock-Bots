@@ -39,7 +39,7 @@ async fn seed(
         "INSERT INTO core.supporter_sources
              (discord_id, source, source_ref, monthly_cents, valid_until, updated_at)
          VALUES ($1, $2, $3, 500,
-                 CASE WHEN $5 THEN $4::timestamptz + make_interval(days => $6::int) END,
+                 CASE WHEN $5 THEN $4::timestamptz + make_interval(hours => $6::int) END,
                  $4::timestamptz)",
     )
     .bind(discord_id)
@@ -47,10 +47,14 @@ async fn seed(
     .bind(source_ref)
     .bind(PAID)
     .bind(valid)
-    .bind(i32::try_from(TIP_VALID_DAYS)?)
+    .bind(tip_valid_hours()?)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+fn tip_valid_hours() -> Result<i32, std::num::TryFromIntError> {
+    i32::try_from(TIP_VALID_DAYS * 24)
 }
 
 async fn paid_at_matches_updated_at(
@@ -99,11 +103,11 @@ async fn backfill_reaches_every_tip_row_and_only_stripe_tips_carry_paid_at() -> 
     apply(pool, UNDO_MIGRATION).await?;
 
     let backfill = tip_ref("pi_backfill");
-    let open_ended = tip_ref("pi_open_ended_opted_out");
+    let opted_out = tip_ref("pi_opted_out");
     let manual_tip = tip_ref("manual_import");
     seed(pool, 7101, "stripe", &backfill, true).await?;
     seed(pool, 7102, "stripe", "sub_backfill", true).await?;
-    seed(pool, 7103, "stripe", &open_ended, false).await?;
+    seed(pool, 7103, "stripe", &opted_out, true).await?;
     seed(pool, 7104, "manual", &manual_tip, true).await?;
     dl_central_db::testing::block_member(pool, 7103, false).await?;
 
@@ -116,7 +120,7 @@ async fn backfill_reaches_every_tip_row_and_only_stripe_tips_carry_paid_at() -> 
         Some(true)
     );
     assert_eq!(
-        paid_at_matches_updated_at(pool, &open_ended).await?,
+        paid_at_matches_updated_at(pool, &opted_out).await?,
         Some(true)
     );
     assert_eq!(
@@ -156,6 +160,28 @@ async fn backfill_reaches_every_tip_row_and_only_stripe_tips_carry_paid_at() -> 
         .as_deref(),
         Some(CONSTRAINT)
     );
+    let hours = tip_valid_hours()?;
+    for (valid_until, violation) in [
+        ("NULL".to_string(), Some(CONSTRAINT)),
+        (
+            format!("paid_at + make_interval(hours => {hours}) + interval '1 second'"),
+            Some(CONSTRAINT),
+        ),
+        ("paid_at + interval '1 day'".to_string(), None),
+    ] {
+        assert_eq!(
+            violated_constraint(
+                pool,
+                &format!(
+                    "UPDATE core.supporter_sources SET valid_until = {valid_until} WHERE source_ref = '{backfill}'"
+                ),
+            )
+            .await
+            .as_deref(),
+            violation,
+            "{valid_until}"
+        );
+    }
     Ok(())
 }
 
