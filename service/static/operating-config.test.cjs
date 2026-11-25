@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseValue, changesForV41, equal, V41 } = require('./operating-config.js');
+const { parseValue, equal } = require('./operating-config.js');
 const field = (kind, extra = {}) => ({ kind, nullable: false, min: null, max: null, length: null, choices: [], ...extra });
 
 test('Textgrenzen entsprechen UTF-8-Bytes und Steuerzeichen des Servers', () => {
@@ -32,21 +32,4 @@ test('Feste Listenlängen, Auswahlwerte und KI-Grenzen werden geprüft', () => {
     assert.throws(() => parseValue(field('choice', { choices: ['fireworks', 'openai'] }), 'unknown'));
     assert.throws(() => parseValue(field('number', { min: '0', max: '2' }), '3'));
     assert.equal(parseValue(field('number', { min: '0', max: '2' }), '0.4'), 0.4);
-});
-test('V4.1 ändert nur Fireworks, einschließlich vorhandener Einzelpins', () => {
-    const fields = ['bot_pate','faq','moderation_verify','voice_hint','turnier_vorschlag'].map(name => ({ path: `llm.use_cases.${name}.model`, writable: true }));
-    const result = changesForV41({ 'llm.use_cases.faq.model': 'old', 'llm.use_cases.moderation_verify.provider': 'fireworks' }, fields);
-    assert.equal(result['llm.fireworks.model'], V41);
-    assert.equal(result['llm.use_cases.bot_pate.model'], V41);
-    assert.equal(result['llm.use_cases.faq.model'], V41);
-    assert.equal(result['llm.use_cases.moderation_verify.model'], V41);
-    assert.equal(Object.hasOwn(result, 'llm.use_cases.voice_hint.model'), false);
-    assert.equal(Object.hasOwn(result, 'llm.use_cases.turnier_vorschlag.model'), false);
-    assert.equal(Object.keys(result).some(key => key.endsWith('.provider')), false);
-});
-test('Explizite OpenAI-Zuordnungen und globaler OpenAI-Standard werden erhalten', () => {
-    const fields = ['bot_pate','faq'].map(name => ({ path: `llm.use_cases.${name}.model`, writable: true }));
-    const result = changesForV41({ 'llm.default_provider':'openai', 'llm.use_cases.faq.provider':'fireworks' }, fields);
-    assert.equal(Object.hasOwn(result, 'llm.use_cases.bot_pate.model'), false);
-    assert.equal(result['llm.use_cases.faq.model'], V41);
 });

@@ -29,6 +29,9 @@ pub struct DiscordAdapter {
     /// via [`Self::link_cache`] an genau diesen serenity-Cache gekoppelt — sonst
     /// läse die gesamte Glue aus einem leeren Cache (alle Lookups None).
     cache: OnceLock<Arc<Cache>>,
+    /// Identität dieses Discord-Bots aus dem Gateway-READY-Ereignis.
+    /// Die ID ist pro Prozess unveränderlich und braucht keinen REST-Fallback.
+    bot_user_id: Arc<OnceLock<u64>>,
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
     pub(crate) community_gateway: crate::community::GatewayFreshness,
@@ -49,6 +52,7 @@ impl DiscordAdapter {
         Arc::new(Self {
             http: Arc::new(Http::new(token)),
             cache: OnceLock::new(),
+            bot_user_id: Arc::new(OnceLock::new()),
             gateway_ready: Arc::new(AtomicBool::new(false)),
             community_gateway: crate::community::GatewayFreshness::default(),
             voice_cache_health: crate::voice_cache::VoiceCacheHealth::default(),
@@ -80,6 +84,24 @@ impl DiscordAdapter {
             return Ok(false);
         };
         tracker.prime(&self.http, guild_id).await
+    }
+
+    /// Gemeinsame READY-Identität für Komponenten, die vor Gateway-Start
+    /// gebaut werden.
+    pub fn bot_user_id_cell(&self) -> Arc<OnceLock<u64>> {
+        Arc::clone(&self.bot_user_id)
+    }
+
+    pub(crate) fn record_bot_user_id(&self, user_id: u64) {
+        if let Err(rejected_id) = self.bot_user_id.set(user_id) {
+            if self.bot_user_id.get().copied() != Some(rejected_id) {
+                tracing::error!(
+                    existing_user_id = ?self.bot_user_id.get(),
+                    rejected_id,
+                    "Discord-Gateway meldet eine abweichende Bot-ID"
+                );
+            }
+        }
     }
 
     /// Lädt die Application-ID per REST und setzt sie auf dem Http-Client.
@@ -1244,6 +1266,19 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_id_wird_aus_ready_geteilt_und_bleibt_prozessstabil() {
+        let adapter = DiscordAdapter::new("test-token");
+        let shared_id = adapter.bot_user_id_cell();
+        assert_eq!(shared_id.get(), None);
+
+        adapter.record_bot_user_id(42);
+        assert_eq!(shared_id.get(), Some(&42));
+        adapter.record_bot_user_id(42);
+        adapter.record_bot_user_id(43);
+        assert_eq!(shared_id.get(), Some(&42));
+    }
 
     fn twitch_tracking_spec() -> ViewSpec {
         ViewSpec::TwitchLiveTracking {

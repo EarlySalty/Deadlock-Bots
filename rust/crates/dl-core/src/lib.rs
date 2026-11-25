@@ -12,5 +12,6 @@ pub mod operating_config;
 pub mod pyfloat;
 pub mod runtime_config;
 pub mod settings_catalog;
+pub mod token_snapshot;
 
 pub use config::{Config, ConfigError, Ports};

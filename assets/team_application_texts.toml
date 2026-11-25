@@ -8,3 +8,8 @@ title = "🤝 Werde Teil unseres Teams"
 intro = "Du möchtest die Deutsche Deadlock Community mitgestalten? Wähle den Bereich, der zu dir passt, und erzähl uns kurz, wie du dich einbringen möchtest. Erfahrung ist hilfreich, aber kein Muss — wichtiger sind Verlässlichkeit, ein respektvoller Umgang und Lust, gemeinsam etwas aufzubauen."
 process = "Deine Bewerbung landet ausschließlich im internen Moderationsbereich. Wir lesen jede Bewerbung und melden uns per Discord-DM bei dir. Bitte teile keine sensiblen oder privaten Daten."
 footer = "Du findest dich in keinem Bereich wieder? Nutze „Eigene Idee“ — gute Ideen müssen nicht in eine Schublade passen."
+
+[pate]
+intro = "Als Pate nimmst du neue Mitglieder an die Hand und zeigst ihnen unseren Server und die ersten Schritte im Spiel. Du brauchst keine festen Zeiten, nur Lust, ansprechbar und freundlich zu sein. Rechne mit ein paar Minuten hier und da, wenn ein Neuling Fragen hat."
+frage_erfahrung = "Wie gut kennst du Deadlock und unseren Server schon?"
+frage_verfuegbarkeit = "Wann bist du meistens da und wie schnell kannst du auf Fragen antworten?"

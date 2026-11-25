@@ -1,14 +1,8 @@
-//! dl-ai — LLM-Anbindungen fuer Bot-Flows.
+//! Zentrale KI-Anbindung für Bot-Flows.
 //!
-//! Zwei Modi wie das Original:
-//! - **Token-Plan** (`MINIMAX_TOKEN_PLAN_KEY`): Anthropic-kompatible API
-//!   (`x-api-key` + `POST /messages`, content-Fragmente).
-//! - **Standard** (`MINIMAX_API_KEY`/`MINMAX`): Bearer +
-//!   `POST /text/chatcompletion_v2` (choices/message/content).
-//!
-//! OpenAI ist für den SecurityGuard-Bildpfad als separater Vision-Client
-//! verdrahtet; der Streamer-Link-Matcher kann Text über MiniMax, OpenAI oder
-//! Gemini auswählen.
+//! Produktive Text- und Bildfactorys nutzen Fireworks mit der gemeinsamen,
+//! täglich geprüften DeepSeek-Flash-Auswahl. Der Reader wird vor jedem Aufruf
+//! erneut gelesen; Zugangsdaten bleiben im bestehenden Secret-Speicher.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,28 +14,19 @@ use serde_json::{json, Value};
 mod chat_provider;
 mod chat_text;
 mod configured_chat;
+mod selected_chat;
 mod transparency;
 mod transparency_log;
 pub use chat_provider::*;
 pub use chat_text::*;
+pub use fireworks_model_selection::selected_model as selected_flash_model;
 pub use transparency::*;
 pub use transparency_log::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
-/// Belegt ist der Stand vom 2026-08-26. Ein echter Aufruf gegen
-/// `api.fireworks.ai/inference/v1/chat/completions` antwortete fuer
-/// `accounts/fireworks/models/deepseek-v4-flash` mit HTTP 404 "Model not
-/// found, inaccessible, and/or not deployed" und fuer die datierte Variante
-/// `...-0731` mit HTTP 412 "Account ... is suspended".
-///
-/// Der 404 belegt nur, dass der undatierte Name unter diesem Konto nicht
-/// ansprechbar war. Der 412 sagt ueberhaupt nichts ueber das Modell, sondern
-/// nur ueber das gesperrte Konto: ob `-0731` bei Fireworks wirklich
-/// ausgeliefert wird, ist erst wieder pruefbar, wenn das Konto offen ist.
-/// Freigegeben ist genau dieses Modell, teurere Varianten (Pro) nie ohne
-/// ausdrueckliche Freigabe des Owners.
-pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash-0731";
-const LEGACY_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
+/// Freigegebene Ausgangsversion; produktive Textaufrufe lesen die tägliche
+/// gemeinsame Flash-Auswahl und ignorieren frühere Modell-Pins.
+pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4p1-flash";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
@@ -52,6 +37,42 @@ const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1"
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_API_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Content-Length is advisory; enforce the cap while receiving every chunk.
+async fn bounded_response(mut response: reqwest::Response, limit: u64) -> Option<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() as u64 > limit.saturating_sub(bytes.len() as u64) {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Some(bytes)
+}
+
+fn trusted_image_url(raw: &str) -> bool {
+    if raw.starts_with("data:image/") {
+        return true;
+    }
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && matches!(
+            url.host_str(),
+            Some("cdn.discordapp.com" | "media.discordapp.net")
+        )
+}
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -139,6 +160,20 @@ pub trait VisionGenerator: Send + Sync {
     async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String>;
 }
 
+/// Zentraler Bildpfad mit demselben Zugang und Modellvertrag wie Textaufrufe.
+pub fn fireworks_vision_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<(Arc<dyn VisionGenerator>, String)> {
+    let model = match selected_flash_model() {
+        Ok(model) => model,
+        Err(error) => {
+            tracing::error!(%error, "Gemeinsame Modellauswahl für die Bildanalyse fehlt");
+            return None;
+        }
+    };
+    Some((FireworksClient::from_env(lookup)?, model))
+}
+
 /// Gültige Bild-URL-Präfixe (Original: `valid_prefixes` in `generate_multimodal`).
 const VALID_IMAGE_PREFIXES: [&str; 3] = ["http://", "https://", "data:image/"];
 /// Maximale Bildanzahl pro Request (Original: `valid_images[:4]`).
@@ -214,6 +249,7 @@ pub struct FireworksClient {
     base_url: String,
     api_key: String,
     model: String,
+    shared_selection: bool,
 }
 
 impl OpenAiClient {
@@ -264,14 +300,17 @@ impl OpenAiClient {
         })
     }
 
-    async fn image_data_uri(&self, image_url: &str) -> Option<String> {
+    async fn image_data_uri(http: &reqwest::Client, image_url: &str) -> Option<String> {
         if image_url.starts_with("data:image/") {
+            if image_url.len() as u64 > MAX_OPENAI_IMAGE_BYTES * 4 / 3 + 1024 {
+                return None;
+            }
             return Some(image_url.to_string());
         }
         if !(image_url.starts_with("http://") || image_url.starts_with("https://")) {
             return None;
         }
-        let response = match self.http.get(image_url).send().await {
+        let response = match http.get(image_url).send().await {
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(%err, "OpenAI-Vision: Bilddownload fehlgeschlagen");
@@ -296,15 +335,8 @@ impl OpenAiClient {
             .and_then(|value| value.to_str().ok())
             .and_then(Self::clean_image_media_type)
             .unwrap_or_else(|| Self::infer_image_media_type(image_url));
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::warn!(%err, "OpenAI-Vision: Bildbytes nicht lesbar");
-                return None;
-            }
-        };
-        if bytes.len() as u64 > MAX_OPENAI_IMAGE_BYTES {
-            tracing::warn!("OpenAI-Vision: Bild zu gross, uebersprungen");
+        let bytes = bounded_response(response, MAX_OPENAI_IMAGE_BYTES).await?;
+        if bytes.is_empty() {
             return None;
         }
         let encoded = general_purpose::STANDARD.encode(bytes);
@@ -434,6 +466,33 @@ impl OpenAiClient {
 }
 
 impl FireworksClient {
+    fn http_client() -> Option<reqwest::Client> {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| {
+                tracing::warn!("Sicherer Fireworks-HTTP-Client konnte nicht erstellt werden")
+            })
+            .ok()
+    }
+
+    fn complete_text(data: &Value) -> Option<String> {
+        if data
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice.get("finish_reason").and_then(Value::as_str) == Some("length")
+                })
+            })
+        {
+            return None;
+        }
+        OpenAiClient::extract_openai_text(data)
+    }
+
     pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
         let get = |key: &str| {
             lookup(key)
@@ -444,36 +503,25 @@ impl FireworksClient {
         let base_url = get("FIREWORK_BASE_URL")
             .or_else(|| get("FIREWORKS_BASE_URL"))
             .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.to_string());
-        let model = match get("FIREWORK_MODEL").or_else(|| get("FIREWORKS_MODEL")) {
-            Some(model) if model == LEGACY_FIREWORKS_MODEL => {
-                tracing::warn!(
-                    legacy_model = %model,
-                    replacement = DEFAULT_FIREWORKS_MODEL,
-                    "Veralteter Fireworks Modellalias ersetzt"
-                );
-                DEFAULT_FIREWORKS_MODEL.to_string()
-            }
-            Some(model) => model,
-            None => DEFAULT_FIREWORKS_MODEL.to_string(),
-        };
-        tracing::info!(%base_url, %model, "Fireworks-Text-Client initialisiert");
-        Some(Self::new(base_url, api_key, model))
+        let model = DEFAULT_FIREWORKS_MODEL;
+        tracing::info!(%base_url, "Fireworks-Text-Client mit gemeinsamer Flash-Auswahl initialisiert");
+        let mut client = Self::new(base_url, api_key, model)?;
+        Arc::get_mut(&mut client)?.shared_selection = true;
+        Some(client)
     }
 
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         model: impl Into<String>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_default(),
+    ) -> Option<Arc<Self>> {
+        Some(Arc::new(Self {
+            http: Self::http_client()?,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
             model: model.into(),
-        })
+            shared_selection: false,
+        }))
     }
 }
 
@@ -511,7 +559,7 @@ impl GeminiClient {
 #[async_trait::async_trait]
 impl TextGenerator for FireworksClient {
     async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
-        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let model = self.selected_request_model(request.model)?;
         let max_tokens = request
             .max_output_tokens
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
@@ -521,16 +569,14 @@ impl TextGenerator for FireworksClient {
         }
         messages.push(json!({ "role": "user", "content": request.prompt }));
 
-        let mut body = json!({
+        let body = json!({
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": request.temperature,
             "response_format": { "type": "json_object" },
+            "reasoning_effort": request.reasoning_effort.as_deref().unwrap_or("none"),
         });
-        if let Some(reasoning_effort) = request.reasoning_effort {
-            body["reasoning_effort"] = Value::String(reasoning_effort);
-        }
 
         let response = self
             .http
@@ -550,8 +596,81 @@ impl TextGenerator for FireworksClient {
             tracing::warn!(status = %response.status(), "Fireworks-Text-API-Fehler");
             return None;
         }
-        let data: Value = response.json().await.ok()?;
-        OpenAiClient::extract_openai_text(&data)
+        let data: Value =
+            serde_json::from_slice(&bounded_response(response, MAX_API_RESPONSE_BYTES).await?)
+                .ok()?;
+        Self::complete_text(&data)
+    }
+}
+
+impl FireworksClient {
+    fn selected_request_model(&self, requested: Option<String>) -> Option<String> {
+        if self.shared_selection {
+            match selected_flash_model() {
+                Ok(model) => Some(model),
+                Err(error) => {
+                    tracing::warn!(%error, "Gemeinsame Flash-Modellauswahl nicht verfügbar");
+                    None
+                }
+            }
+        } else {
+            Some(requested.unwrap_or_else(|| self.model.clone()))
+        }
+    }
+
+    async fn vision_messages(&self, request: &GenerateMultimodalRequest) -> Option<Vec<Value>> {
+        let mut content = vec![json!({ "type": "text", "text": request.prompt })];
+        for image_url in request
+            .image_urls
+            .iter()
+            .filter(|url| trusted_image_url(url))
+            .take(MAX_MULTIMODAL_IMAGES)
+        {
+            if let Some(data_uri) = OpenAiClient::image_data_uri(&self.http, image_url).await {
+                content.push(json!({"type": "image_url", "image_url": {"url": data_uri}}));
+            }
+        }
+        if content.len() == 1 {
+            return None;
+        }
+        let mut messages = Vec::new();
+        if let Some(system) = &request.system_prompt {
+            messages.push(json!({ "role": "system", "content": system }));
+        }
+        messages.push(json!({ "role": "user", "content": content }));
+        Some(messages)
+    }
+}
+
+#[async_trait::async_trait]
+impl VisionGenerator for FireworksClient {
+    async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String> {
+        let model = self.selected_request_model(request.model.clone())?;
+        let messages = self.vision_messages(&request).await?;
+        let response = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&json!({
+                "model": model,
+                "messages": messages,
+                "max_tokens": request.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+                "temperature": request.temperature,
+                "response_format": {"type": "json_object"},
+                "reasoning_effort": "none",
+            }))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "Flash-Bildanalyse fehlgeschlagen");
+            return None;
+        }
+        let data: Value =
+            serde_json::from_slice(&bounded_response(response, MAX_API_RESPONSE_BYTES).await?)
+                .ok()?;
+        let text = Self::complete_text(&data)?;
+        Some(OpenAiClient::normalize_scam_json(&text).unwrap_or(text))
     }
 }
 
@@ -572,7 +691,7 @@ impl VisionGenerator for OpenAiClient {
 
         let mut content = vec![json!({ "type": "text", "text": request.prompt })];
         for image_url in images {
-            if let Some(data_uri) = self.image_data_uri(&image_url).await {
+            if let Some(data_uri) = Self::image_data_uri(&self.http, &image_url).await {
                 content.push(json!({
                     "type": "image_url",
                     "image_url": { "url": data_uri },
@@ -1375,12 +1494,181 @@ mod tests {
     fn fireworks_from_env_ersetzt_veralteten_modellalias() {
         let client = FireworksClient::from_env(|key| match key {
             "FIREWORK_API_KEY" => Some("fw-key".to_string()),
-            "FIREWORK_MODEL" => Some(LEGACY_FIREWORKS_MODEL.to_string()),
+            "FIREWORK_MODEL" => Some("accounts/fireworks/models/deepseek-v4-flash".into()),
             _ => None,
         })
         .expect("fireworks client");
 
         assert_eq!(client.model, DEFAULT_FIREWORKS_MODEL);
+    }
+
+    #[tokio::test]
+    async fn bounded_reads_reject_unknown_length_and_keep_small_images() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn response(body: Vec<u8>) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                for chunk in body.chunks(4096) {
+                    if stream.write_all(chunk).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            format!("http://{addr}/image.png")
+        }
+        let client = FireworksClient::http_client().expect("HTTP client");
+        let url = response(vec![1; 1024]).await;
+        let raw = client.get(url).send().await.expect("response");
+        assert_eq!(raw.content_length(), None);
+        assert!(bounded_response(raw, 512).await.is_none());
+        let url = response(vec![1; MAX_OPENAI_IMAGE_BYTES as usize + 1]).await;
+        assert!(OpenAiClient::image_data_uri(&client, &url).await.is_none());
+        let url = response(vec![1, 2, 3]).await;
+        assert_eq!(
+            OpenAiClient::image_data_uri(&client, &url).await.as_deref(),
+            Some("data:image/png;base64,AQID")
+        );
+        let url = response(Vec::new()).await;
+        assert!(OpenAiClient::image_data_uri(&client, &url).await.is_none());
+    }
+
+    #[test]
+    fn vision_urls_allow_only_exact_https_discord_cdn_or_data() {
+        assert!(trusted_image_url(
+            "https://cdn.discordapp.com/attachments/1/a.png?ex=123"
+        ));
+        assert!(trusted_image_url(
+            "https://media.discordapp.net/attachments/1/a.png"
+        ));
+        assert!(trusted_image_url("data:image/png;base64,AQID"));
+        for url in [
+            "http://cdn.discordapp.com/a.png",
+            "https://cdn.discordapp.com.evil.test/a.png",
+            "https://localhost/a.png",
+            "https://127.0.0.1/a.png",
+            "https://user@cdn.discordapp.com/a.png",
+            "https://cdn.discordapp.com:444/a.png",
+        ] {
+            assert!(!trusted_image_url(url), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fireworks_transport_rejects_redirect_and_oversized_api_body() {
+        use axum::{body::Body, http::Response, routing::post, Router};
+        let app = Router::new()
+            .route(
+                "/redirect/chat/completions",
+                post(|| async {
+                    Response::builder()
+                        .status(302)
+                        .header("location", "/target")
+                        .body(Body::empty())
+                        .expect("redirect")
+                }),
+            )
+            .route(
+                "/large/chat/completions",
+                post(|| async {
+                    Response::builder()
+                        .body(Body::from(vec![b' '; MAX_API_RESPONSE_BYTES as usize + 1]))
+                        .expect("large")
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        for route in ["redirect", "large"] {
+            let client = FireworksClient::new(
+                format!("http://{addr}/{route}"),
+                "synthetic-key",
+                DEFAULT_FIREWORKS_MODEL,
+            )
+            .expect("HTTP client");
+            assert!(client
+                .generate_multimodal(GenerateMultimodalRequest {
+                    prompt: "Prüfen".into(),
+                    image_urls: vec!["data:image/png;base64,AQID".into()],
+                    system_prompt: None,
+                    model: None,
+                    max_output_tokens: Some(30),
+                    temperature: 0.0,
+                })
+                .await
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn fireworks_vision_keeps_images_json_and_disables_reasoning() {
+        use axum::{routing::post, Json, Router};
+        let captured = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let cap = captured.clone();
+        let app = Router::new().route("/chat/completions", post(move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+            let cap = cap.clone();
+            async move {
+                assert_eq!(headers.get("authorization").and_then(|v| v.to_str().ok()), Some("Bearer synthetic-key"));
+                cap.lock().expect("capture").push(body);
+                Json(json!({"choices": [{"finish_reason": "stop", "message": {"content": "{\"is_scam\":false,\"confidence\":0.9,\"reason\":\"klar\"}"}}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let client = FireworksClient::new(
+            format!("http://{addr}"),
+            "synthetic-key",
+            DEFAULT_FIREWORKS_MODEL,
+        )
+        .expect("HTTP client");
+        let image = "data:image/png;base64,c3ludGhldGlj";
+        let response = client
+            .generate_multimodal(GenerateMultimodalRequest {
+                prompt: "Bild prüfen".into(),
+                image_urls: vec![image.into()],
+                system_prompt: Some("JSON".into()),
+                model: None,
+                max_output_tokens: Some(300),
+                temperature: 0.0,
+            })
+            .await
+            .expect("Bildantwort");
+        assert!(response.contains("klar"));
+        let requests = captured.lock().expect("capture");
+        assert_eq!(requests.len(), 1);
+        let body = &requests[0];
+        assert_eq!(body["model"], DEFAULT_FIREWORKS_MODEL);
+        assert_eq!(body["max_tokens"], 300);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["messages"][1]["content"][1]["image_url"]["url"], image);
+        assert!(FireworksClient::complete_text(
+            &json!({"choices":[{"finish_reason":"length", "message":{"content":"partial"}}]})
+        )
+        .is_none());
+        assert!(
+            FireworksClient::complete_text(&json!({"choices":[{"message":{"content":""}}]}))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1415,7 +1703,8 @@ mod tests {
             axum::serve(listener, app).await.expect("serve");
         });
         let base = format!("http://{addr}");
-        let client = FireworksClient::new(&base, "fw-key", DEFAULT_FIREWORKS_MODEL);
+        let client =
+            FireworksClient::new(&base, "fw-key", DEFAULT_FIREWORKS_MODEL).expect("HTTP client");
 
         let text = client
             .generate_text(GenerateRequest {
@@ -1441,6 +1730,17 @@ mod tests {
 
         assert_eq!(text.as_deref(), Some("{\"category\":\"game_related_ok\"}"));
         assert_eq!(normal_text.as_deref(), text.as_deref());
+        assert!(client
+            .generate_text(GenerateRequest {
+                prompt: "Explizites Denken".into(),
+                system_prompt: None,
+                model: None,
+                max_output_tokens: Some(100),
+                reasoning_effort: Some("high".into()),
+                temperature: 0.0,
+            })
+            .await
+            .is_some());
         let captured = captured.lock().expect("lock");
         assert_eq!(captured[0]["model"], DEFAULT_FIREWORKS_MODEL);
         assert_eq!(captured[0]["messages"][0]["role"], "system");
@@ -1449,7 +1749,8 @@ mod tests {
         assert_eq!(captured[0]["temperature"], 0.0);
         assert_eq!(captured[0]["response_format"]["type"], "json_object");
         assert_eq!(captured[0]["reasoning_effort"], "none");
-        assert!(captured[1].get("reasoning_effort").is_none());
+        assert_eq!(captured[1]["reasoning_effort"], "none");
+        assert_eq!(captured[2]["reasoning_effort"], "high");
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.

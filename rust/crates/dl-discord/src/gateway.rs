@@ -257,6 +257,7 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        self.adapter.record_bot_user_id(ready.user.id.get());
         self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter.voice_cache_health.ready(
             ctx.shard_id.0,

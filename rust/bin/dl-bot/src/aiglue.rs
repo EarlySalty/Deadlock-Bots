@@ -152,6 +152,27 @@ fn concierge_line(concierge: &dl_community::concierge::ConciergeConfig) -> Inven
     ))
 }
 
+pub fn paten_inventory_line(counts: &dl_community::concierge::PatenInventar) -> String {
+    let zahl = |wert: i64| {
+        if wert < 0 {
+            "unbekannt".to_string()
+        } else {
+            wert.to_string()
+        }
+    };
+    format!(
+        "Paten: {} mit Rolle, {} offene Anfragen, {} aktive Patenschaften, Leitfaden: {}",
+        zahl(counts.mit_rolle),
+        zahl(counts.offene_anfragen),
+        zahl(counts.aktive_patenschaften),
+        if counts.leitfaden_gepostet {
+            "gepostet"
+        } else {
+            "fehlt"
+        }
+    )
+}
+
 /// Schreibt das Inventar ins Journal — eine Zeile je Aussage.
 pub fn log_ai_startup_inventory(
     provider_config: &Result<dl_ai::LlmProviderConfig, dl_ai::LlmProviderConfigError>,
@@ -242,6 +263,28 @@ mod tests {
         assert!(text.contains("voice_hint"), "{text}");
         assert!(text.contains("turnier_vorschlag"), "{text}");
         assert!(text.contains("moderation_verify"), "{text}");
+    }
+
+    #[test]
+    fn paten_inventarzeile_nennt_alle_kennzahlen() {
+        let line = paten_inventory_line(&dl_community::concierge::PatenInventar {
+            mit_rolle: 4,
+            offene_anfragen: 2,
+            aktive_patenschaften: 1,
+            leitfaden_gepostet: true,
+        });
+        assert_eq!(
+            line,
+            "Paten: 4 mit Rolle, 2 offene Anfragen, 1 aktive Patenschaften, Leitfaden: gepostet"
+        );
+        let fehlt = paten_inventory_line(&dl_community::concierge::PatenInventar {
+            mit_rolle: -1,
+            offene_anfragen: 0,
+            aktive_patenschaften: 0,
+            leitfaden_gepostet: false,
+        });
+        assert!(fehlt.contains("unbekannt mit Rolle"));
+        assert!(fehlt.contains("Leitfaden: fehlt"));
     }
 
     #[test]
