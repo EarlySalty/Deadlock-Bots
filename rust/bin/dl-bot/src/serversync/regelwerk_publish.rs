@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -67,7 +65,7 @@ pub const REGELWERK_SECTION_MODERATION: &str = "**🛡️ Moderation & Konsequen
 pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1491953161747955853> — Fragen über Server, Bots und Concierge\n- <#1426220702054355077> — Community-Fragen; einen Deadlock-Invite gibt es in <#1464736918951432222>\n- <#1522769149208821881> — Mitspieler finden";
 pub const REGELWERK_SECTION_DATENSCHUTZ: &str = "**🔒 Datenschutz & KI-Moderation**\n\n**Moderation & KI**\nNachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.\n\n**Speicherung**\nNormale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.\n\n**Rechte, Discord-ToS & Kontakt**\nAuskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner.\n\n**Unterlagen zum Nachlesen**\nDie Auftragsverarbeitung unseres KI-Dienstleisters kannst du direkt im Browser öffnen: [Fireworks AI (PDF)](https://deutsche-deadlock-community.de/dokus/datenschutz/fireworks-ai-auftragsverarbeitung.pdf).";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkPublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -88,7 +86,7 @@ pub struct RegelwerkPublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -106,12 +104,12 @@ pub struct RegelwerkBannerOutput {
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkMessagePayload {
     pub flags: u64,
     pub allowed_mentions: RegelwerkAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<RegelwerkPayloadAttachment>,
 }
 
@@ -120,12 +118,12 @@ pub struct RegelwerkAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RegelwerkPayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,7 +212,7 @@ struct RegelwerkBuiltMessage {
 
 #[cfg(test)]
 pub fn regelwerk_message_id_key(message_index: usize) -> String {
-    format!("{REGELWERK_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(REGELWERK_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_regelwerk_publish_output(
@@ -226,7 +224,7 @@ pub fn build_regelwerk_publish_output(
 ) -> Result<RegelwerkPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_regelwerk_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = regelwerk_messages(repo_root, &config, &mut warnings);
+    let built_messages = regelwerk_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -250,7 +248,7 @@ pub fn build_regelwerk_publish_output(
         validate_regelwerk_message_budget(&message.payload)?;
     }
 
-    let payload_hash = regelwerk_payload_hash(repo_root, &messages)?;
+    let payload_hash = regelwerk_payload_hash(&messages)?;
     let repost_required =
         !regelwerk_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -295,10 +293,7 @@ pub fn regelwerk_payload_is_unchanged(output: &RegelwerkPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn regelwerk_payload_hash(
-    repo_root: &Path,
-    messages: &[RegelwerkMessageOutput],
-) -> Result<String, String> {
+pub fn regelwerk_payload_hash(messages: &[RegelwerkMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -306,27 +301,18 @@ pub fn regelwerk_payload_hash(
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Regelwerk-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
-                    Ok(RegelwerkPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
-                    })
+                .map(|attachment| RegelwerkPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(RegelwerkPayloadHashMessage {
+                .collect::<Vec<_>>();
+            RegelwerkPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("Regelwerk-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
@@ -486,19 +472,13 @@ fn load_regelwerk_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedRegelwerkConfig, String> {
     let path = repo_root.join(REGELWERK_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedRegelwerkConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
+        .map_err(|reason| format!("Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Regelwerk-Textdatei `{REGELWERK_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedRegelwerkConfig::from_defaults());
     };
 
     let file = toml::from_str::<RegelwerkTextsToml>(&raw).map_err(|err| {
@@ -557,19 +537,20 @@ fn regelwerk_messages(
     repo_root: &Path,
     config: &ResolvedRegelwerkConfig,
     warnings: &mut Vec<String>,
-) -> Vec<RegelwerkBuiltMessage> {
-    let banner = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings);
+) -> Result<Vec<RegelwerkBuiltMessage>, String> {
+    let loaded = optional_regelwerk_banner(repo_root, REGELWERK_HERO_FILENAME, warnings)?;
+    let banner = loaded.as_ref().map(|loaded| loaded.output.clone());
     let mut components = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = &banner {
+    if let Some(loaded) = loaded {
         components.push(media_gallery(
             REGELWERK_COMPONENT_ID_HERO_MEDIA,
-            &banner.filename,
+            &loaded.output.filename,
         ));
         attachments.push(RegelwerkPayloadAttachment {
             id: 0,
-            filename: banner.filename.clone(),
-            relative_path: banner.relative_path.clone(),
+            filename: loaded.output.filename,
+            bytes: loaded.bytes,
         });
     }
 
@@ -618,7 +599,7 @@ fn regelwerk_messages(
         ],
     ));
 
-    vec![RegelwerkBuiltMessage {
+    Ok(vec![RegelwerkBuiltMessage {
         banner,
         payload: RegelwerkMessagePayload {
             flags: REGELWERK_COMPONENTS_V2_FLAG,
@@ -626,7 +607,7 @@ fn regelwerk_messages(
             components,
             attachments,
         },
-    }]
+    }])
 }
 
 fn section_text(title: &str, body: &str) -> String {
@@ -641,20 +622,26 @@ fn optional_regelwerk_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<RegelwerkBannerOutput> {
+) -> Result<Option<crate::serversync::LoadedBanner<RegelwerkBannerOutput>>, String> {
     let relative_path = format!("{REGELWERK_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Regelwerk-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
-        ));
-        return None;
-    }
-    Some(RegelwerkBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
-    })
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Regelwerk",
+        &relative_path,
+        "Publish laeuft ohne Banner",
+        warnings,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: RegelwerkBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
+        bytes,
+    }))
 }
 
 fn planned_regelwerk_action(
@@ -822,6 +809,7 @@ fn button(id: u64, label: &str, style: u8, custom_id: &str) -> Value {
 mod tests {
     use super::*;
     use dl_discord::InteractionHandler;
+    use std::fs;
     use std::path::Path;
 
     fn write_regelwerk_texts_file(repo_root: &Path, body: &str) {

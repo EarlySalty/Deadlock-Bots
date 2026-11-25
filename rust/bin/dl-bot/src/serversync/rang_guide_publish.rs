@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -102,7 +100,7 @@ pub const RANG_GUIDE_UNLINK_BUTTON_LABEL: &str = "🔓 Verknüpfung entfernen";
 pub const RANG_GUIDE_TWITCH_HINT: &str = "-# Optional: Wenn du auf Twitch zuschaust, verknüpf dein Twitch-Konto, dann erkennt dich der Bot in Partner-Streams.";
 pub const RANG_GUIDE_TWITCH_LINK_BUTTON_LABEL: &str = "🟣 Twitch verknüpfen";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuidePublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -123,7 +121,7 @@ pub struct RangGuidePublishOutput {
     pub deleted_legacy_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuideMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -141,12 +139,12 @@ pub struct RangGuideBannerOutput {
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuideMessagePayload {
     pub flags: u64,
     pub allowed_mentions: RangGuideAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<RangGuidePayloadAttachment>,
 }
 
@@ -155,12 +153,12 @@ pub struct RangGuideAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RangGuidePayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,8 +273,9 @@ pub fn rang_guide_repo_root() -> PathBuf {
     crate::runtime_assets::release_root().expect("Releasewurzel des laufenden Bot-Binarys fehlt")
 }
 
+#[cfg(test)]
 pub fn rang_guide_message_id_key(message_index: usize) -> String {
-    format!("{RANG_GUIDE_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(RANG_GUIDE_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_rang_guide_publish_output(
@@ -288,7 +287,7 @@ pub fn build_rang_guide_publish_output(
 ) -> Result<RangGuidePublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_rang_guide_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = rang_guide_messages(repo_root, &config, &mut warnings);
+    let built_messages = rang_guide_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -312,7 +311,7 @@ pub fn build_rang_guide_publish_output(
         validate_rang_guide_message_budget(&message.payload)?;
     }
 
-    let payload_hash = rang_guide_payload_hash(repo_root, &messages)?;
+    let payload_hash = rang_guide_payload_hash(&messages)?;
     let repost_required =
         !rang_guide_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -357,10 +356,7 @@ pub fn rang_guide_payload_is_unchanged(output: &RangGuidePublishOutput) -> bool 
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn rang_guide_payload_hash(
-    repo_root: &Path,
-    messages: &[RangGuideMessageOutput],
-) -> Result<String, String> {
+pub fn rang_guide_payload_hash(messages: &[RangGuideMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -368,27 +364,18 @@ pub fn rang_guide_payload_hash(
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Rang-Guide-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
-                    Ok(RangGuidePayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
-                    })
+                .map(|attachment| RangGuidePayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(RangGuidePayloadHashMessage {
+                .collect::<Vec<_>>();
+            RangGuidePayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("Rang-Guide-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
@@ -485,19 +472,13 @@ fn load_rang_guide_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedRangGuideConfig, String> {
     let path = repo_root.join(RANG_GUIDE_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedRangGuideConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
+        .map_err(|reason| format!("Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "Rang-Guide-Textdatei `{RANG_GUIDE_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedRangGuideConfig::from_defaults());
     };
 
     let file = toml::from_str::<RangGuideTextsToml>(&raw).map_err(|err| {
@@ -572,29 +553,21 @@ fn rang_guide_messages(
     repo_root: &Path,
     config: &ResolvedRangGuideConfig,
     warnings: &mut Vec<String>,
-) -> Vec<RangGuideBuiltMessage> {
-    let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings);
-    let step_banners: Vec<Option<RangGuideBannerOutput>> = RANG_GUIDE_STEP_BANNER_FILENAMES
-        .iter()
-        .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
-        .collect();
+) -> Result<Vec<RangGuideBuiltMessage>, String> {
+    let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings)?;
+    let step_banners: Vec<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>> =
+        RANG_GUIDE_STEP_BANNER_FILENAMES
+            .iter()
+            .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
+            .collect::<Result<_, _>>()?;
     let help_banner =
-        optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings);
-
-    let mut banner_candidates: Vec<RangGuideBannerOutput> = Vec::new();
-    for banner in std::iter::once(&hero_banner)
-        .chain(step_banners.iter())
-        .chain(std::iter::once(&help_banner))
-        .flatten()
-    {
-        banner_candidates.push(banner.clone());
-    }
+        optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings)?;
 
     let mut hero_components = Vec::new();
     if let Some(banner) = &hero_banner {
         hero_components.push(media_gallery(
             RANG_GUIDE_COMPONENT_ID_HERO_MEDIA,
-            &banner.filename,
+            &banner.output.filename,
         ));
     }
     hero_components.push(text_display(
@@ -605,7 +578,7 @@ fn rang_guide_messages(
     let step_media = |index: usize, component_id: u64| -> Option<Value> {
         step_banners[index]
             .as_ref()
-            .map(|banner| media_gallery(component_id, &banner.filename))
+            .map(|banner| media_gallery(component_id, &banner.output.filename))
     };
 
     let mut step1_children = Vec::new();
@@ -670,7 +643,7 @@ fn rang_guide_messages(
     ));
 
     let mut extras_children = Vec::new();
-    if let Some(banner) = &help_banner {
+    if let Some(banner) = help_banner.as_ref().map(|loaded| &loaded.output) {
         extras_children.push(media_gallery(
             RANG_GUIDE_COMPONENT_ID_EXTRAS_MEDIA,
             &banner.filename,
@@ -723,7 +696,17 @@ fn rang_guide_messages(
         extras_children,
     ));
 
-    chunk_rang_guide_components(components, &banner_candidates, hero_banner)
+    let hero_output = hero_banner.as_ref().map(|loaded| loaded.output.clone());
+    let banner_candidates = std::iter::once(hero_banner)
+        .chain(step_banners)
+        .chain(std::iter::once(help_banner))
+        .flatten()
+        .collect();
+    Ok(chunk_rang_guide_components(
+        components,
+        banner_candidates,
+        hero_output,
+    ))
 }
 
 /// `**Titel**\nBody` — oder nur der Body, wenn der Titel leer ist (Ueberschrift
@@ -739,7 +722,7 @@ fn section_text(title: &str, body: &str) -> String {
 
 fn chunk_rang_guide_components(
     components: Vec<Value>,
-    banner_candidates: &[RangGuideBannerOutput],
+    banner_candidates: Vec<crate::serversync::LoadedBanner<RangGuideBannerOutput>>,
     hero_banner: Option<RangGuideBannerOutput>,
 ) -> Vec<RangGuideBuiltMessage> {
     let mut chunks = Vec::<Vec<Value>>::new();
@@ -766,27 +749,42 @@ fn chunk_rang_guide_components(
         chunks.push(current);
     }
 
-    chunks
-        .into_iter()
+    let chunk_refs: Vec<Vec<String>> = chunks
+        .iter()
         .map(|components| {
-            // Attachments gehoeren zu der Nachricht, deren Components sie per
-            // attachment://-URL referenzieren; IDs pro Nachricht ab 0.
             let mut refs = Vec::new();
-            for component in &components {
+            for component in components {
                 collect_attachment_refs(component, &mut refs);
             }
+            refs
+        })
+        .collect();
+    let mut banner_slots: Vec<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>> =
+        banner_candidates.into_iter().map(Some).collect();
+    chunks
+        .into_iter()
+        .zip(&chunk_refs)
+        .enumerate()
+        .map(|(chunk_index, (components, refs))| {
+            let later_refs = &chunk_refs[chunk_index + 1..];
             let attachments = refs
                 .iter()
                 .filter_map(|name| {
-                    banner_candidates
-                        .iter()
-                        .find(|banner| &banner.filename == name)
+                    let slot = banner_slots.iter_mut().find(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|banner| &banner.output.filename == name)
+                    })?;
+                    if later_refs.iter().any(|later| later.contains(name)) {
+                        slot.clone()
+                    } else {
+                        slot.take()
+                    }
                 })
                 .enumerate()
                 .map(|(index, banner)| RangGuidePayloadAttachment {
                     id: index as u8,
-                    filename: banner.filename.clone(),
-                    relative_path: banner.relative_path.clone(),
+                    filename: banner.output.filename,
+                    bytes: banner.bytes,
                 })
                 .collect();
             let has_hero = hero_banner
@@ -829,20 +827,26 @@ fn optional_rang_guide_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<RangGuideBannerOutput> {
+) -> Result<Option<crate::serversync::LoadedBanner<RangGuideBannerOutput>>, String> {
     let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Rang-Guide-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
-        ));
-        return None;
-    }
-    Some(RangGuideBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
-    })
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Rang-Guide",
+        &relative_path,
+        "Publish laeuft ohne Banner",
+        warnings,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: RangGuideBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
+        bytes,
+    }))
 }
 
 fn planned_rang_guide_action(
@@ -1019,6 +1023,7 @@ fn link_button(id: u64, label: &str, url: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     fn write_rang_guide_texts_file(repo_root: &Path, body: &str) {
@@ -1396,7 +1401,7 @@ step3_body = "{long_step3}"
                 .map(|index| RangGuidePayloadAttachment {
                     id: index as u8,
                     filename: format!("banner-{index}.png"),
-                    relative_path: format!("assets/welcome-banners/banner-{index}.png"),
+                    bytes: Vec::new(),
                 })
                 .collect(),
         };

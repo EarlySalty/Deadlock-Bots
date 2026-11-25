@@ -1,6 +1,4 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -166,7 +164,7 @@ pub const FAQ_DEFAULT_ENTRIES: &[FaqDefaultEntry] = &[
     },
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqPublishOutput {
     pub guild_id: u64,
     pub channel_id: u64,
@@ -185,7 +183,7 @@ pub struct FaqPublishOutput {
     pub deleted_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -203,12 +201,12 @@ pub struct FaqBannerOutput {
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqMessagePayload {
     pub flags: u64,
     pub allowed_mentions: FaqAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FaqPayloadAttachment>,
 }
 
@@ -217,12 +215,12 @@ pub struct FaqAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FaqPayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,7 +286,7 @@ struct FaqBuiltMessage {
 
 #[cfg(test)]
 pub fn faq_message_id_key(message_index: usize) -> String {
-    format!("{FAQ_MESSAGE_ID_PREFIX}{message_index}")
+    crate::serversync::static_v2_message_id_key(FAQ_MESSAGE_ID_PREFIX, message_index)
 }
 
 pub fn build_faq_publish_output(
@@ -300,7 +298,7 @@ pub fn build_faq_publish_output(
 ) -> Result<FaqPublishOutput, String> {
     let mut warnings = Vec::new();
     let config = load_faq_runtime_config(repo_root, &mut warnings)?;
-    let built_messages = faq_messages(repo_root, &config, &mut warnings);
+    let built_messages = faq_messages(repo_root, &config, &mut warnings)?;
 
     let mut messages = Vec::new();
     for (message_index, built) in built_messages.into_iter().enumerate() {
@@ -324,7 +322,7 @@ pub fn build_faq_publish_output(
         validate_faq_message_budget(&message.payload)?;
     }
 
-    let payload_hash = faq_payload_hash(repo_root, &messages)?;
+    let payload_hash = faq_payload_hash(&messages)?;
     let repost_required =
         !faq_storage_matches(stored_payload_format, stored_message_ids, messages.len());
     let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
@@ -367,7 +365,7 @@ pub fn faq_payload_is_unchanged(output: &FaqPublishOutput) -> bool {
     output.stored_payload_hash.as_deref() == Some(output.payload_hash.as_str())
 }
 
-pub fn faq_payload_hash(repo_root: &Path, messages: &[FaqMessageOutput]) -> Result<String, String> {
+pub fn faq_payload_hash(messages: &[FaqMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -375,27 +373,18 @@ pub fn faq_payload_hash(repo_root: &Path, messages: &[FaqMessageOutput]) -> Resu
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "FAQ-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
-                    Ok(FaqPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
-                    })
+                .map(|attachment| FaqPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(FaqPayloadHashMessage {
+                .collect::<Vec<_>>();
+            FaqPayloadHashMessage {
                 payload: &message.payload,
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("FAQ-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
@@ -542,19 +531,13 @@ fn load_faq_runtime_config(
     warnings: &mut Vec<String>,
 ) -> Result<ResolvedFaqConfig, String> {
     let path = repo_root.join(FAQ_TEXTS_FILE);
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            warnings.push(format!(
-                "FAQ-Textdatei `{FAQ_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
-            ));
-            return Ok(ResolvedFaqConfig::from_defaults());
-        }
-        Err(err) => {
-            return Err(format!(
-                "FAQ-Textdatei `{FAQ_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
-            ));
-        }
+    let Some(raw) = dl_core::optional_file::read_to_string(&path)
+        .map_err(|reason| format!("FAQ-Textdatei `{FAQ_TEXTS_FILE}` {reason}"))?
+    else {
+        warnings.push(format!(
+            "FAQ-Textdatei `{FAQ_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+        ));
+        return Ok(ResolvedFaqConfig::from_defaults());
     };
 
     let file = toml::from_str::<FaqTextsToml>(&raw).map_err(|err| {
@@ -624,16 +607,20 @@ fn faq_messages(
     repo_root: &Path,
     config: &ResolvedFaqConfig,
     warnings: &mut Vec<String>,
-) -> Vec<FaqBuiltMessage> {
-    let banner = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings);
+) -> Result<Vec<FaqBuiltMessage>, String> {
+    let loaded = optional_faq_banner(repo_root, FAQ_HERO_FILENAME, warnings)?;
+    let banner = loaded.as_ref().map(|loaded| loaded.output.clone());
     let mut components = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = &banner {
-        components.push(media_gallery(FAQ_COMPONENT_ID_HERO_MEDIA, &banner.filename));
+    if let Some(loaded) = loaded {
+        components.push(media_gallery(
+            FAQ_COMPONENT_ID_HERO_MEDIA,
+            &loaded.output.filename,
+        ));
         attachments.push(FaqPayloadAttachment {
             id: 0,
-            filename: banner.filename.clone(),
-            relative_path: banner.relative_path.clone(),
+            filename: loaded.output.filename,
+            bytes: loaded.bytes,
         });
     }
 
@@ -656,7 +643,7 @@ fn faq_messages(
         ],
     ));
 
-    vec![FaqBuiltMessage {
+    Ok(vec![FaqBuiltMessage {
         banner,
         payload: FaqMessagePayload {
             flags: FAQ_COMPONENTS_V2_FLAG,
@@ -664,7 +651,7 @@ fn faq_messages(
             components,
             attachments,
         },
-    }]
+    }])
 }
 
 fn section_text(title: &str, body: &str) -> String {
@@ -679,20 +666,26 @@ fn optional_faq_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<FaqBannerOutput> {
+) -> Result<Option<crate::serversync::LoadedBanner<FaqBannerOutput>>, String> {
     let relative_path = format!("{FAQ_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "FAQ-Banner `{relative_path}` fehlt; Publish laeuft ohne Banner"
-        ));
-        return None;
-    }
-    Some(FaqBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
-    })
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "FAQ",
+        &relative_path,
+        "Publish laeuft ohne Banner",
+        warnings,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: FaqBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
+        bytes,
+    }))
 }
 
 fn planned_faq_action(
@@ -877,6 +870,7 @@ fn select_option(option: &ResolvedFaqOption) -> Value {
 mod tests {
     use super::*;
     use dl_discord::InteractionHandler;
+    use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
 

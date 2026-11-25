@@ -1,8 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
 pub const VOICE_UX_CHANNEL_ID: u64 = dl_voice::router::ROUTER_TEXT_CHANNEL_ID;
@@ -68,7 +67,7 @@ pub const VOICE_UX_MARKER_COMPONENT_IDS: &[u64] = &[
     VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxPublishOutput {
     pub guild_id: u64,
     pub dry_run: bool,
@@ -81,7 +80,14 @@ pub struct VoiceUxPublishOutput {
     pub forum_post: VoiceUxForumPostOutput,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct VoiceUxBanners {
+    guide: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    lfg: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    spawn: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+    manage: Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxTargetOutput {
     pub channel_id: u64,
     pub stored_payload_format: Option<String>,
@@ -96,7 +102,7 @@ pub struct VoiceUxTargetOutput {
     pub pinned_message_ids: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxMessageOutput {
     pub message_index: usize,
     pub message_key: String,
@@ -107,14 +113,14 @@ pub struct VoiceUxMessageOutput {
     pub payload: VoiceUxMessagePayload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxBannerOutput {
     pub filename: String,
     pub relative_path: String,
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxForumPostOutput {
     pub forum_channel_id: u64,
     pub title: String,
@@ -128,29 +134,29 @@ pub struct VoiceUxForumPostOutput {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxMessagePayload {
     pub flags: u64,
     pub allowed_mentions: VoiceUxAllowedMentions,
     pub components: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<VoiceUxPayloadAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxAllowedMentions {
     pub parse: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxPayloadAttachment {
     pub id: u8,
     pub filename: String,
     #[serde(skip)]
-    pub relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VoiceUxLegacyCleanupCandidate {
     pub channel_id: u64,
     pub message_id: u64,
@@ -195,27 +201,33 @@ pub fn build_voice_ux_publish_output(
     dry_run: bool,
 ) -> Result<VoiceUxPublishOutput, String> {
     let mut warnings = Vec::new();
-    let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings);
+    let banners = read_voice_ux_banners(repo_root, &mut warnings)?;
+    let base_messages = voice_ux_messages(banners, forum_thread_id);
     validate_voice_ux_messages(&base_messages)?;
-    let payload_hash = voice_ux_payload_hash(repo_root, &base_messages)?;
+    let payload_hash = voice_ux_payload_hash(&base_messages)?;
     let mut targets = Vec::new();
+    let message_count = base_messages.len();
+    let last_target = VOICE_UX_TARGET_CHANNEL_IDS.len().saturating_sub(1);
+    let mut base_messages = Some(base_messages);
 
-    for channel_id in VOICE_UX_TARGET_CHANNEL_IDS {
+    for (target_index, channel_id) in VOICE_UX_TARGET_CHANNEL_IDS.into_iter().enumerate() {
         let stored_ids = stored_message_ids
             .get(&channel_id)
             .cloned()
             .unwrap_or_default();
         let stored_payload_format = stored_payload_formats.get(&channel_id).cloned().flatten();
         let stored_payload_hash = stored_payload_hashes.get(&channel_id).cloned().flatten();
-        let repost_required = !voice_ux_storage_matches(
-            stored_payload_format.as_deref(),
-            &stored_ids,
-            base_messages.len(),
-        );
+        let repost_required =
+            !voice_ux_storage_matches(stored_payload_format.as_deref(), &stored_ids, message_count);
         let hash_matches = stored_payload_hash.as_deref() == Some(payload_hash.as_str());
-        let messages = base_messages
-            .iter()
-            .cloned()
+        let target_base = if target_index == last_target {
+            base_messages.take()
+        } else {
+            base_messages.clone()
+        };
+        let messages = target_base
+            .unwrap_or_default()
+            .into_iter()
             .enumerate()
             .map(|(message_index, mut message)| {
                 let stored_message_id = stored_ids.get(message_index).copied();
@@ -246,18 +258,15 @@ pub fn build_voice_ux_publish_output(
     }
 
     let forum_payload = voice_ux_forum_payload();
-    let forum_payload_hash = voice_ux_payload_hash(
-        repo_root,
-        &[VoiceUxMessageOutput {
-            message_index: 0,
-            message_key: "lfg_forum".to_string(),
-            action: String::new(),
-            stored_message_id: None,
-            message_id: None,
-            payload: forum_payload.clone(),
-            banner: None,
-        }],
-    )?;
+    let forum_payload_hash = voice_ux_payload_hash(&[VoiceUxMessageOutput {
+        message_index: 0,
+        message_key: "lfg_forum".to_string(),
+        action: String::new(),
+        stored_message_id: None,
+        message_id: None,
+        payload: forum_payload.clone(),
+        banner: None,
+    }])?;
     let forum_hash_matches = forum_stored_payload_hash == Some(forum_payload_hash.as_str());
     let forum_action = if dry_run {
         match (forum_thread_id, forum_hash_matches) {
@@ -311,21 +320,73 @@ pub fn voice_ux_forum_payload_is_unchanged(forum: &VoiceUxForumPostOutput) -> bo
 }
 
 pub fn relink_voice_ux_forum_thread(
-    repo_root: &Path,
     output: &mut VoiceUxPublishOutput,
     thread_id: u64,
 ) -> Result<(), String> {
-    let mut warnings = Vec::new();
-    let fresh_messages = voice_ux_messages(repo_root, Some(thread_id), &mut warnings);
-    validate_voice_ux_messages(&fresh_messages)?;
-    let payload_hash = voice_ux_payload_hash(repo_root, &fresh_messages)?;
+    let link_text = text_display_content(
+        &lfg_link_container(Some(thread_id)),
+        VOICE_UX_COMPONENT_ID_LFG_TEXT,
+    )
+    .ok_or_else(|| "Voice-UX-Mitspieler-finden-Text fehlt im Link-Container".to_string())?;
     for target in &mut output.targets {
-        target.payload_hash = payload_hash.clone();
-        for (message, fresh) in target.messages.iter_mut().zip(&fresh_messages) {
-            message.payload = fresh.payload.clone();
+        let replaced: usize = target
+            .messages
+            .iter_mut()
+            .map(|message| {
+                replace_text_display_content(
+                    &mut message.payload.components,
+                    VOICE_UX_COMPONENT_ID_LFG_TEXT,
+                    &link_text,
+                )
+            })
+            .sum();
+        if replaced != 1 {
+            return Err(format!(
+                "Voice-UX-Ziel {} enthält {replaced} Mitspieler-finden-Texte statt genau einem",
+                target.channel_id
+            ));
         }
+        validate_voice_ux_messages(&target.messages)?;
+        target.payload_hash = voice_ux_payload_hash(&target.messages)?;
     }
     Ok(())
+}
+
+fn text_display_content(value: &Value, id: u64) -> Option<String> {
+    if value.get("type").and_then(Value::as_u64) == Some(10)
+        && value.get("id").and_then(Value::as_u64) == Some(id)
+    {
+        return value
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    value
+        .get("components")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(|child| text_display_content(child, id))
+}
+
+fn replace_text_display_content(components: &mut [Value], id: u64, content: &str) -> usize {
+    components
+        .iter_mut()
+        .map(|value| {
+            let own = if value.get("type").and_then(Value::as_u64) == Some(10)
+                && value.get("id").and_then(Value::as_u64) == Some(id)
+            {
+                value["content"] = Value::String(content.to_string());
+                1
+            } else {
+                0
+            };
+            let children = match value.get_mut("components") {
+                Some(Value::Array(children)) => replace_text_display_content(children, id, content),
+                _ => 0,
+            };
+            own + children
+        })
+        .sum()
 }
 
 pub fn adopt_voice_ux_message_ids(
@@ -346,10 +407,7 @@ pub fn adopt_voice_ux_message_ids(
     }
 }
 
-pub fn voice_ux_payload_hash(
-    repo_root: &Path,
-    messages: &[VoiceUxMessageOutput],
-) -> Result<String, String> {
+pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String, String> {
     let payloads = messages
         .iter()
         .map(|message| {
@@ -357,27 +415,26 @@ pub fn voice_ux_payload_hash(
                 .payload
                 .attachments
                 .iter()
-                .map(|attachment| {
-                    let path = repo_root.join(&attachment.relative_path);
-                    let bytes = fs::read(&path).map_err(|err| {
-                        format!(
-                            "Voice-UX-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
-                            path.display()
-                        )
-                    })?;
-                    Ok(VoiceUxPayloadHashAttachment {
-                        id: attachment.id,
-                        filename: attachment.filename.as_str(),
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
-                    })
+                .map(|attachment| VoiceUxPayloadHashAttachment {
+                    id: attachment.id,
+                    filename: attachment.filename.as_str(),
+                    sha256: format!("{:x}", Sha256::digest(&attachment.bytes)),
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(VoiceUxPayloadHashMessage {
-                message,
+                .collect::<Vec<_>>();
+            VoiceUxPayloadHashMessage {
+                message: VoiceUxPayloadHashContent {
+                    message_index: 0,
+                    message_key: message.message_key.as_str(),
+                    action: "",
+                    stored_message_id: None,
+                    message_id: None,
+                    banner: &message.banner,
+                    payload: &message.payload,
+                },
                 attachment_hashes,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("Voice-UX-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
@@ -385,8 +442,19 @@ pub fn voice_ux_payload_hash(
 
 #[derive(Serialize)]
 struct VoiceUxPayloadHashMessage<'a> {
-    message: &'a VoiceUxMessageOutput,
+    message: VoiceUxPayloadHashContent<'a>,
     attachment_hashes: Vec<VoiceUxPayloadHashAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct VoiceUxPayloadHashContent<'a> {
+    message_index: usize,
+    message_key: &'a str,
+    action: &'a str,
+    stored_message_id: Option<u64>,
+    message_id: Option<u64>,
+    banner: &'a Option<VoiceUxBannerOutput>,
+    payload: &'a VoiceUxMessagePayload,
 }
 
 #[derive(Serialize)]
@@ -526,34 +594,40 @@ fn text_display_chars_from_value(value: &Value) -> usize {
     own + children
 }
 
-fn voice_ux_messages(
+fn read_voice_ux_banners(
     repo_root: &Path,
-    forum_thread_id: Option<u64>,
     warnings: &mut Vec<String>,
+) -> Result<VoiceUxBanners, String> {
+    Ok(VoiceUxBanners {
+        guide: optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings)?,
+        lfg: optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings)?,
+        spawn: optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings)?,
+        manage: optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings)?,
+    })
+}
+
+fn voice_ux_messages(
+    banners: VoiceUxBanners,
+    forum_thread_id: Option<u64>,
 ) -> Vec<VoiceUxMessageOutput> {
-    let guide_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings);
-    let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings);
-    let spawn_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings);
-    let manage_banner =
-        optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings);
+    let VoiceUxBanners {
+        guide,
+        lfg,
+        spawn,
+        manage,
+    } = banners;
     vec![
         message(
             "guide_lfg",
-            guide_banner.clone(),
+            guide.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
                 VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR,
                 vec![
-                    (
-                        VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
-                        guide_banner.as_ref(),
-                        guide_container(),
-                    ),
+                    (VOICE_UX_COMPONENT_ID_GUIDE_MEDIA, guide, guide_container()),
                     (
                         VOICE_UX_COMPONENT_ID_LFG_MEDIA,
-                        lfg_banner.as_ref(),
+                        lfg,
                         lfg_link_container(forum_thread_id),
                     ),
                 ],
@@ -561,19 +635,15 @@ fn voice_ux_messages(
         ),
         message(
             "spawn_manage",
-            spawn_banner.clone(),
+            spawn.as_ref().map(|loaded| loaded.output.clone()),
             payload_with_banner_sections(
                 VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
                 VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR,
                 vec![
-                    (
-                        VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
-                        spawn_banner.as_ref(),
-                        spawn_container(),
-                    ),
+                    (VOICE_UX_COMPONENT_ID_SPAWN_MEDIA, spawn, spawn_container()),
                     (
                         VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
-                        manage_banner.as_ref(),
+                        manage,
                         manage_container(),
                     ),
                 ],
@@ -583,12 +653,13 @@ fn voice_ux_messages(
 }
 
 fn voice_ux_forum_payload() -> VoiceUxMessagePayload {
-    lfg_payload(
-        0,
-        VOICE_UX_COMPONENT_ID_FORUM_CONTAINER,
-        VOICE_UX_COMPONENT_ID_FORUM_TEXT,
-        VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW,
-        None,
+    payload(
+        vec![lfg_container(
+            VOICE_UX_COMPONENT_ID_FORUM_CONTAINER,
+            VOICE_UX_COMPONENT_ID_FORUM_TEXT,
+            VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW,
+        )],
+        Vec::new(),
     )
 }
 
@@ -637,24 +708,6 @@ fn guide_container() -> Value {
     )
 }
 
-fn lfg_payload(
-    media_id: u64,
-    container_id: u64,
-    text_id: u64,
-    row_id: u64,
-    banner: Option<&VoiceUxBannerOutput>,
-) -> VoiceUxMessagePayload {
-    payload_with_optional_banner(
-        media_id,
-        banner,
-        lfg_container(container_id, text_id, row_id),
-    )
-}
-
-// Panel-Variante der Mitspieler-finden-Sektion: keine eigenen Buttons — Gesuch
-// und 🔔 laufen über den Forum-Post, hierhin kommt nur der Link. Die Thread-ID
-// stammt aus dem KV; solange der Post noch nicht existiert, zeigt der Link auf
-// das Forum selbst.
 fn lfg_link_container(forum_thread_id: Option<u64>) -> Value {
     let guild_id = dl_server_as_code::DEFAULT_GUILD_ID;
     let url = match forum_thread_id {
@@ -805,24 +858,26 @@ fn manage_container() -> Value {
     )
 }
 
-// Beide Sektionen einer Message landen in EINEM Container, damit die Message
-// als eine zusammenhängende Karte rendert statt als zwei getrennte Blöcke.
 fn payload_with_banner_sections(
     container_id: u64,
     separator_id: u64,
-    sections: Vec<(u64, Option<&VoiceUxBannerOutput>, Value)>,
+    sections: Vec<(
+        u64,
+        Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>,
+        Value,
+    )>,
 ) -> VoiceUxMessagePayload {
     let mut children = Vec::new();
     let mut attachments = Vec::new();
     let section_count = sections.len();
     for (index, (media_id, banner, section_container)) in sections.into_iter().enumerate() {
         if let Some(banner) = banner {
+            children.push(media_gallery(media_id, &banner.output.filename));
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
-                filename: banner.filename.clone(),
-                relative_path: banner.relative_path.clone(),
+                filename: banner.output.filename,
+                bytes: banner.bytes,
             });
-            children.push(media_gallery(media_id, &banner.filename));
         }
         children.extend(container_children(section_container));
         if index + 1 < section_count {
@@ -840,37 +895,6 @@ fn container_children(container: Value) -> Vec<Value> {
         },
         _ => Vec::new(),
     }
-}
-
-fn payload_with_optional_banner(
-    media_id: u64,
-    banner: Option<&VoiceUxBannerOutput>,
-    container: Value,
-) -> VoiceUxMessagePayload {
-    let mut attachments = Vec::new();
-    let container = if let Some(banner) = banner {
-        attachments.push(VoiceUxPayloadAttachment {
-            id: 0,
-            filename: banner.filename.clone(),
-            relative_path: banner.relative_path.clone(),
-        });
-        container_with_leading_banner(media_id, &banner.filename, container)
-    } else {
-        container
-    };
-    payload(vec![container], attachments)
-}
-
-// Banner gehört als erstes Kind in den Container, damit Banner + Text + Buttons
-// als ein zusammenhängender Block mit durchgehendem Akzent-Balken rendern.
-fn container_with_leading_banner(media_id: u64, filename: &str, mut container: Value) -> Value {
-    if let Some(children) = container
-        .get_mut("components")
-        .and_then(Value::as_array_mut)
-    {
-        children.insert(0, media_gallery(media_id, filename));
-    }
-    container
 }
 
 fn payload(
@@ -964,25 +988,32 @@ fn optional_voice_ux_banner(
     repo_root: &Path,
     filename: &str,
     warnings: &mut Vec<String>,
-) -> Option<VoiceUxBannerOutput> {
+) -> Result<Option<crate::serversync::LoadedBanner<VoiceUxBannerOutput>>, String> {
     let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
-    let path = repo_root.join(&relative_path);
-    if !path.is_file() {
-        warnings.push(format!(
-            "Voice-UX-Banner `{relative_path}` fehlt; Publish laeuft ohne diesen Banner"
-        ));
-        return None;
-    }
-    Some(VoiceUxBannerOutput {
-        filename: filename.to_string(),
-        relative_path,
-        present: true,
-    })
+    let Some(bytes) = crate::serversync::read_optional_banner(
+        repo_root,
+        "Voice-UX",
+        &relative_path,
+        "Publish laeuft ohne diesen Banner",
+        warnings,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::serversync::LoadedBanner {
+        output: VoiceUxBannerOutput {
+            filename: filename.to_string(),
+            relative_path,
+            present: true,
+        },
+        bytes,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::Path;
 
     fn write_voice_ux_banner(repo_root: &Path, filename: &str, bytes: &[u8]) {
@@ -1215,5 +1246,42 @@ mod tests {
             &lfg_watch_only,
             bot_id
         ));
+    }
+
+    #[test]
+    fn voice_ux_relink_gleicht_einem_frischen_build_mit_thread() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_voice_ux_banners(temp.path(), b"banner");
+        let ids = BTreeMap::from([
+            (VOICE_UX_CHANNEL_ID, vec![1, 2]),
+            (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, vec![5, 6]),
+        ]);
+        let build = |thread_id| {
+            build_voice_ux_publish_output(
+                temp.path(),
+                &ids,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                thread_id,
+                None,
+                false,
+            )
+            .expect("build")
+        };
+        let fresh = build(Some(987_654_321));
+        let mut relinked = build(None);
+        assert_ne!(
+            relinked.targets[0].payload_hash,
+            fresh.targets[0].payload_hash
+        );
+        relink_voice_ux_forum_thread(&mut relinked, 987_654_321).expect("relink");
+        assert_eq!(relinked.targets, fresh.targets);
+
+        for message in &mut relinked.targets[1].messages {
+            message.payload.components.clear();
+        }
+        let error = relink_voice_ux_forum_thread(&mut relinked, 987_654_321)
+            .expect_err("missing link text");
+        assert!(error.contains("0 Mitspieler-finden-Texte"), "{error}");
     }
 }

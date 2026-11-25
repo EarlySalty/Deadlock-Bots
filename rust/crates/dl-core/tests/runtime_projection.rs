@@ -43,7 +43,9 @@ cors_origins=["https://example.invalid"]
     ] {
         assert_eq!(config.runtime_value(key).as_deref(), Some(value), "{key}");
     }
-    assert!(config.runtime_value("TWITCH_INTERNAL_API_TOKEN").is_none());
+    assert!(config
+        .runtime_value(dl_core::runtime_config::TWITCH_TOKEN_NAME)
+        .is_none());
     assert!(config.runtime_value("UNDECLARED_VALUE").is_none());
 }
 

@@ -8,6 +8,7 @@ use std::{
     collections::BTreeMap,
     fs::OpenOptions,
     io::Read,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -15,6 +16,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+pub const DISCORD_GUILD_INVITE_LIMIT: u16 = 1000;
+pub const TWITCH_INVITE_LINKS_RANGE: RangeInclusive<u16> = 0..=DISCORD_GUILD_INVITE_LIMIT;
+const _: () = assert!(*TWITCH_INVITE_LINKS_RANGE.start() == 0);
+pub const TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
+pub const CONCIERGE_TIMEOUT_SECONDS_RANGE: RangeInclusive<u64> = 1..=110;
+pub const TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
+pub const LLM_MAX_OUTPUT_TOKENS_RANGE: RangeInclusive<u32> = 1..=32_768;
+pub const LLM_TEMPERATURE_RANGE: RangeInclusive<f64> = 0.0..=2.0;
+pub const LLM_REQUEST_TIMEOUT_SECONDS_RANGE: RangeInclusive<u64> = 1..=110;
 pub const DEFAULT_CONFIG_PATH: &str = "config/bot.toml";
 
 /// Fehler enthalten keine TOML-Werte und keinen Parser-Quelltext.
@@ -205,7 +215,7 @@ pub struct FireworksConfig {
     pub model: Option<String>,
 }
 
-fn snowflake(value: &str) -> bool {
+pub(crate) fn snowflake(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|b| b.is_ascii_digit())
         && value.parse::<u64>().is_ok_and(|id| id != 0)
@@ -312,14 +322,15 @@ impl BotConfig {
     pub fn validate(&self) -> Result<(), BotConfigError> {
         self.runtime.validate()?;
         let invalid = BotConfigError::Validation;
-        if self.twitch_invites.personal_links_per_channel > 1000
-            || self.twitch_invites.guild_invite_reserve > 1000
-            || !(1..=86400).contains(&self.twitch_invites.evaluation_interval_seconds)
+        if !TWITCH_INVITE_LINKS_RANGE.contains(&self.twitch_invites.personal_links_per_channel)
+            || !TWITCH_INVITE_LINKS_RANGE.contains(&self.twitch_invites.guild_invite_reserve)
+            || !TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE
+                .contains(&self.twitch_invites.evaluation_interval_seconds)
             || self
                 .twitch_invites
                 .excluded_voice_channel_ids
                 .iter()
-                .any(|id| *id == 0 || i64::try_from(*id).is_err())
+                .any(|id| !crate::runtime_config::DISCORD_ID_RANGE.contains(id))
         {
             return Err(invalid(
                 "twitch_invites enthält ungültige Grenzen oder Kanal-IDs",
@@ -341,7 +352,9 @@ impl BotConfig {
             || steam.query().is_some()
             || steam.fragment().is_some()
             || steam.path() != "/"
-            || steam.port_or_known_default() == Some(0)
+            || steam
+                .port_or_known_default()
+                .is_some_and(|port| !crate::runtime_config::PORT_RANGE.contains(&port))
         {
             return Err(invalid(
                 "services.steam_api_url benötigt eine Loopback-Adresse ohne Zugangsdaten oder Pfad",
@@ -370,7 +383,9 @@ impl BotConfig {
             self.services.tierlist_public_port,
             self.services.changelog_port,
         ];
-        if ports.contains(&0)
+        if ports
+            .iter()
+            .any(|port| !crate::runtime_config::PORT_RANGE.contains(port))
             || ports
                 .iter()
                 .enumerate()
@@ -387,14 +402,16 @@ impl BotConfig {
                 "storage.legacy_snapshot_path muss ein lokaler Dateipfad sein",
             ));
         }
-        if self.concierge.timeout_seconds == 0 || self.concierge.timeout_seconds > 110 {
+        if !CONCIERGE_TIMEOUT_SECONDS_RANGE.contains(&self.concierge.timeout_seconds) {
             return Err(invalid(
-                "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
+                "concierge.timeout_seconds liegt außerhalb des erlaubten Bereichs",
             ));
         }
-        if !(1..=86_400).contains(&self.tempvoice.empty_lane_grace_seconds) {
+        if !TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE
+            .contains(&self.tempvoice.empty_lane_grace_seconds)
+        {
             return Err(invalid(
-                "tempvoice.empty_lane_grace_seconds muss zwischen 1 und 86400 liegen",
+                "tempvoice.empty_lane_grace_seconds liegt außerhalb des erlaubten Bereichs",
             ));
         }
         let fireworks = &self.llm.fireworks;
@@ -410,19 +427,19 @@ impl BotConfig {
         for (use_case, cfg) in &self.llm.use_cases {
             if cfg
                 .max_output_tokens
-                .is_some_and(|value| !(1..=32_768).contains(&value))
-                || cfg
-                    .temperature
-                    .is_some_and(|value| !value.is_finite() || !(0.0..=2.0).contains(&value))
+                .is_some_and(|value| !LLM_MAX_OUTPUT_TOKENS_RANGE.contains(&value))
+                || cfg.temperature.is_some_and(|value| {
+                    !value.is_finite() || !LLM_TEMPERATURE_RANGE.contains(&value)
+                })
                 || cfg
                     .request_timeout_seconds
-                    .is_some_and(|value| !(1..=110).contains(&value))
+                    .is_some_and(|value| !LLM_REQUEST_TIMEOUT_SECONDS_RANGE.contains(&value))
                 || cfg
                     .reasoning_effort
                     .as_deref()
                     .is_some_and(|value| !matches!(value, "none" | "low" | "medium" | "high"))
             {
-                return Err(invalid("KI-Parameter: 1–32768 Ausgabetokens, Temperatur 0–2, Zeitlimit 1–110 Sekunden; Denkaufwand none/low/medium/high"));
+                return Err(invalid("KI-Parameter außerhalb des erlaubten Bereichs: Ausgabetokens, Temperatur, Zeitlimit oder Denkaufwand none/low/medium/high"));
             }
             if cfg.model.as_deref().is_some_and(|id| {
                 id.is_empty()
@@ -622,6 +639,8 @@ mod tests {
         }
         rejected("schema_version = 1\n[services]\ndashboard_port = 8770");
         rejected("schema_version = 1\n[services]\npublic_stats_port = 8771");
+        rejected("schema_version = 1\n[services]\nsteam_api_url = 'http://127.0.0.1:0'");
+        rejected("schema_version = 1\n[runtime.bridges]\nwebsite_api_url = 'http://example.org:0'");
     }
 
     #[test]
