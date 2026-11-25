@@ -257,6 +257,8 @@ impl Handler {
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
+        self.adapter.record_bot_user_id(ready.user.id.get());
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter.voice_cache_health.ready(
             ctx.shard_id.0,
             ready.guilds.iter().map(|guild| guild.id.get()),
@@ -308,6 +310,7 @@ impl EventHandler for Handler {
     }
 
     async fn resume(&self, ctx: Context, _event: serenity::all::ResumedEvent) {
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter.community_gateway.resume(ctx.shard_id.0);
         let guild_ids = self.adapter.voice_cache_health.resumed(ctx.shard_id.0);
         self.dispatcher
@@ -324,6 +327,7 @@ impl EventHandler for Handler {
             event.new == serenity::gateway::ConnectionStage::Connected,
         );
         if event.new != serenity::gateway::ConnectionStage::Connected {
+            self.adapter.invite_snapshot_health().invalidate_all().await;
             self.adapter
                 .voice_cache_health
                 .disconnected(event.shard_id.0);
@@ -347,6 +351,7 @@ impl EventHandler for Handler {
         guild: serenity::all::UnavailableGuild,
         _full: Option<serenity::all::Guild>,
     ) {
+        self.adapter.invite_snapshot_health().invalidate_all().await;
         self.adapter
             .voice_cache_health
             .guild_unavailable(guild.id.get());
@@ -364,7 +369,9 @@ impl EventHandler for Handler {
         // Invite-Snapshots primen, damit der erste Join nach Start klassifiziert
         // werden kann (sonst „baseline_missing"). Joins treffen erst nach READY ein.
         for gid in &guilds {
-            self.invite_tracker.prime(&ctx.http, gid.get()).await;
+            if let Err(error) = self.invite_tracker.prime(&ctx.http, gid.get()).await {
+                tracing::debug!(guild_id = gid.get(), %error, "Invite-Snapshot konnte nicht gespeichert werden");
+            }
         }
         tracing::info!(guilds = guilds.len(), "Invite-Snapshots geprimt");
     }
@@ -444,6 +451,13 @@ impl EventHandler for Handler {
         if !is_user_message(&message) {
             return;
         }
+        let Some(message_created_at) = chrono::DateTime::from_timestamp(
+            message.timestamp.unix_timestamp(),
+            message.timestamp.nanosecond(),
+        ) else {
+            tracing::error!("Discord-Nachricht enthält keinen gültigen UTC-Zeitpunkt");
+            return;
+        };
         self.record_core_user(
             CoreUserEventKind::MessageCreate,
             profile_from_user(&message.author),
@@ -525,7 +539,7 @@ impl EventHandler for Handler {
             author_is_staff,
             author_staff_status_known,
             content: message.content.clone(),
-            message_created_at: message.timestamp.unix_timestamp(),
+            message_created_at,
             is_reply: message.message_reference.is_some(),
             reply_message_id,
             reply_channel_id,
@@ -544,7 +558,13 @@ impl EventHandler for Handler {
             profile_from_user(&member.user),
         );
         // Beitrittsquelle per Invite-uses-Delta erkennen (rohe Metadaten).
-        let metadata = self.invite_tracker.on_join(&ctx.http, &member).await;
+        let metadata = match self.invite_tracker.on_join(&ctx.http, &member).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(guild_id = member.guild_id.get(), %error.source, "Invite-Attribution nach DB-Fehler unbekannt");
+                error.metadata
+            }
+        };
         let join_position = ctx
             .cache
             .guild(member.guild_id)
@@ -641,24 +661,39 @@ impl EventHandler for Handler {
     }
 
     async fn invite_create(&self, _ctx: Context, data: InviteCreateEvent) {
-        self.invite_tracker.on_invite_create(&data).await;
+        if let Err(error) = self.invite_tracker.on_invite_create(&data).await {
+            tracing::debug!(%error, "Invite-Änderung nicht gespeichert");
+        }
     }
 
     async fn invite_delete(&self, _ctx: Context, data: InviteDeleteEvent) {
         if let Some(guild_id) = data.guild_id {
-            self.invite_tracker
+            if let Err(error) = self
+                .invite_tracker
                 .on_invite_delete(guild_id.get(), &data.code)
-                .await;
+                .await
+            {
+                tracing::debug!(guild_id = guild_id.get(), %error, "Invite-Löschung nicht gespeichert");
+            }
         }
     }
 
     async fn voice_state_update(&self, _ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        let observed_at = chrono::Utc::now();
         let Some(guild_id) = new.guild_id.map(|g| g.get()) else {
             return;
         };
         let user_id = new.user_id.get();
         let old_channel = old.as_ref().and_then(|v| v.channel_id).map(|c| c.get());
         let new_channel = new.channel_id.map(|c| c.get());
+        self.adapter.voice_cache_health.observe_voice(
+            guild_id,
+            user_id,
+            old_channel,
+            new_channel,
+            new.mute || new.deaf || new.self_mute || new.self_deaf,
+            observed_at,
+        );
         let event = match (old_channel, new_channel) {
             (None, Some(channel_id)) => VoiceEvent::Join {
                 guild_id,
@@ -786,13 +821,18 @@ pub async fn build_client(
     if options.enable_presence_intent {
         intents |= GatewayIntents::GUILD_PRESENCES;
     }
+    let invite_tracker = Arc::new(InviteTracker::with_health(
+        options.pool.clone(),
+        adapter.invite_snapshot_health(),
+    ));
+    adapter.link_invite_tracker(invite_tracker.clone());
     serenity::Client::builder(token, intents)
         .register_songbird_with(songbird_manager)
         .event_handler(Handler {
             adapter,
             dispatcher,
             router,
-            invite_tracker: Arc::new(InviteTracker::new(options.pool.clone())),
+            invite_tracker,
             core_user_sync: Arc::new(CoreUserSync::new(options.pool)),
             reaction_roles: options.reaction_roles,
             feature_module_count: options.feature_module_count,

@@ -900,7 +900,7 @@ pub async fn record_message_metadata(
     let guild_id = discord_id_to_i64(guild_id, "message_metadata_events.guild_id")?;
     let channel_id = discord_id_to_i64(event.channel_id, "message_metadata_events.channel_id")?;
     let message_id = discord_id_to_i64(event.message_id, "message_metadata_events.message_id")?;
-    let occurred_at = utc_from_unix_seconds(event.message_created_at)?;
+    let occurred_at = event.message_created_at;
     let message_length = i64_to_i32(
         i64::try_from(event.content.chars().count()).unwrap_or(i64::MAX),
         "message_length",
@@ -1849,7 +1849,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: content.into(),
-            message_created_at: 1_788_200_000,
+            message_created_at: chrono::DateTime::from_timestamp(1_788_200_000, 0).expect("fixture timestamp"),
             is_reply: true,
             reply_message_id: Some(1),
             reply_channel_id: Some(10),

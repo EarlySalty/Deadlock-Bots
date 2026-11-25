@@ -100,15 +100,15 @@ pub async fn lock_member_events(tx: &mut Transaction<'_, Postgres>) -> Result<()
 pub async fn next_member_event_id_in_tx(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<i64, sqlx::Error> {
-    let row = sqlx::query!(
-        r#"
-        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS "next_id!"
-        FROM activity.member_events
-        "#
+    sqlx::query_scalar(
+        "SELECT GREATEST(
+            COALESCE((SELECT MAX(id) FROM activity.member_events), 0),
+            COALESCE((SELECT MAX(join_id) FROM bot.twitch_invite_joins), 0),
+            COALESCE((SELECT MAX(first_join_id) FROM activity.twitch_invite_members), 0)
+         ) + 1",
     )
     .fetch_one(&mut **tx)
-    .await?;
-    Ok(row.next_id)
+    .await
 }
 
 async fn lock_key(tx: &mut Transaction<'_, Postgres>, key: i64) -> Result<(), sqlx::Error> {

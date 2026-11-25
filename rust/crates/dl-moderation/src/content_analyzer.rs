@@ -49,13 +49,15 @@ pub(crate) mod test_support {
     }
 }
 
-pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer fuer einen Gaming-Server.
+pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer für einen Gaming-Server.
 Analysiere Text und Bilder knapp und konservativ.
-Gib eine Kategorie, Confidence und eine kurze Begruendung auf Deutsch zurueck.
+Gib eine Kategorie, Confidence und eine kurze Begründung auf Deutsch zurück.
 Flagge nur echte Risiken; normaler Gaming-Trash-Talk und harmlose Meldungen sollen game_related_ok oder ragebait_ok sein.
 Ein normales Bild, ein Screenshot, ein Social-Media-Post, ein Meme, eine News-Grafik oder ein Gaming-Bild ist für sich kein Scam oder Account-Takeover.
+Wichtig: Das Screenshot-Format macht schädlichen Inhalt nicht harmlos. Sichtbare Fake-Giveaways, Promi-Impersonation, Krypto-/Casino-Boni, Promo-Codes, garantierte Gewinne oder Auszahlungsversprechen sind als scam zu klassifizieren, wenn die Nachricht sie selbst bewirbt und kein sichtbarer Reporting-/Warnkontext sie klar einordnet.
+Kategorie und Begründung müssen logisch zusammenpassen. Wenn deine Begründung einen tatsächlichen Scam, Betrugsversuch oder Phishing-Inhalt beschreibt, darf category nicht other sein.
 Helden-, Rollen-, Rank- oder Spielergruppen-Spott im Spielkontext ist Trash-Talk/Ragebait, nicht harassment oder hate_speech.
-Antworte ausschliesslich als JSON:
+Antworte ausschließlich als JSON:
 {"category":"scam|csam|nsfw_explicit|harassment|hate_speech|ragebait_ok|game_related_ok|other","confidence":0.0,"reason":"kurz auf Deutsch"}"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +84,6 @@ impl ModerationInput {
 
     pub fn has_text(&self) -> bool {
         !self.content.trim().is_empty()
-    }
-
-    pub fn text_only(&self) -> Self {
-        Self::new(self.content.clone(), Vec::new())
     }
 
     pub fn prompt_text(&self) -> String {
@@ -295,51 +293,11 @@ fn category_tier(category: &ModerationCategory) -> u8 {
 pub struct ContentModerationPipeline {
     analyzer: ContentAnalyzer,
     verifier: ContentVerifier,
-    analyze_flag_threshold: f64,
 }
 
 impl ContentModerationPipeline {
-    pub fn new(
-        analyzer: ContentAnalyzer,
-        verifier: ContentVerifier,
-        analyze_flag_threshold: f64,
-    ) -> Self {
-        Self {
-            analyzer,
-            verifier,
-            analyze_flag_threshold,
-        }
-    }
-
-    pub async fn evaluate(&self, input: &ModerationInput) -> Option<ModerationVerdict> {
-        self.evaluate_with_analysis(input).await.verdict
-    }
-
-    pub(crate) async fn evaluate_with_analysis(
-        &self,
-        input: &ModerationInput,
-    ) -> ContentModerationEvaluation {
-        let modal_analysis = self.analyzer.analyze_modal(input).await;
-        let analysis = modal_analysis.analysis;
-        if analysis.confidence < self.analyze_flag_threshold || analysis.category.is_harmless() {
-            return ContentModerationEvaluation {
-                analysis,
-                verdict: None,
-            };
-        }
-        let verification = if matches!(modal_analysis.modality, AnalysisModality::Text) {
-            self.verifier.verify(&input.text_only(), &analysis).await
-        } else {
-            self.verifier.verify(input, &analysis).await
-        };
-        ContentModerationEvaluation {
-            analysis: analysis.clone(),
-            verdict: Some(ModerationVerdict {
-                analysis,
-                verification,
-                trigger: input.trigger_preview(),
-            }),
-        }
+    pub fn new(analyzer: ContentAnalyzer, verifier: ContentVerifier) -> Self {
+        Self { analyzer, verifier }
     }
 
     pub(crate) async fn evaluate_behavior_trigger(
@@ -347,8 +305,7 @@ impl ContentModerationPipeline {
         input: &ModerationInput,
         behavior_trigger: &str,
     ) -> ContentModerationEvaluation {
-        let modal_analysis = self.analyzer.analyze_modal(input).await;
-        let analysis = modal_analysis.analysis;
+        let analysis = self.analyzer.analyze(input).await;
         let verification = self
             .verifier
             .verify_behavior_trigger(input, &analysis, behavior_trigger)
@@ -538,113 +495,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_skips_verifier_below_analyze_threshold() {
-        let text = Arc::new(RecordingText::default());
-        text.responses
-            .lock()
-            .await
-            .push(r#"{"category":"harassment","confidence":0.49,"reason":"Mild"}"#.to_string());
-        let verifier_text = Arc::new(RecordingText::default());
-        verifier_text.responses.lock().await.push(
-            r#"{"confirmed":true,"category":"harassment","confidence":0.9,"reason":"x"}"#
-                .to_string(),
-        );
-        let pipeline = ContentModerationPipeline::new(
-            ContentAnalyzer::new(text, None, ContentAnalyzerConfig::default()),
-            ContentVerifier::new(verifier_text.clone(), None, Default::default()),
-            0.5,
-        );
-
-        let result = pipeline
-            .evaluate(&ModerationInput::text("trash talk"))
-            .await;
-
-        assert!(result.is_none());
-        assert!(verifier_text.models.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn pipeline_calls_verifier_for_flagged_analysis() {
-        let text = Arc::new(RecordingText::default());
-        text.responses
-            .lock()
-            .await
-            .push(r#"{"category":"scam","confidence":0.51,"reason":"Scamverdacht"}"#.to_string());
-        let verifier_text = Arc::new(RecordingText::default());
-        verifier_text.responses.lock().await.push(
-            r#"{"confirmed":true,"category":"scam","confidence":0.86,"reason":"Bestätigt"}"#
-                .to_string(),
-        );
-        let pipeline = ContentModerationPipeline::new(
-            ContentAnalyzer::new(text, None, ContentAnalyzerConfig::default()),
-            ContentVerifier::new(verifier_text.clone(), None, Default::default()),
-            0.5,
-        );
-
-        let result = pipeline
-            .evaluate(&ModerationInput::text("free crypto"))
-            .await;
-
-        assert!(result.is_some());
-        assert_eq!(verifier_text.models.lock().await.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn pipeline_verifies_mixed_text_basis_through_text_verifier() {
-        let text = Arc::new(RecordingText::default());
-        let vision = Arc::new(RecordingVision::default());
-        text.responses
-            .lock()
-            .await
-            .push(r#"{"category":"scam","confidence":0.91,"reason":"Text"}"#.to_string());
-        vision
-            .responses
-            .lock()
-            .await
-            .push(r#"{"category":"harassment","confidence":0.99,"reason":"Bild"}"#.to_string());
-        let verifier_text = Arc::new(RecordingText::default());
-        verifier_text.responses.lock().await.push(
-            r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"ok"}"#.to_string(),
-        );
-        let verifier_vision = Arc::new(RecordingVision::default());
-        verifier_vision.responses.lock().await.push(
-            r#"{"confirmed":true,"category":"harassment","confidence":0.9,"reason":"wrong"}"#
-                .to_string(),
-        );
-        let pipeline = ContentModerationPipeline::new(
-            ContentAnalyzer::new(
-                text,
-                Some(vision),
-                ContentAnalyzerConfig {
-                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
-                    image_model: "gpt-5.4-nano".to_string(),
-                },
-            ),
-            ContentVerifier::new(
-                verifier_text.clone(),
-                Some(verifier_vision.clone()),
-                Default::default(),
-            ),
-            0.5,
-        );
-
-        let result = pipeline
-            .evaluate(&ModerationInput::new(
-                "free crypto",
-                vec!["https://example.test/i.png".to_string()],
-            ))
-            .await;
-
-        let Some(verdict) = result else {
-            panic!("expected mixed flag verdict");
-        };
-        assert_eq!(verdict.analysis.category.as_label(), "scam");
-        assert_eq!(verdict.verification.category.as_label(), "scam");
-        assert_eq!(verifier_text.models.lock().await.len(), 1);
-        assert_eq!(verifier_vision.models.lock().await.len(), 0);
-    }
-
-    #[tokio::test]
     async fn behavior_trigger_always_runs_image_verifier_even_after_harmless_analysis() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
@@ -674,7 +524,6 @@ mod tests {
                     model: "gpt-5.4-nano".to_string(),
                 },
             ),
-            0.5,
         );
 
         let result = pipeline
@@ -706,24 +555,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_runs_real_verifier_for_pure_image_flags_on_same_model() {
+    async fn behavior_trigger_keeps_structured_verdict_without_consistency_retry() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
-        vision
-            .responses
-            .lock()
-            .await
-            .push(r#"{"category":"scam","confidence":0.9,"reason":"Bildscam"}"#.to_string());
+        vision.responses.lock().await.push(
+            r#"{"category":"other","confidence":0.92,"reason":"Kein Phishing und kein Scam-Muster, normaler Gameplay-Screenshot"}"#
+                .to_string(),
+        );
         let verifier_text = Arc::new(RecordingText::default());
         let verifier_vision = Arc::new(RecordingVision::default());
         verifier_vision.responses.lock().await.push(
-            r#"{"confirmed":false,"category":"other","confidence":0.96,"reason":"Harmloser Screenshot"}"#
+            r#"{"confirmed":false,"category":"other","confidence":0.90,"reason":"Kein sichtbarer Scam, kein Phishing, nur Gameplay"}"#
                 .to_string(),
         );
         let pipeline = ContentModerationPipeline::new(
             ContentAnalyzer::new(
-                text,
-                Some(vision),
+                text.clone(),
+                Some(vision.clone()),
                 ContentAnalyzerConfig {
                     text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                     image_model: "gpt-5.4-nano".to_string(),
@@ -736,26 +584,22 @@ mod tests {
                     model: "gpt-5.4-nano".to_string(),
                 },
             ),
-            0.5,
         );
 
         let result = pipeline
-            .evaluate(&ModerationInput::new(
-                "",
-                vec!["https://example.test/i.png".to_string()],
-            ))
+            .evaluate_behavior_trigger(
+                &ModerationInput::new("", vec!["https://example.test/gameplay.png".to_string()]),
+                "account_takeover",
+            )
             .await;
 
-        let Some(verdict) = result else {
-            panic!("expected pure image flag verdict");
-        };
-        assert_eq!(verdict.analysis.category.as_label(), "scam");
+        let verdict = result.verdict.expect("behavior verifier verdict");
+        assert_eq!(verdict.analysis.category.as_label(), "other");
         assert!(!verdict.verification.confirmed);
         assert_eq!(verdict.verification.category.as_label(), "other");
-        assert_eq!(verifier_text.models.lock().await.len(), 0);
-        assert_eq!(
-            verifier_vision.models.lock().await.as_slice(),
-            &[Some("gpt-5.4-nano".to_string())]
-        );
+        assert_eq!(vision.image_counts.lock().await.as_slice(), &[1]);
+        assert_eq!(verifier_vision.image_counts.lock().await.as_slice(), &[1]);
+        assert!(text.models.lock().await.is_empty());
+        assert!(verifier_text.models.lock().await.is_empty());
     }
 }

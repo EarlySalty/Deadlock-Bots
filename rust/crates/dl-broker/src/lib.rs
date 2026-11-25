@@ -13,6 +13,7 @@ mod handlers;
 mod idempotency;
 pub mod payload;
 pub mod port;
+pub mod twitch_invites;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -224,6 +225,10 @@ pub fn router(state: SharedBroker) -> Router {
         .route(
             "/internal/master/v1/discord/community-lobbies",
             post(handlers::community_lobbies),
+        )
+        .route(
+            "/internal/master/v1/discord/streamer-voice-invite",
+            post(handlers::streamer_voice_invite),
         )
         .route(
             "/internal/master/v1/discord/voice-channel/members",

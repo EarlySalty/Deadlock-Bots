@@ -197,6 +197,14 @@ pub struct CommunityLobby {
     pub is_streamer_vc: bool,
 }
 
+/// A channel-scoped invite. Capacity is only changed for an eligible public voice.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamerVoiceInvite {
+    pub invite_url: String,
+    pub channel_id: String,
+    pub slot_added: bool,
+}
+
 #[async_trait::async_trait]
 pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
@@ -268,8 +276,36 @@ pub trait DiscordPort: Send + Sync {
     async fn voice_members(&self, channel_id: u64) -> Result<Vec<MemberInfo>, PortError>;
     /// Read-only directory for a verified Discord member; implementations must
     /// enforce effective VIEW_CHANNEL + CONNECT permissions, including bans.
-    async fn community_lobbies(&self, _guild_id: u64, _user_id: u64) -> Result<Vec<CommunityLobby>, PortError> {
+    async fn community_lobbies(
+        &self,
+        _guild_id: u64,
+        _user_id: u64,
+    ) -> Result<Vec<CommunityLobby>, PortError> {
         Err(PortError::GuildUnavailable)
+    }
+
+    /// Recheck the streamer's current voice against the broker-approved channel,
+    /// create a short-lived invite, and make one slot available when full.
+    /// No moves, permission changes, or private-channel invitations are allowed.
+    async fn streamer_voice_invite(
+        &self,
+        _guild_id: u64,
+        _streamer_id: u64,
+        _expected_channel_id: u64,
+    ) -> Result<Option<StreamerVoiceInvite>, PortError> {
+        Ok(None)
+    }
+
+    /// Read-only freshness check before replaying a previously created invite.
+    /// A stale/private/full room must never be advertised from the cache.
+    async fn streamer_voice_invite_valid(
+        &self,
+        _guild_id: u64,
+        _streamer_id: u64,
+        _channel_id: u64,
+        _invite_url: &str,
+    ) -> Result<bool, PortError> {
+        Ok(false)
     }
 
     async fn create_invite(&self, channel_id: u64, reason: &str) -> Result<InviteInfo, PortError>;

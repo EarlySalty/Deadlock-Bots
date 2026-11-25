@@ -17,6 +17,7 @@ mod scrim_adapter;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
+mod twitch_invites;
 mod vanity;
 
 use std::{
@@ -255,20 +256,6 @@ fn matcher_provider_choice(raw: Option<String>) -> MatcherProviderChoice {
     }
 }
 
-fn openai_client_with_model_from_env(
-    model_env: &str,
-    default_model: &str,
-) -> Option<(Arc<dl_ai::OpenAiClient>, String)> {
-    let api_key = env("OPENAI_API_KEY").or_else(|| env("DEADLOCK_OPENAI_KEY"))?;
-    let base_url =
-        env("OPENAI_BASE_URL").unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    let model = env(model_env).unwrap_or_else(|| default_model.to_string());
-    Some((
-        dl_ai::OpenAiClient::new(base_url, api_key, model.clone()),
-        model,
-    ))
-}
-
 fn default_brain_bin() -> String {
     "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
 }
@@ -452,6 +439,8 @@ impl dl_discord::InteractionHandler for ChangelogPostCommand {
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let operating = dl_core::config::process_bot_config()?.snapshot();
+    dl_core::token_snapshot::load(dl_core::config::process_bot_config()?.source())
+        .map_err(anyhow::Error::msg)?;
     dl_core::observability::init_tracing(
         operating
             .runtime
@@ -468,10 +457,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let startup_text = master::startup_text_now();
 
     let _web_cfg = WebConfig::from_env();
-    let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
-    let central_pool = dl_central_db::connect_pool(&central_dsn)
+    let central_dsn = dl_core::token_snapshot::value("DEADLOCK_CENTRAL_DSN")
+        .context("Zentraler DB-Zugang fehlt im privaten Infisical-Snapshot.")?;
+    let central_pool = dl_central_db::connect_pool(central_dsn)
         .await
-        .context("zentrale DB verbinden")?;
+        .map_err(|_| anyhow::anyhow!("Zentrale Datenbankverbindung fehlgeschlagen."))?;
     tracing::info!("Zentrale DB verbunden");
 
     // Discord-Adapter (REST sofort, Cache erst mit Gateway)
@@ -639,6 +629,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let mut concierge_config = dl_community::concierge::ConciergeConfig::from_env(operating_value);
     concierge_config.ai_timeout =
         std::time::Duration::from_secs(operating.concierge.timeout_seconds);
+    concierge_config.bot_user_id = adapter.bot_user_id_cell();
     let concierge_memory_store = concierge_config
         .enabled
         .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
@@ -685,6 +676,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let voice_pair_operations =
         Arc::new(dl_voice::voice_pair_guard::VoicePairOperationLock::new(()));
     let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
+        live_streamer_access: twitch_client.as_ref().map(|client| {
+            dl_voice::tempvoice::live_streamer::LiveStreamerAccess::new(
+                client.clone(),
+                dl_bridges::matcher::MatcherConfig::from_env(operating_value).role_id,
+            )
+        }),
         adapter: adapter.clone(),
         voice_pair_store: voice_pair_store.clone(),
         voice_pair_operations: voice_pair_operations.clone(),
@@ -919,9 +916,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderation_scan_channel_ids =
         dl_moderation::moderation_channel::scan_channel_ids_from_lookup(operating_value);
 
-    // Text-Analyse und Verify-Text laufen ueber das Gate; die Bildpfade haengen
-    // am VisionGenerator, den der ChatProvider (noch) nicht kann, und bleiben
-    // deshalb am OpenAI-Client. Die Modell-Envs gelten unveraendert weiter.
+    // Text und Bildanalyse nutzen dieselbe gemeinsame Flash-Modellauswahl.
+    // Die Vision-Aufrufe behalten ihren Bildvertrag und den separaten Trait.
     let moderation_text_analyze_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationText, true);
     let moderation_text_analyze_model = model_from_lookup(
@@ -929,10 +925,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         "MOD_TEXT_ANALYZE_MODEL",
         dl_ai::DEFAULT_FIREWORKS_MODEL,
     );
-    let moderation_image_analyze_client =
-        openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
-    let moderation_verify_vision_client =
-        openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let moderation_image_analyze_client = dl_ai::fireworks_vision_from_lookup(env);
+    let moderation_verify_vision_client = dl_ai::fireworks_vision_from_lookup(env);
     let moderation_verify_text_client =
         chat_text_generator(dl_ai::LlmUseCase::ModerationVerify, false);
     tracing::info!(
@@ -1150,6 +1144,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         shared_answers.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    if concierge.enabled() {
+        concierge
+            .import_legacy_pate_requests()
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("Alte Patenanfragen vor dem Bot-Start importieren")?;
+        concierge.ensure_pate_leitfaden(repository_root).await;
+        let paten_inventar = concierge.paten_inventar(our_guild_id).await;
+        tracing::info!("{}", aiglue::paten_inventory_line(&paten_inventar));
+    }
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
@@ -1233,7 +1237,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         model: verify_model,
                     },
                 ),
-                env_f64_default("MOD_ANALYZE_FLAG_THRESHOLD", 0.5),
             );
             let policy = dl_moderation::action_policy::ActionPolicy::new(
                 dl_moderation::action_policy::ActionPolicyConfig {
@@ -1316,6 +1319,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
         .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
+    let twitch_invites = twitch_invites::TwitchInvites::new(
+        central_pool.clone(),
+        adapter.clone(),
+        &dl_core::config::process_bot_config()?.snapshot(),
+    );
+    twitch_invites.reset_voice_clock().await?;
     let broker = dl_broker::BrokerState::new_with_channel_info(
         adapter.clone(),
         Arc::new(BrokerChannelInfoGlue {
@@ -1336,7 +1345,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     warn_if_lagebild_token_empty(&lagebild_token);
     let broker_server = axum::serve(
         broker_listener,
-        dl_broker::router(broker)
+        dl_broker::router(broker.clone())
+            .merge(dl_broker::twitch_invites::router(
+                broker,
+                twitch_invites.clone(),
+            ))
             .merge(turnierglue::publisher_router(
                 turnier_proposals,
                 broker_token,
@@ -1388,14 +1401,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
-    // MCP-Connector :8890 — loopback-only Streamable-HTTP-Endpunkt für Claude.
-    // Läuft mit der Bot-Identität (DISCORD_TOKEN aus dem Prozess-Env, via
-    // Infisical/systemd-creds) — kein eigener Secrets-Weg nötig.
+    // MCP-Connector :8890 — TOML-Betriebswerte, bestehender Infisical-Token,
+    // feste Loopback-Bindung. Ohne internen Token startet kein offener Endpunkt.
+    let mcp_token = dl_core::runtime_config::secret_value("TWITCH_INTERNAL_API_TOKEN");
     let mcp_state = Arc::new(
-        mcp::McpState::from_env(discord_token.clone(), operating_value)
+        mcp::McpState::from_config(discord_token.clone(), mcp_token, &operating.runtime.start)
             .context("MCP-Connector-State")?,
     );
-    let mcp_addr = mcp::McpState::bind_addr(operating_value);
+    let mcp_addr = mcp::McpState::bind_addr(&operating.runtime.start);
     let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
         .await
         .with_context(|| format!("MCP-Connector-Port binden: {mcp_addr}"))?;
@@ -1475,6 +1488,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
+        voice_tracker
+            .set_activity_observer(twitch_invites.clone())
+            .await;
         tempvoice.set_voice_tracker(&voice_tracker).await;
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
@@ -1649,6 +1665,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
+        let _qualified_invites = twitch_invites.clone().spawn();
         dl_activity::analyzer::spawn_member_events(central_pool.clone(), &dispatcher);
         // Der Task wartet intern auf READY + Cache-Guilds und retryt leere
         // Member-Snapshots, statt nach einem fixen Startup-Fenster aufzugeben.
@@ -1980,6 +1997,7 @@ schema_version=1
 guild_id="1234"
 [runtime.community]
 concierge_enabled=true
+concierge_proactive=true
 concierge_test_users=[55,66]
 concierge_free_voice=false
 survey_pulse=true
@@ -1999,6 +2017,7 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         let lookup = |key: &str| config.runtime_value(key);
         let concierge = dl_community::concierge::ConciergeConfig::from_env(lookup);
         assert!(concierge.enabled);
+        assert!(concierge.proactive);
         assert!(!concierge.free_voice);
         assert_eq!(concierge.main_guild_id, 1234);
         assert_eq!(concierge.test_user_allowlist.len(), 2);
@@ -2139,15 +2158,14 @@ model="accounts/fireworks/models/deepseek-v4-flash-0731"
         }
         assert!(checked > 1, "es müssen mehrere Quelldateien geprüft werden");
 
-        // Ausnahme mit Grund: der Bildpfad der Moderation haengt am
-        // VisionGenerator, den der ChatProvider nicht anbietet.
         let main_source = include_str!("main.rs");
         let vision_client = ["OpenAiClient::", "new("].concat();
-        assert_eq!(
-            main_source.matches(vision_client.as_str()).count(),
-            1,
-            "nur der Vision-Pfad darf noch einen OpenAI-Client direkt bauen"
+        assert!(
+            !main_source.contains(vision_client.as_str()),
+            "auch Vision muss über den zentralen Connector laufen"
         );
+        let shared_vision = ["dl_ai::fireworks_vision_", "from_lookup(env)"].concat();
+        assert_eq!(main_source.matches(shared_vision.as_str()).count(), 2);
     }
 
     /// Der Kern des Transparenz-Logs lag einmal vollstaendig im Baum, ohne dass

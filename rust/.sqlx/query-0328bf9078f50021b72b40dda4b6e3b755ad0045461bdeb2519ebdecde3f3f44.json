@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT streamer_login, invite_code\n          FROM bot.twitch_streamer_invites\n         WHERE twitch_user_id IS NOT NULL AND channel_id IS NOT NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "streamer_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "invite_code",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "0328bf9078f50021b72b40dda4b6e3b755ad0045461bdeb2519ebdecde3f3f44"
+}

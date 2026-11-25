@@ -1,23 +1,23 @@
-//! Begrenzter Editor für Betriebswerte; Identitäten, Pfade und Modelle bleiben
-//! außerhalb des HTTP-Schreibvertrags. Laufende Prozesse behalten ihren Stand.
-
+//! Revisionsgesicherter Editor für katalogisierte Betriebswerte.
+//! Laufende Prozesse behalten ihren Stand bis zum kontrollierten Neustart.
 use crate::bot_config::{BotConfig, BotConfigError, BotConfigStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Write,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+/// Alter Zwei-Felder-Vertrag bleibt für bestehende Clients erhalten.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatingOptions {
     pub moderation_enforce: bool,
     pub concierge_timeout_seconds: u64,
 }
-
 impl From<&BotConfig> for OperatingOptions {
     fn from(config: &BotConfig) -> Self {
         Self {
@@ -26,11 +26,12 @@ impl From<&BotConfig> for OperatingOptions {
         }
     }
 }
-
 #[derive(Debug, thiserror::Error)]
 pub enum EditError {
     #[error(transparent)]
     Invalid(#[from] BotConfigError),
+    #[error(transparent)]
+    Catalog(#[from] crate::settings_catalog::CatalogError),
     #[error("Die Datei wurde inzwischen geändert. Der Entwurf bleibt erhalten.")]
     Conflict,
     #[error("Die Einstellungen werden gerade gespeichert. Bitte erneut versuchen.")]
@@ -42,23 +43,19 @@ pub enum EditError {
     #[error("Die Datei wurde ersetzt, die dauerhafte Speicherung ist aber nicht bestätigt. Bitte den Stand neu laden.")]
     Durability,
 }
-
 pub struct SavedConfig {
     pub config: BotConfig,
     pub revision: String,
     pub fingerprint: String,
 }
-
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-
 pub fn fingerprint(config: &BotConfig) -> Result<String, BotConfigError> {
     serde_json::to_vec(config)
         .map(|bytes| digest(&bytes))
         .map_err(|_| BotConfigError::Encoding)
 }
-
 pub fn read_saved(path: &Path) -> Result<SavedConfig, BotConfigError> {
     let (config, text) = BotConfig::load_document(path)?;
     Ok(SavedConfig {
@@ -67,16 +64,39 @@ pub fn read_saved(path: &Path) -> Result<SavedConfig, BotConfigError> {
         config,
     })
 }
-
 impl BotConfigStore {
     pub fn read_versioned(&self) -> Result<SavedConfig, BotConfigError> {
         read_saved(self.path())
     }
-
     pub fn save_if_revision(
         &self,
         expected: &str,
         options: &OperatingOptions,
+    ) -> Result<SavedConfig, EditError> {
+        self.save_changes_if_revision(
+            expected,
+            &BTreeMap::from([
+                (
+                    "moderation.enforce".into(),
+                    serde_json::Value::Bool(options.moderation_enforce),
+                ),
+                (
+                    "concierge.timeout_seconds".into(),
+                    serde_json::Value::String(options.concierge_timeout_seconds.to_string()),
+                ),
+            ]),
+        )
+        .map_err(|error| match error {
+            EditError::Catalog(_) => EditError::Invalid(BotConfigError::Validation(
+                "concierge.timeout_seconds muss zwischen 1 und 110 liegen",
+            )),
+            other => other,
+        })
+    }
+    pub fn save_changes_if_revision(
+        &self,
+        expected: &str,
+        changes: &BTreeMap<String, serde_json::Value>,
     ) -> Result<SavedConfig, EditError> {
         let requested = self.path();
         let metadata = fs::symlink_metadata(requested).map_err(|_| EditError::Io)?;
@@ -109,43 +129,16 @@ impl BotConfigStore {
             std::io::ErrorKind::WouldBlock => EditError::Busy,
             _ => EditError::Io,
         })?;
-        let (mut candidate, original) = BotConfig::load_document(&source)?;
+        let (_, original) = BotConfig::load_document(&source)?;
         if digest(original.as_bytes()) != expected {
             return Err(EditError::Conflict);
         }
-        candidate.moderation.enforce = options.moderation_enforce;
-        candidate.concierge.timeout_seconds = options.concierge_timeout_seconds;
-        candidate.validate()?;
+        let changes =
+            crate::settings_catalog::normalize(&crate::admin_settings::fields(), changes)?;
         let mut document = original
             .parse::<toml_edit::DocumentMut>()
             .map_err(|_| EditError::Io)?;
-        for (section, key, mut replacement) in [
-            (
-                "moderation",
-                "enforce",
-                toml_edit::value(options.moderation_enforce),
-            ),
-            (
-                "concierge",
-                "timeout_seconds",
-                toml_edit::value(options.concierge_timeout_seconds as i64),
-            ),
-        ] {
-            if !document.contains_key(section) {
-                document[section] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            if let (Some(old), Some(new)) = (
-                document
-                    .get(section)
-                    .and_then(toml_edit::Item::as_table_like)
-                    .and_then(|table| table.get(key))
-                    .and_then(toml_edit::Item::as_value),
-                replacement.as_value_mut(),
-            ) {
-                *new.decor_mut() = old.decor().clone();
-            }
-            document[section][key] = replacement;
-        }
+        crate::settings_catalog::apply(&mut document, &changes)?;
         let text = document.to_string();
         let mut checked = BotConfig::parse(&text)?;
         checked.runtime.resolve_paths(directory);

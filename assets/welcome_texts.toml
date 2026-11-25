@@ -9,6 +9,7 @@ navigation = "Kanal-Navigation"
 team = "Community-Team"
 socials = "Links & Socials"
 quickstart = "Schnellstart"
+paten = "Paten"
 
 # Fliesstexte und Fallback-Texte in den Welcome-Nachrichten.
 [texts]
@@ -19,6 +20,7 @@ default_channel_description = "Beschreibung folgt."
 empty_team_role_members = "aktuell unbesetzt"
 socials_intro = "Die Community gibt es auch außerhalb von Discord:"
 quickstart_intro = "Die drei wichtigsten Klicks für den Start:"
+paten_intro = "Ein Pate ist jemand aus der Community, der dir den Einstieg leicht macht. Er zeigt dir den Server, beantwortet deine Fragen und dreht mit dir die ersten Runden. Wenn der Concierge aktiv ist, kannst du ihn beim Start oder per DM nach einem Paten fragen."
 
 # Bot-Block am Ende der Team-Sektion.
 [team]

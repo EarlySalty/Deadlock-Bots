@@ -112,8 +112,8 @@ pub struct MessageEvent {
     /// berechnet werden konnten. SecurityGuard nutzt `false` fail-closed.
     pub author_staff_status_known: bool,
     pub content: String,
-    /// Nachrichtenerstellung (Unix-Sekunden, aus Discord-Timestamp/Snowflake).
-    pub message_created_at: i64,
+    /// Nachrichtenerstellung mit voller Discord-Präzision in UTC.
+    pub message_created_at: chrono::DateTime<chrono::Utc>,
     /// Ist die Nachricht eine Antwort (`message_reference` gesetzt)? Für den
     /// einmaligen Reply-Bonus der Text-Gamification.
     pub is_reply: bool,
@@ -389,7 +389,7 @@ mod tests {
             author_is_staff: false,
             author_staff_status_known: true,
             content: "hallo".into(),
-            message_created_at: 0,
+            message_created_at: chrono::DateTime::from_timestamp(0, 0).expect("fixture timestamp"),
             is_reply: false,
             reply_message_id: None,
             reply_channel_id: None,
