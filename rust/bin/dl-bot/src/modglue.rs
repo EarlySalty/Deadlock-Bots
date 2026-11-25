@@ -88,10 +88,7 @@ impl BrainEmojiIndex {
                 let Some(emoji_id) = emoji_map.get(emoji_name) else {
                     continue;
                 };
-                entries.push((
-                    name.to_string(),
-                    format!("<:{emoji_name}:{emoji_id}>")
-                ));
+                entries.push((name.to_string(), format!("<:{emoji_name}:{emoji_id}>")));
             }
         }
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
@@ -317,7 +314,8 @@ fn format_review_build_receipt(
         .unwrap_or_default();
     format!(
         "🧪 **{} Review-Build**{version}\n{published}\n\n**Kern:** {core}\n{}",
-        emoji_index.decorate_name(&receipt.hero_name), situations
+        emoji_index.decorate_name(&receipt.hero_name),
+        situations
     )
 }
 
@@ -2118,6 +2116,11 @@ impl dl_broker::clips::ClipSubmitPort for ClipSubmitGlue {
                 submission_id: Some(id),
                 reason: Some("duplicate_clip_this_week".to_string()),
             },
+            TwitchSubmitOutcome::ReplayMetadataDrift(id) => ClipSubmitOutcome {
+                status: ClipSubmitStatus::Duplicate,
+                submission_id: Some(id),
+                reason: Some("idempotency_metadata_drift".to_string()),
+            },
             TwitchSubmitOutcome::Rejected(reason) => ClipSubmitOutcome {
                 status: ClipSubmitStatus::Rejected,
                 submission_id: None,
@@ -2576,6 +2579,65 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         self.adapter.send_raw_public(channel_id, &body).await
     }
 
+    async fn find_channel_message_by_nonce(
+        &self,
+        channel_id: u64,
+        after_message_id: u64,
+        nonce: &str,
+    ) -> Result<Option<u64>, String> {
+        let bot_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id;
+        let mut before = None;
+        loop {
+            let mut request = GetMessages::new().limit(100);
+            if let Some(message_id) = before {
+                request = request.before(MessageId::new(message_id));
+            }
+            let messages = ChannelId::new(channel_id)
+                .messages(&self.adapter.http, request)
+                .await
+                .map_err(|err| err.to_string())?;
+            if messages.is_empty() {
+                return Ok(None);
+            }
+            for message in &messages {
+                let matching_reply = message
+                    .message_reference
+                    .as_ref()
+                    .and_then(|reference| reference.message_id)
+                    == Some(MessageId::new(after_message_id))
+                    && serde_json::to_string(&message.components).is_ok_and(|body| {
+                        body.contains("diese Patenanfrage wartet seit zwei Stunden")
+                    });
+                if message.id.get() > after_message_id
+                    && message.author.id == bot_id
+                    && (matches!(&message.nonce, Some(serenity::all::Nonce::String(value)) if value == nonce)
+                        || matching_reply)
+                {
+                    return Ok(Some(message.id.get()));
+                }
+            }
+            let oldest = messages.iter().map(|message| message.id.get()).min();
+            if oldest.is_some_and(|id| id <= after_message_id) {
+                return Ok(None);
+            }
+            if before == oldest {
+                return Err(
+                    "Discord-Verlauf für den Owner-Hinweis bewegt sich nicht weiter".into(),
+                );
+            }
+            before = oldest;
+            if messages.len() < 100 {
+                return Ok(None);
+            }
+        }
+    }
+
     async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
@@ -2649,6 +2711,127 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             ),
         );
         self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_channel_v2(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn pin_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .pin_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Paten-Leitfaden"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn pinned_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Option<bool>, String> {
+        match ChannelId::new(channel_id)
+            .message(&self.adapter.http, MessageId::new(message_id))
+            .await
+        {
+            Ok(message) => Ok(Some(message.pinned)),
+            Err(serenity::Error::Http(HttpError::UnsuccessfulRequest(response)))
+                if response.status_code.as_u16() == 404 || response.error.code == 10008 =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    async fn existing_pate_request_cards(
+        &self,
+    ) -> Result<Vec<dl_community::concierge::LegacyPateRequestMessage>, String> {
+        fn collect_user_ids(value: &Value, user_ids: &mut HashSet<u64>) {
+            match value {
+                Value::Object(object) => {
+                    if let Some(custom_id) = object.get("custom_id").and_then(Value::as_str) {
+                        if let Some(raw_user_id) = custom_id.strip_prefix("concierge:pate:claim:") {
+                            if let Ok(user_id) = raw_user_id.parse() {
+                                user_ids.insert(user_id);
+                            }
+                        }
+                    }
+                    for child in object.values() {
+                        collect_user_ids(child, user_ids);
+                    }
+                }
+                Value::Array(array) => {
+                    for child in array {
+                        collect_user_ids(child, user_ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut before = None;
+        let mut requests = Vec::new();
+        loop {
+            let mut pagination = GetMessages::new().limit(100);
+            if let Some(message_id) = before {
+                pagination = pagination.before(MessageId::new(message_id));
+            }
+            let messages = ChannelId::new(dl_community::concierge::PATE_REQUEST_CHANNEL_ID)
+                .messages(&self.adapter.http, pagination)
+                .await
+                .map_err(|err| err.to_string())?;
+            if messages.is_empty() {
+                break;
+            }
+            for message in &messages {
+                let components =
+                    serde_json::to_value(&message.components).map_err(|err| err.to_string())?;
+                let mut user_ids = HashSet::new();
+                collect_user_ids(&components, &mut user_ids);
+                let Some(created_at) =
+                    chrono::DateTime::from_timestamp(message.timestamp.unix_timestamp(), 0)
+                else {
+                    continue;
+                };
+                for user_id in user_ids {
+                    requests.push(dl_community::concierge::LegacyPateRequestMessage {
+                        user_id,
+                        message_id: message.id.get(),
+                        created_at,
+                    });
+                }
+            }
+            let oldest = messages.iter().map(|message| message.id.get()).min();
+            if oldest == before {
+                return Err("Discord-Verlauf im Patenkanal bewegt sich nicht weiter".to_string());
+            }
+            before = oldest;
+            if messages.len() < 100 {
+                break;
+            }
+        }
+        Ok(requests)
     }
 }
 
@@ -3317,6 +3500,25 @@ impl dl_community::team_applications::TeamApplicationPort for TeamApplicationGlu
             .send_raw_public(channel.id.get(), &body)
             .await
             .map(|_| ())
+    }
+
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                serenity::all::RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -4107,14 +4309,14 @@ mod tests {
     fn brain_emoji_index_dekoriert_build_entitaeten_wie_patchnotes() {
         let index = BrainEmojiIndex {
             entries: vec![
-                ("Extended Magazine".into(), "<:dli_extended_magazine:5>".into()),
+                (
+                    "Extended Magazine".into(),
+                    "<:dli_extended_magazine:5>".into(),
+                ),
                 ("Warden".into(), "<:dlh_warden:7>".into()),
             ],
         };
-        assert_eq!(
-            index.decorate_name("Warden"),
-            "<:dlh_warden:7> Warden"
-        );
+        assert_eq!(index.decorate_name("Warden"), "<:dlh_warden:7> Warden");
         assert_eq!(
             index.annotate_inline("Warden kauft Extended Magazine."),
             "<:dlh_warden:7> Warden kauft <:dli_extended_magazine:5> Extended Magazine."
@@ -4129,10 +4331,14 @@ mod tests {
             hero_build_id: Some(818625),
             version: Some(1),
             hero_name: "Warden".into(),
-            core: vec![BrainReviewBuildItem { name: "Extended Magazine".into() }],
+            core: vec![BrainReviewBuildItem {
+                name: "Extended Magazine".into(),
+            }],
             situations: vec![BrainReviewBuildSituation {
                 label: "Optional".into(),
-                items: vec![BrainReviewBuildItem { name: "Healing Tempo".into() }],
+                items: vec![BrainReviewBuildItem {
+                    name: "Healing Tempo".into(),
+                }],
             }],
         };
         let index = BrainEmojiIndex {
@@ -4147,12 +4353,9 @@ mod tests {
     #[test]
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let bounded = "🧠".repeat(1900);
-        let payload = brain_answer_embed_body(
-            &"🧠".repeat(300),
-            &bounded,
-            &BrainEmojiIndex::default(),
-        )
-        .expect("embed");
+        let payload =
+            brain_answer_embed_body(&"🧠".repeat(300), &bounded, &BrainEmojiIndex::default())
+                .expect("embed");
         let embed = &payload["embeds"][0];
         assert_eq!(embed["description"].as_str(), Some(bounded.as_str()));
         assert!(
@@ -4196,12 +4399,8 @@ mod tests {
 
     #[test]
     fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
-        let body = brain_answer_embed_body(
-            "Items?",
-            "- a\n- b\n- c",
-            &BrainEmojiIndex::default(),
-        )
-        .unwrap_or_else(|| panic!("answer should create embed body"));
+        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c", &BrainEmojiIndex::default())
+            .unwrap_or_else(|| panic!("answer should create embed body"));
         let description = body
             .get("embeds")
             .and_then(Value::as_array)

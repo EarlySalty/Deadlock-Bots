@@ -302,6 +302,15 @@ pub fn normalize(
     }
     let mut result = BTreeMap::new();
     for (path, value) in changes {
+        if (path.starts_with("llm.")
+            && (path.ends_with(".model")
+                || path.ends_with(".provider")
+                || path == "llm.default_provider"))
+            || (path.starts_with("runtime.ai.") && path.ends_with("_model"))
+            || path == "runtime.bridges.matcher_ai_provider"
+        {
+            return Err(CatalogError("Die Modellauswahl erfolgt automatisch. Manuelle Anbieter- oder Modell-Pins sind nicht änderbar."));
+        }
         let field = fields
             .iter()
             .find(|field| &field.path == path && field.writable)

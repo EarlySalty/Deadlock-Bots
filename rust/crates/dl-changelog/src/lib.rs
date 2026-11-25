@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 pub const DEV_UPDATES_CHANNEL_ID: u64 = 1492910851483504821;
 pub const TWITCH_BOT_CHANNEL_ID: u64 = 1318329964713611385;

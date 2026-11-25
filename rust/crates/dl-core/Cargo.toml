@@ -19,6 +19,8 @@ serde_json.workspace = true
 toml_edit = "0.22"
 libc = "0.2"
 fs2 = "0.4"
+dl-token-secrets = { path = "../dl-token-secrets" }
+zeroize = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

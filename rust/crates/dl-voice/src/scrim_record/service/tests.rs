@@ -418,7 +418,11 @@ struct MockArchive {
 
 impl MockArchive {
     fn uploads(&self) -> Vec<(PathBuf, String, String)> {
-        self.state.lock().expect("mock archive lock").uploads.clone()
+        self.state
+            .lock()
+            .expect("mock archive lock")
+            .uploads
+            .clone()
     }
 
     fn set_failure(&self, fail: bool) {
@@ -973,7 +977,10 @@ async fn a_recording_lands_in_the_team_folder_and_the_channel_gets_both_links() 
     assert_eq!(folder, "Team 1");
     assert!(path.to_string_lossy().ends_with(".mp3"), "{path:?}");
     assert!(
-        file_name.ends_with(&format!("-kanal-{}.mp3", TEAM_VOICE_CHANNELS[0].voice_channel_id)),
+        file_name.ends_with(&format!(
+            "-kanal-{}.mp3",
+            TEAM_VOICE_CHANNELS[0].voice_channel_id
+        )),
         "unerwartet: {file_name}"
     );
     // Der Anhang-Weg bleibt aus, solange das Archiv funktioniert.
@@ -1101,7 +1108,10 @@ async fn ffmpeg_writes_a_mono_mp3_at_the_configured_bitrate() {
         .status()
         .await
         .expect("ffmpeg für Testeingabe");
-    assert!(generated.success(), "Testeingabe konnte nicht erzeugt werden");
+    assert!(
+        generated.success(),
+        "Testeingabe konnte nicht erzeugt werden"
+    );
 
     let mp3_path = FfmpegTranscoder
         .transcode(&wav_path, &wav_path.with_extension("mp3"))

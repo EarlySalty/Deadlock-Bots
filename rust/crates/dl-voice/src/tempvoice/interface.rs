@@ -2952,14 +2952,17 @@ mod tests {
             role_id: u64,
             connect: Option<bool>,
         ) -> Result<(), String> {
-            if self.region_update_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            if self
+                .region_update_fails
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Err("Discord verweigert den Sprachfilter".to_string());
             }
             if role_id == crate::tempvoice::engine::ENGLISH_ONLY_ROLE_ID {
-                self.channel_regions
-                    .lock()
-                    .expect("test mutex")
-                    .insert(channel_id, if connect == Some(false) { "DE" } else { "EU" }.to_string());
+                self.channel_regions.lock().expect("test mutex").insert(
+                    channel_id,
+                    if connect == Some(false) { "DE" } else { "EU" }.to_string(),
+                );
             }
             Ok(())
         }

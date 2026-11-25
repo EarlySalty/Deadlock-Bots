@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dl_activity::join_source::classify;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::PgPool;
 
 /// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`). Ein Invite, der
@@ -1049,8 +1049,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn reclassify_flippt_twitch_und_respektiert_website_filter()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn reclassify_flippt_twitch_und_respektiert_website_filter(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_001, "ABC123").await?;
@@ -1083,8 +1083,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn invite_upsert_bleibt_persistiert_wenn_reclassify_update_scheitert(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let db = dl_central_db::testing::test_pool().await?;
         let pool = db.pool();
         insert_join(pool, 9_100_101, "ABC123").await?;
