@@ -215,7 +215,7 @@ pub struct FireworksConfig {
     pub model: Option<String>,
 }
 
-fn snowflake(value: &str) -> bool {
+pub(crate) fn snowflake(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|b| b.is_ascii_digit())
         && value.parse::<u64>().is_ok_and(|id| id != 0)

@@ -243,6 +243,16 @@ const LOADER_TEXT_MAX_CHARS: &[(&[&str], usize)] = &[(
     rc::PRESENCE_STATUS_MAX_CHARS,
 )];
 
+const LOADER_TEXT_RULES: &[(&[&str], fn(&str) -> bool)] = &[
+    (&["discord.guild_id"], bc::snowflake),
+    (&["runtime.start.log_filter"], rc::log_filter_valid),
+    (&["runtime.start.command_prefix"], rc::command_prefix_valid),
+    (
+        &["runtime.start.presence_status"],
+        rc::presence_status_valid,
+    ),
+];
+
 const LLM_USE_CASE_PREFIX: &str = "llm.use_cases.";
 
 const LLM_USE_CASE_BOUNDS: &[(&str, Bounds)] = &[
@@ -547,7 +557,6 @@ pub fn build(value: &Value, fields: Vec<Field>) -> Catalog {
 fn integer(field: &Field, value: &Value) -> Result<Value, CatalogError> {
     let raw = value.as_str().ok_or_else(invalid)?;
     let parsed = raw.parse::<i64>().map_err(|_| invalid())?;
-    // Keine Rundung, Exponenten, Dezimalbrüche oder mehrdeutigen Schreibweisen.
     if parsed.to_string() != raw {
         return Err(invalid());
     }
@@ -577,6 +586,7 @@ fn text(field: &Field, value: &Value) -> Result<Value, CatalogError> {
     if raw.len() > 2048
         || raw.chars().any(char::is_control)
         || max_chars.is_some_and(|max| raw.chars().count() > max)
+        || path_bound(LOADER_TEXT_RULES, &field.path).is_some_and(|valid| !valid(raw))
     {
         return Err(invalid());
     }
@@ -953,6 +963,46 @@ mod tests {
         assert!(change(rc::PRESENCE_STATUS_MAX_CHARS + 1).is_err());
     }
     #[test]
+    fn katalog_und_loader_urteilen_bei_jedem_text_gleich() {
+        let fields = crate::admin_settings::fields();
+        let probes = [
+            "",
+            " ",
+            "\u{a0}",
+            "x",
+            "!",
+            "info",
+            "dl_bot=debug",
+            "[",
+            "0",
+            "123",
+        ];
+        let mut mismatched = Vec::new();
+        let mut probed = 0;
+        for field in fields
+            .iter()
+            .filter(|field| field.writable && field.kind == Kind::String)
+        {
+            for probe in probes {
+                probed += 1;
+                let catalog = normalize(
+                    &fields,
+                    &BTreeMap::from([(field.path.clone(), json!(probe))]),
+                )
+                .is_ok();
+                let loader = loader_accepts_raw(field, &json!(probe).to_string());
+                if catalog != loader {
+                    mismatched.push(format!(
+                        "{} = {probe:?}: Katalog {catalog}, Loader {loader}",
+                        field.path
+                    ));
+                }
+            }
+        }
+        assert!(probed > 0);
+        assert!(mismatched.is_empty(), "{mismatched:#?}");
+    }
+    #[test]
     fn grenzen_stehen_nur_an_aenderbaren_katalogzeilen() {
         let fields = crate::admin_settings::fields();
         for field in fields.iter().filter(|field| !field.writable) {
@@ -980,7 +1030,8 @@ mod tests {
                 LOADER_TEXT_MAX_CHARS
                     .iter()
                     .flat_map(|(paths, _)| paths.iter()),
-            );
+            )
+            .chain(LOADER_TEXT_RULES.iter().flat_map(|(paths, _)| paths.iter()));
         for path in table_paths {
             assert!(writable(path), "{path}: Grenze ohne änderbare Katalogzeile");
         }

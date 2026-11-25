@@ -113,6 +113,20 @@ pub fn supporter_tiers_valid(tiers: &[u64]) -> bool {
         && tiers.windows(2).all(|pair| pair[0] < pair[1])
 }
 
+pub fn command_prefix_valid(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(char::is_control)
+}
+
+pub fn presence_status_valid(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= PRESENCE_STATUS_MAX_CHARS
+        && !value.chars().any(char::is_control)
+}
+
+pub fn log_filter_valid(value: &str) -> bool {
+    tracing_subscriber::EnvFilter::try_new(value).is_ok()
+}
+
 trait LookupValue {
     fn lookup_value(&self) -> String;
 }
@@ -466,7 +480,7 @@ impl RuntimeConfig {
             .start
             .log_filter
             .as_deref()
-            .is_some_and(|filter| tracing_subscriber::EnvFilter::try_new(filter).is_err())
+            .is_some_and(|filter| !log_filter_valid(filter))
         {
             return Err(invalid());
         }
@@ -483,12 +497,12 @@ impl RuntimeConfig {
                 .start
                 .command_prefix
                 .as_deref()
-                .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
-            || self.start.presence_status.as_deref().is_some_and(|value| {
-                value.trim().is_empty()
-                    || value.chars().count() > PRESENCE_STATUS_MAX_CHARS
-                    || value.chars().any(char::is_control)
-            })
+                .is_some_and(|value| !command_prefix_valid(value))
+            || self
+                .start
+                .presence_status
+                .as_deref()
+                .is_some_and(|value| !presence_status_valid(value))
         {
             return Err(invalid());
         }
