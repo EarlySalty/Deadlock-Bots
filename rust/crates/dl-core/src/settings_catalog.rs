@@ -243,7 +243,9 @@ const LOADER_TEXT_MAX_CHARS: &[(&[&str], usize)] = &[(
     rc::PRESENCE_STATUS_MAX_CHARS,
 )];
 
-const LOADER_TEXT_RULES: &[(&[&str], fn(&str) -> bool)] = &[
+type TextRule = fn(&str) -> bool;
+
+const LOADER_TEXT_RULES: &[(&[&str], TextRule)] = &[
     (&["discord.guild_id"], bc::snowflake),
     (&["runtime.start.log_filter"], rc::log_filter_valid),
     (&["runtime.start.command_prefix"], rc::command_prefix_valid),
