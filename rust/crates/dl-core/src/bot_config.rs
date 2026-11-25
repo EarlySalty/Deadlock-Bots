@@ -16,7 +16,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
-pub const TWITCH_INVITE_LINKS_RANGE: RangeInclusive<u16> = 0..=1000;
+pub const DISCORD_GUILD_INVITE_LIMIT: u16 = 1000;
+pub const TWITCH_INVITE_LINKS_RANGE: RangeInclusive<u16> = 0..=DISCORD_GUILD_INVITE_LIMIT;
+const _: () = assert!(*TWITCH_INVITE_LINKS_RANGE.start() == 0);
 pub const TWITCH_INVITE_EVALUATION_INTERVAL_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
 pub const CONCIERGE_TIMEOUT_SECONDS_RANGE: RangeInclusive<u64> = 1..=110;
 pub const TEMPVOICE_EMPTY_LANE_GRACE_SECONDS_RANGE: RangeInclusive<u64> = 1..=86_400;
@@ -350,7 +352,9 @@ impl BotConfig {
             || steam.query().is_some()
             || steam.fragment().is_some()
             || steam.path() != "/"
-            || steam.port_or_known_default() == Some(0)
+            || steam
+                .port_or_known_default()
+                .is_some_and(|port| !crate::runtime_config::PORT_RANGE.contains(&port))
         {
             return Err(invalid(
                 "services.steam_api_url benötigt eine Loopback-Adresse ohne Zugangsdaten oder Pfad",
@@ -379,7 +383,9 @@ impl BotConfig {
             self.services.tierlist_public_port,
             self.services.changelog_port,
         ];
-        if ports.contains(&0)
+        if ports
+            .iter()
+            .any(|port| !crate::runtime_config::PORT_RANGE.contains(port))
             || ports
                 .iter()
                 .enumerate()
@@ -633,6 +639,8 @@ mod tests {
         }
         rejected("schema_version = 1\n[services]\ndashboard_port = 8770");
         rejected("schema_version = 1\n[services]\npublic_stats_port = 8771");
+        rejected("schema_version = 1\n[services]\nsteam_api_url = 'http://127.0.0.1:0'");
+        rejected("schema_version = 1\n[runtime.bridges]\nwebsite_api_url = 'http://example.org:0'");
     }
 
     #[test]

@@ -701,7 +701,9 @@ fn validate_url(raw: &str, local: bool) -> Result<(), BotConfigError> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || url.port_or_known_default() == Some(0)
+        || url
+            .port_or_known_default()
+            .is_some_and(|port| !PORT_RANGE.contains(&port))
         || (local
             && !url
                 .host_str()
