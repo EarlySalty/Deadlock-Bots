@@ -39,13 +39,14 @@ The exact commands for this repository are in section 12.
 - One orchestrator session per task drives it from start to pull request. It plans,
   delegates and decides; it keeps file dumps out of its own context.
 - Code changes run as `implementer` subagents (`.claude/agents/implementer.md`).
+  The orchestrator spawns as many as the task needs and runs independent work in
+  parallel.
 - The review is Claude Code's built-in `/code-review` skill. No custom review
   agents, no extra review tooling.
 - Model: **Opus only**. Effort: **medium** by default, **high** only for auth,
   security, concurrency, migrations or a task the maintainer marks as hard. Never
   xhigh or max, and never `/code-review max` or `/code-review ultra` unless the
   maintainer asks for it in the task. No Sonnet, no Haiku.
-- At most two subagents run at the same time.
 
 ## 4. The review
 
