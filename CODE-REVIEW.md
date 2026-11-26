@@ -41,8 +41,10 @@ The exact commands for this repository are in section 12.
 - Code changes run as `implementer` subagents (`.claude/agents/implementer.md`).
   The orchestrator spawns as many as the task needs and runs independent work in
   parallel.
-- The review is Claude Code's built-in `/code-review` skill. No custom review
-  agents, no extra review tooling.
+- Every review runs in a **new** `reviewer` subagent (`.claude/agents/reviewer.md`)
+  with fresh context. Never review in the orchestrator or in an agent that wrote or
+  fixed the code. The reviewer runs Claude Code's built-in `/code-review` skill; no
+  other review tooling.
 - Model: **Opus only**. Effort: **medium** by default, **high** only for auth,
   security, concurrency, migrations or a task the maintainer marks as hard. Never
   xhigh or max, and never `/code-review max` or `/code-review ultra` unless the
@@ -53,12 +55,13 @@ The exact commands for this repository are in section 12.
 Run it once the checks from section 2 are green and the work is committed on the
 task branch:
 
-1. `/code-review medium <branch>` (`/code-review high <branch>` for the risky areas
-   listed in section 3). Add `--fix` to let it apply its findings directly.
+1. Spawn a new `reviewer` subagent: `/code-review medium <branch>`
+   (`/code-review high <branch>` for the risky areas listed in section 3).
 2. Fix every real finding (section 5) and its whole class with an `implementer`
-   run where `--fix` was not enough. Rerun section 2.
-3. One confirmation run: `/code-review low <branch>`. Only findings on lines
-   the fix changed count here.
+   run. Rerun section 2.
+3. One confirmation run in another new `reviewer` subagent: `/code-review low
+   <branch>` with the earlier findings in its brief. Only findings on lines the fix
+   changed count here.
 
 ## 5. Severity: what must be fixed
 
@@ -141,7 +144,8 @@ into the task text; they take precedence over this file where they conflict.
 
 ```text
 You are the orchestrator for this task in <repo>. Read CODE-REVIEW.md and follow it.
-You coordinate; `implementer` subagents write code, `/code-review` reviews it.
+You coordinate; `implementer` subagents write code, a new `reviewer` subagent
+reviews it each time.
 
 Task: <the task text from the maintainer, verbatim>
 
@@ -151,9 +155,10 @@ Task: <the task text from the maintainer, verbatim>
 3. Create branch <name>/<slug> from origin/main. Implement in small vertical steps
    with `implementer` subagents. Run the checks from section 2 and commit each
    verified state.
-4. Review per section 4: `/code-review medium <branch>` (high for risky areas), fix the real
-   findings and their class, rerun section 2, then one `/code-review low <branch>` to
-   confirm. That is the whole review budget.
+4. Review per section 4: a new `reviewer` subagent runs `/code-review medium
+   <branch>` (high for risky areas). Fix the real findings and their class with an
+   `implementer`, rerun section 2, then a second new `reviewer` runs
+   `/code-review low <branch>` to confirm. That is the whole review budget.
 5. Check the acceptance criterion against real data or the real runtime.
 6. Push the branch and open the pull request with the description from section 10.
    Reply with the pull request URL and one line per open item.

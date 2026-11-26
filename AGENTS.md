@@ -13,7 +13,7 @@ through `CLAUDE.md`; other agents read it before the first step.
 | Before writing code | Search for existing code. Bug fix: name the four cause layers (section 1). Create branch `<name>/<slug>` from `origin/main`. |
 | Delegating code work | Use the `implementer` subagent from `.claude/agents/`. Opus, medium effort, high only for auth, security, concurrency, migrations. The orchestrator spawns as many subagents as the task needs. |
 | Before every commit | Run the checks in section 12 of `CODE-REVIEW.md`. No commit while they are red. |
-| Code is done and committed | Run `/code-review medium <branch> --fix` (high for risky areas), fix the real findings (section 5), rerun checks, then one `/code-review low <branch>`. Nothing more (section 8). |
+| Code is done and committed | Spawn a new `reviewer` subagent (fresh context, never the agent that wrote the code) for `/code-review medium <branch>` (high for risky areas). Fix the real findings (section 5) with an `implementer`, rerun checks, then a second new `reviewer` for `/code-review low <branch>`. Nothing more (section 8). |
 | A real product or architecture question | Ask once with options and a recommendation. No answer after 20 minutes: take the recommendation, log it in `DECISIONS.md` (section 11). Never for the excluded cases listed there. |
 | Writing user-facing text | Natural German with real umlauts and ß. Links go to `https://deutsche-deadlock-community.de`, never the `admin.` host (section 9). |
 | Task finished | Push the branch, open one pull request with the description from section 10, reply with its URL. Never push to `main`; only the maintainer merges. |
