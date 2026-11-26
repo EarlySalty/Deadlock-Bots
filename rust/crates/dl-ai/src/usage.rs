@@ -459,7 +459,6 @@ impl crate::VisionGenerator for PurposeVision {
 mod tests {
     use super::*;
     use serde_json::json;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     #[test]
     fn unbekannte_zaehler_bleiben_unbekannt_und_ids_enthalten_keine_inhalte() {
@@ -547,33 +546,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Benötigt lokale PostgreSQL-Peer-Authentifizierung und CREATE DATABASE"]
+    #[ignore = "Benötigt eine isolierte Testdatenbank über test-db-run"]
     async fn lokale_datenbank_belegt_abschluss_abbruch_nullwerte_und_herkunft() {
-        let options = PgConnectOptions::new()
-            .host("/var/run/postgresql")
-            .username("nathanael")
-            .database("postgres");
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options.clone())
+        let database = dl_central_db::testing::test_pool()
             .await
-            .expect("Testfixture muss erfolgreich sein");
-        let database = format!("fireworks_bots_usage_test_{}", std::process::id());
-        sqlx::query(&format!("CREATE DATABASE {database}"))
-            .execute(&admin)
-            .await
-            .expect("Testfixture muss erfolgreich sein");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(options.database(&database))
-            .await
-            .expect("Testfixture muss erfolgreich sein");
-        sqlx::raw_sql(include_str!(
-            "../../dl-central-db/migrations/20261005120200_llm_usage_attempts.sql"
-        ))
-        .execute(&pool)
-        .await
-        .expect("Testfixture muss erfolgreich sein");
+            .expect("Isolierte Testdatenbank muss verfügbar sein");
+        let pool = database.pool().clone();
         initialize(pool.clone(), "test-fixture").expect("Testfixture muss erfolgreich sein");
         let request = reqwest::Client::new()
             .post("https://api.fireworks.ai/inference/v1/chat/completions")
@@ -811,10 +789,11 @@ mod tests {
             "Ohne gespeicherten Start darf keine weitere HTTP-Anfrage rausgehen"
         );
         server.abort();
-        pool.close().await;
-        sqlx::query(&format!("DROP DATABASE {database}"))
-            .execute(&admin)
+        assert!(server
             .await
-            .expect("Testfixture muss erfolgreich sein");
+            .expect_err("Testserver muss abbrechen")
+            .is_cancelled());
+        pool.close().await;
+        drop(database);
     }
 }
