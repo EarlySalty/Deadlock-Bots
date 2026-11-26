@@ -27,13 +27,26 @@ point the option at the wrong role.
 
 ## Acceptance criterion
 
-`cargo test -p dl-bot -p dl-server-as-code` passes with tests that pin: four
-prompts in the order above, the three interest options carrying exactly
-`SCRIM_SIGNUP_ROLE_ID`, `ROLE_CUSTOM_GAMES_ID` and `ROLE_TURNIER_TEILNEHMER_ID`,
-a blocker naming the missing role ID when one is absent (also when a role with
-the same name but another ID exists), the apply revalidation catching a stale
-interest role ID, and the Sammelpunkt exception keeping the `Custom Games`
-overwrite only for that exact role name.
+`cargo test -p dl-bot -p dl-server-as-code` passes with tests for every point
+of brief 10:
+
+- prompt count and order, interest options carrying exactly
+  `SCRIM_SIGNUP_ROLE_ID`, `ROLE_CUSTOM_GAMES_ID`, `ROLE_TURNIER_TEILNEHMER_ID`:
+  `onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert`
+- stable IDs despite renamed roles:
+  `onboarding_interessen_prompt_haelt_rollen_ids_bei_umbenennung`
+- missing role, also when another role carries the same name:
+  `onboarding_interessen_prompt_blockt_fehlende_rolle_per_id_statt_namenssuche`
+- existing configuration (rebuilding from an applied four-prompt config keeps
+  the prompts unchanged): `onboarding_builder_bleibt_bei_bestehender_vier_prompt_config_stabil`
+- apply revalidation of interest and ping role IDs:
+  `onboarding_apply_revalidiert_role_und_channel_ids_gegen_live_modell`
+- exact rules exception:
+  `sammelpunkt_custom_games_overwrite_bleibt_nur_bei_exaktem_rollennamen`
+
+Live roles and Discord's prompt limit could not be read from this machine
+(no guild access). The limit of four in-onboarding prompts is the one the code
+history records as verified live on 2026-07-15 (`TOO_MANY_ONBOARDING_PROMPTS`).
 
 ## Changes over the WIP
 

@@ -10990,6 +10990,66 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
+    fn onboarding_interessen_prompt_haelt_rollen_ids_bei_umbenennung() {
+        let mut model = onboarding_model();
+        for role_id in [
+            dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+            dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+        ] {
+            let role = model.roles.get_mut(&role_id).expect("interest role");
+            role.name = format!("Umbenannt {role_id}");
+        }
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("build");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        assert_eq!(
+            built.config.prompts[1].options[1].role_ids,
+            vec![dl_community::onboarding::ROLE_CUSTOM_GAMES_ID.to_string()]
+        );
+        assert_eq!(
+            built.config.prompts[1].options[2].role_ids,
+            vec![dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID.to_string()]
+        );
+    }
+
+    #[test]
+    fn onboarding_builder_bleibt_bei_bestehender_vier_prompt_config_stabil() {
+        let model = onboarding_model();
+        let first = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("first build");
+        let mut live = serde_json::to_value(&first.config).expect("live config");
+        let prompts = live["prompts"].as_array_mut().expect("prompts");
+        for (prompt_index, prompt) in prompts.iter_mut().enumerate() {
+            if prompt.get("id").is_none() {
+                prompt["id"] = json!(format!("applied-{prompt_index}"));
+            }
+            let options = prompt["options"].as_array_mut().expect("options");
+            for (option_index, option) in options.iter_mut().enumerate() {
+                if option.get("id").is_none() {
+                    option["id"] = json!(format!("applied-{prompt_index}-{option_index}"));
+                }
+            }
+        }
+
+        let second = build_welle2b_onboarding_config(&live, &model).expect("second build");
+
+        assert!(second.blockers.is_empty(), "blockers: {:?}", second.blockers);
+        assert_eq!(second.config.prompts.len(), 4);
+        for index in 0..3 {
+            assert_eq!(
+                serde_json::to_value(&second.config.prompts[index]).expect("built prompt"),
+                serde_json::to_value(&first.config.prompts[index]).expect("built prompt")
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&second.config.prompts[3]).expect("rank prompt"),
+            serde_json::to_value(&first.config.prompts[3]).expect("rank prompt")
+        );
+    }
+
+    #[test]
     fn onboarding_payload_laesst_neue_ids_weg_und_nutzt_name_resolved_ids() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
