@@ -2,8 +2,10 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, PortError> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
     let member = |id: u64, roles: &[&str]| {
         json!({
             "user": {"id": id.to_string(), "username": "test", "discriminator": "0", "avatar": null},
@@ -23,17 +25,20 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
     let captured = requests.clone();
     let server = tokio::spawn(async move {
         for (index, page) in pages.into_iter().enumerate() {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
             let mut request = Vec::new();
             let mut byte = [0];
             while !request.ends_with(b"\r\n\r\n") {
-                socket.read_exact(&mut byte).await.unwrap();
+                socket
+                    .read_exact(&mut byte)
+                    .await
+                    .expect("read test request byte");
                 request.push(byte[0]);
             }
             captured
                 .lock()
-                .unwrap()
-                .push(String::from_utf8(request).unwrap());
+                .expect("captured requests lock")
+                .push(String::from_utf8(request).expect("UTF-8 test request"));
             let status = if fail_last_page && index == 3 {
                 "403 Forbidden"
             } else {
@@ -45,11 +50,16 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
                 page.to_string()
             };
             let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
-            socket.write_all(response.as_bytes()).await.unwrap();
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write test response");
         }
     });
     let mut adapter = DiscordAdapter::new("test-only");
-    Arc::get_mut(&mut adapter).unwrap().http = Arc::new(
+    Arc::get_mut(&mut adapter)
+        .expect("unique test adapter")
+        .http = Arc::new(
         serenity::http::HttpBuilder::new("test-only")
             .proxy(format!("http://{address}"))
             .ratelimiter_disabled(true)
@@ -58,7 +68,7 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
     let result = adapter.live_role_members(1, role_id).await;
     server.abort();
     let _ = server.await;
-    let requests = requests.lock().unwrap();
+    let requests = requests.lock().expect("captured requests lock");
     assert_eq!(requests.len(), 4, "REST decoding failed: {result:?}");
     assert!(requests[0].contains("/guilds/1/roles"));
     assert!(!requests[1].contains("after="));
@@ -69,7 +79,7 @@ async fn snapshot(role_id: u64, fail_last_page: bool) -> Result<RoleMembers, Por
 
 #[tokio::test]
 async fn complete_role_snapshot_reads_every_rest_page_without_gateway_cache() {
-    let result = snapshot(2, false).await.unwrap();
+    let result = snapshot(2, false).await.expect("complete role snapshot");
     assert_eq!(result.role_id, 2);
     assert_eq!(
         result
@@ -83,7 +93,9 @@ async fn complete_role_snapshot_reads_every_rest_page_without_gateway_cache() {
 
 #[tokio::test]
 async fn everyone_snapshot_includes_all_members_without_explicit_everyone_role() {
-    let result = snapshot(1, false).await.unwrap();
+    let result = snapshot(1, false)
+        .await
+        .expect("complete everyone snapshot");
     assert_eq!(result.role_id, 1);
     assert_eq!(result.name, "@everyone");
     assert_eq!(
