@@ -937,7 +937,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::router::register(&mut router, lane_router.clone());
 
-    retired_buttons::register(&mut router);
+    retired_buttons::register(&mut router, central_pool.clone());
 
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
