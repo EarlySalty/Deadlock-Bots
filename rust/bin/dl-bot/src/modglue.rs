@@ -4063,7 +4063,7 @@ impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
             .adapter
             .reaction_users(channel_id, message_id, emoji, after)
             .await
-            .map_err(reaction_role_port_err)?;
+            .map_err(|err| reaction_role_port_err(*err))?;
         Ok(users
             .into_iter()
             .map(|user| dl_community::reaction_roles::ReactedUser {
