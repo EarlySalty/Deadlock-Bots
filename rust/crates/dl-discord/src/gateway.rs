@@ -809,7 +809,7 @@ pub async fn build_client(
     router: Arc<InteractionRouter>,
     options: GatewayClientOptions,
     songbird_manager: Arc<Songbird>,
-) -> serenity::Result<serenity::Client> {
+) -> Result<serenity::Client, Box<serenity::Error>> {
     let mut intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
         | GatewayIntents::GUILD_VOICE_STATES
@@ -840,6 +840,7 @@ pub async fn build_client(
             recording_guild_id: options.recording_guild_id,
         })
         .await
+        .map_err(Box::new)
 }
 
 /// Baut die zweite, auf Voice-Aufnahme beschränkte Gateway-Identität.
@@ -848,7 +849,7 @@ pub async fn build_voice_worker_client(
     manager: Arc<Songbird>,
     readiness: Arc<AtomicBool>,
     guild_id: u64,
-) -> serenity::Result<serenity::Client> {
+) -> Result<serenity::Client, Box<serenity::Error>> {
     serenity::Client::builder(token, voice_worker_intents())
         .register_songbird_with(manager)
         .event_handler(VoiceWorkerHandler {
@@ -856,6 +857,7 @@ pub async fn build_voice_worker_client(
             guild_id,
         })
         .await
+        .map_err(Box::new)
 }
 
 #[cfg(test)]
