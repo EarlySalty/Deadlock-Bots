@@ -68,7 +68,7 @@ fn system_prompt(
     let catalogue = serde_json::to_string(tools)
         .map_err(|_| BackendError::new(FailureKind::InvalidRequest, "tools"))?;
     prompt.push_str(
-        " You may call tools instead of answering. To call tools, leave `answer` out and put one or more calls into `tool_calls`, each with the tool `name` and an `input` object that matches the tool's input_schema. Tool results come back in the next turn inside <tool_result> elements. Only call tools from this list:\n",
+        " You may call tools instead of answering. To call tools, leave `answer` out and put one or more calls into `tool_calls`; do not give a provisional answer before receiving tool results. Each call must have the tool `name` and an `input` object that matches the tool's input_schema. Tool results come back in the next turn inside <tool_result> elements. Only call tools from this list:\n",
     );
     prompt.push_str(&catalogue);
     Ok(prompt)
@@ -193,7 +193,13 @@ pub fn decision(
 ) -> Result<(Vec<ContentBlock>, StopReason), BackendError> {
     let invalid = |reason| BackendError::new(FailureKind::InvalidOutput, reason);
     let object = output.as_object().ok_or_else(|| invalid("not_object"))?;
+    let calls = match object.get("tool_calls") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(calls)) => calls.clone(),
+        Some(_) => return Err(invalid("tool_calls_not_array")),
+    };
     let answer = match object.get("answer") {
+        _ if output_schema.is_some() && !calls.is_empty() => None,
         None => None,
         Some(value) if output_schema.is_some() => {
             if !value.is_object() {
@@ -207,14 +213,7 @@ pub fn decision(
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
     };
-    let calls = match object.get("tool_calls") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(calls)) => calls.clone(),
-        Some(_) => return Err(invalid("tool_calls_not_array")),
-    };
-    if output_schema.is_some() && answer.is_some() && !calls.is_empty() {
-        return Err(invalid("mixed_structured_answer_and_calls"));
-    }
+
     let mut content = Vec::new();
     if let Some(text) = answer {
         content.push(ContentBlock::Text { text });
@@ -366,10 +365,27 @@ mod tests {
             .1,
             StopReason::ToolUse
         );
+        for provisional in [
+            json!({"text":"unverified"}),
+            Value::Null,
+            json!("unverified"),
+        ] {
+            let (content, stop) = decision(
+                &json!({"answer":provisional,"tool_calls":calls}),
+                &request.tools,
+                request.output_schema.as_ref(),
+            )
+            .expect("tool calls take precedence over provisional answers");
+            assert_eq!(stop, StopReason::ToolUse);
+            assert!(
+                matches!(content.as_slice(), [ContentBlock::ToolUse { name, input, .. }] if name == "hero_lookup" && *input == json!({"hero":"Haze"}))
+            );
+        }
         for bad in [
             json!({"answer":"{\"text\":\"not an object\"}"}),
             json!({"answer":null}),
-            json!({"answer":{"text":"x"},"tool_calls":calls}),
+            json!({"answer":{"text":"x"},"tool_calls":[{"name":"unknown","input":{}}]}),
+            json!({"answer":{"text":"x"},"tool_calls":[{"name":"hero_lookup","input":"invalid"}]}),
         ] {
             assert_eq!(
                 decision(&bad, &request.tools, request.output_schema.as_ref())
