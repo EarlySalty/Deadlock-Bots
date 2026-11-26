@@ -52,7 +52,6 @@ Erstkontakt-Lotsen. Der Verbinder macht Spielkontakt.
 |---|---|---|---|
 | Shadow | Sammel-Post `#bot-logs` + `bot.ai_decision_ledger` | dl-brain-community-Muster | K0 |
 | 1 | LFG-Watch vorbelegen/auslösen | `lfg_watch.rs` `claim_watch` | K1 |
-| 1 | LFG-Gesuch anstoßen (Solo-Watch-Prompt) | `solo_watch.rs` | K1 |
 | 1 | Lane-Empfehlung/Router | `router.rs`, `adaptive.rs` | K1 |
 | 1 | Scrim-VCs A5 als Treffpunkt | `DL_SCRIM_VISIBLE_VCS_ENABLED` | K1 |
 | 2 | DM via `bot.action_outbox`, `action_type='connect_suggest'` | Outbox + Budget-Gate, braucht generischen Dispatcher | K2 |
@@ -174,7 +173,7 @@ Regeln:
    Inaktivitätsdauern, keine internen Befunde, keine Pings, du-Form,
    keine Emojis.
 6. Antworte ausschließlich mit JSON:
-   {"decision":"yes|no|unsure","confidence":0.0,"begruendung":"...","vorschlagstext":"...","kanal":"lfg_watch|solo_watch_prompt|lane_empfehlung|scrim_vc"}
+   {"decision":"yes|no|unsure","confidence":0.0,"begruendung":"...","vorschlagstext":"...","kanal":"lfg_watch|lane_empfehlung|scrim_vc"}
 ```
 
 Der Kritik-Prompt prüft eine yes-Ausgabe. Anderes Modell als der Ersteller.

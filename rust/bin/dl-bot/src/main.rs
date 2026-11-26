@@ -807,14 +807,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
 
-    let solo_watch =
-        dl_voice::solo_watch::SoloWatch::without_prompts(Arc::new(dl_voice::glue::SoloWatchGlue {
-            adapter: adapter.clone(),
-            pool: central_pool.clone(),
-            log_channel_id: dl_voice::solo_watch::LOG_CHANNEL_ID,
-        }));
-    dl_voice::solo_watch::register(&mut router, solo_watch.clone());
-
     // TempVoice-Engine (4b/4c) — Panel-Buttons brauchen den Router,
     // der Event-Subscriber startet erst mit dem Gateway
     let voice_pair_store = Arc::new(dl_voice::voice_pair_guard::VoicePairGuardStore::new(
@@ -1004,8 +996,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
-
-    tracing::info!("Mitspieler-Umfrage deaktiviert");
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
     // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
@@ -1676,7 +1666,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 "Steam-Link-Voice-Nudge deaktiviert (DL_STEAM_VOICE_NUDGE_ENABLED nicht gesetzt)"
             );
         }
-        dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
         // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
         dl_voice::feedback::spawn_dm_responses(
             voice_feedback.clone(),
