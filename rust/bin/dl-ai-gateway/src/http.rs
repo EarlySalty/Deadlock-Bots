@@ -12,6 +12,7 @@ use dl_ai::tool_chat::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::Instrument;
 
 pub const SLOT_HEADER: &str = "x-dl-ai-slot";
 
@@ -153,7 +154,7 @@ fn message_id() -> String {
     format!("msg_gw{nanos:x}{counter:x}")
 }
 
-fn success_response(slot: &str, routed: Routed) -> Response {
+fn success_response(slot: &str, routed: Routed, observation_id: &str) -> Response {
     let response = routed.response;
     let usage = response.usage.unwrap_or_default();
     let stop_reason = match response.stop_reason {
@@ -162,7 +163,7 @@ fn success_response(slot: &str, routed: Routed) -> Response {
         StopReason::MaxTokens => "max_tokens",
     };
     let mut reply = Json(json!({
-        "id": message_id(),
+        "id": observation_id,
         "type": "message",
         "role": "assistant",
         "model": response.model,
@@ -203,11 +204,15 @@ async fn messages(
         Err(reason) => return invalid(reason),
     };
     let started = Instant::now();
-    let outcome = router.complete(&slot, &request).await;
+    let observation_id = message_id();
+    let span =
+        tracing::info_span!("ai_gateway_call", gateway_observation = %observation_id, slot = %slot);
+    let outcome = router.complete(&slot, &request).instrument(span).await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match outcome {
+    let mut response = match outcome {
         Ok(routed) => {
             tracing::info!(
+                gateway_observation = %observation_id,
                 slot = %slot,
                 provider = %routed.provider,
                 attempts = routed.attempts,
@@ -215,13 +220,19 @@ async fn messages(
                 latency_ms,
                 "AI_GATEWAY_SERVED"
             );
-            success_response(&slot, routed)
+            success_response(&slot, routed, &observation_id)
         }
         Err(failure) => {
-            tracing::warn!(slot = %slot, latency_ms, failure = ?failure, "AI_GATEWAY_FAILED");
+            tracing::warn!(gateway_observation = %observation_id, slot = %slot, latency_ms, failure = ?failure, "AI_GATEWAY_FAILED");
             failure_response(failure)
         }
+    };
+    if let Ok(value) = HeaderValue::from_str(&observation_id) {
+        response
+            .headers_mut()
+            .insert("x-dl-ai-observation-id", value);
     }
+    response
 }
 
 #[cfg(test)]
@@ -401,6 +412,12 @@ mod tests {
                 .get("x-dl-ai-provider")
                 .and_then(|v| v.to_str().ok()),
             Some("fake")
+        );
+        assert_eq!(
+            headers
+                .get("x-dl-ai-observation-id")
+                .and_then(|v| v.to_str().ok()),
+            first["id"].as_str()
         );
         assert_eq!(first["stop_reason"], "tool_use");
         assert_eq!(first["model"], "fake-model");

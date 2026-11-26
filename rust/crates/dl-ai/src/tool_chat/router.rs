@@ -195,12 +195,14 @@ impl SlotRouter {
                 FailureKind::Unavailable,
                 "unknown_provider",
             ))?;
-        let queue_deadline = deadline.min(Instant::now() + handle.queue_timeout);
+        let attempt_started = Instant::now();
+        let queue_deadline = deadline.min(attempt_started + handle.queue_timeout);
         let permit =
             tokio::time::timeout_at(queue_deadline, Arc::clone(&handle.permits).acquire_owned())
                 .await
                 .map_err(|_| BackendError::new(FailureKind::Busy, "queue_timeout"))?
                 .map_err(|_| BackendError::new(FailureKind::Unavailable, "pool_closed"))?;
+        let queued_ms = attempt_started.elapsed().as_millis();
         let deadline = deadline.min(Instant::now() + target.timeout);
         let call = CallTarget {
             model: target.model.clone(),
@@ -208,6 +210,7 @@ impl SlotRouter {
                 .max_tokens
                 .map_or(target.max_tokens, |asked| asked.min(target.max_tokens)),
         };
+        let ledger_started = Instant::now();
         let entry = if handle.backend.records_own_usage() {
             None
         } else {
@@ -220,13 +223,17 @@ impl SlotRouter {
                 .map_err(|_| BackendError::new(FailureKind::Timeout, "ledger_timeout"))??,
             )
         };
+        let ledger_begin_ms = ledger_started.elapsed().as_millis();
+        let backend_started = Instant::now();
         let result = crate::usage::with_purpose(
             slot,
             tokio::time::timeout_at(deadline, handle.backend.complete(request, &call)),
         )
         .await
         .unwrap_or(Err(BackendError::new(FailureKind::Timeout, "slot_timeout")));
+        let backend_ms = backend_started.elapsed().as_millis();
         drop(permit);
+        let ledger_finish_started = Instant::now();
         if let Some(entry) = entry {
             let outcome = match &result {
                 Ok(response) => LedgerOutcome {
@@ -251,6 +258,17 @@ impl SlotRouter {
                 );
             }
         }
+        tracing::info!(
+            slot,
+            provider = %target.provider,
+            queue_ms = u64::try_from(queued_ms).unwrap_or(u64::MAX),
+            ledger_begin_ms = u64::try_from(ledger_begin_ms).unwrap_or(u64::MAX),
+            backend_ms = u64::try_from(backend_ms).unwrap_or(u64::MAX),
+            ledger_finish_ms = u64::try_from(ledger_finish_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            total_ms = u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            error_kind = result.as_ref().err().map(|error| error.kind.as_str()).unwrap_or("none"),
+            "AI_GATEWAY_ATTEMPT_TIMING"
+        );
         result
     }
 }

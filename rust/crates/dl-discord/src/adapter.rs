@@ -115,7 +115,7 @@ impl DiscordAdapter {
     /// bekommt) — ohne gesetzte ID schlägt jeder Followup nach einem Defer mit
     /// „Application id was expected but missing" fehl, und der User sieht nichts.
     /// Einmalig beim Start aufzurufen; idempotent.
-    pub async fn init_application_id(&self) -> serenity::Result<()> {
+    pub async fn init_application_id(&self) -> Result<(), Box<serenity::Error>> {
         if self.http.application_id().is_some() {
             return Ok(());
         }
@@ -377,7 +377,7 @@ impl DiscordAdapter {
         &self,
         channel_id: u64,
         body: &Map<String, Value>,
-    ) -> Result<u64, serenity::Error> {
+    ) -> Result<u64, Box<serenity::Error>> {
         let message = self
             .http
             .send_message(ChannelId::new(channel_id), Vec::new(), body)
@@ -419,7 +419,7 @@ impl DiscordAdapter {
         &self,
         channel_id: u64,
         body: &Map<String, Value>,
-    ) -> Result<u64, serenity::Error> {
+    ) -> Result<u64, Box<serenity::Error>> {
         self.send_raw(channel_id, body).await
     }
 
@@ -429,7 +429,7 @@ impl DiscordAdapter {
         channel_id: u64,
         content: Option<&str>,
         path: &Path,
-    ) -> Result<u64, serenity::Error> {
+    ) -> Result<u64, Box<serenity::Error>> {
         let attachment = CreateAttachment::path(path).await?;
         let mut body = Map::new();
         if let Some(content) = content {
@@ -448,7 +448,7 @@ impl DiscordAdapter {
         channel_id: u64,
         message_id: u64,
         body: &Map<String, Value>,
-    ) -> Result<(), serenity::Error> {
+    ) -> Result<(), Box<serenity::Error>> {
         self.http
             .edit_message(
                 ChannelId::new(channel_id),
@@ -458,6 +458,7 @@ impl DiscordAdapter {
             )
             .await
             .map(|_| ())
+            .map_err(Box::new)
     }
 
     pub async fn reaction_users(
@@ -466,7 +467,7 @@ impl DiscordAdapter {
         message_id: u64,
         emoji: &ReactionType,
         after: Option<u64>,
-    ) -> Result<Vec<ReactedUser>, serenity::Error> {
+    ) -> Result<Vec<ReactedUser>, Box<serenity::Error>> {
         let users = self
             .http
             .get_reaction_users(
