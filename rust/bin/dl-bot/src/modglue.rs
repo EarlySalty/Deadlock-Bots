@@ -2934,7 +2934,7 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
         {
             Ok(_) => SurveyDmDelivery::Sent,
             Err(err) if is_discord_cannot_send_messages(&err) => SurveyDmDelivery::Blocked,
-            Err(err) => failed_survey_dm(user_id, err),
+            Err(err) => failed_survey_dm(user_id, *err),
         }
     }
 
