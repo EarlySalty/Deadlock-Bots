@@ -4,9 +4,9 @@ Für Arbeiten an Authentifizierung und Zugängen gilt `docs/token-storage-db.md`
 
 # Code review and task flow
 
-Every task follows `CODE-REVIEW.md`: one orchestrator session per task, Opus
-subagents from `.claude/agents/` at medium effort (high only for risky areas),
-deterministic checks first, one deep review, at most two verification runs, then
-one pull request with the review result in its description. It also contains the
-orchestrator start prompt and the 20-minute default-decision rule. Never push to
-`main`; only the maintainer merges.
+Every task follows `CODE-REVIEW.md`: one orchestrator session per task, Opus at
+medium effort (high only for risky areas), deterministic checks first, one
+`/code-review` run plus one confirmation run, then one pull request with the
+review result in its description. It also contains the orchestrator start prompt
+and the 20-minute default-decision rule. Never push to `main`; only the
+maintainer merges.

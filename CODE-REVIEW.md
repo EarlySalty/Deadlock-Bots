@@ -38,83 +38,63 @@ The exact commands for this repository are in section 12.
 
 - One orchestrator session per task drives it from start to pull request. It plans,
   delegates and decides; it keeps file dumps out of its own context.
-- Implementation, review and verification run as Claude Code subagents
-  (`.claude/agents/`): `implementer`, `code-reviewer`, `review-verifier`.
+- Code changes run as `implementer` subagents (`.claude/agents/implementer.md`).
+- The review is Claude Code's built-in `/code-review` skill. No custom review
+  agents, no extra review tooling.
 - Model: **Opus only**. Effort: **medium** by default, **high** only for auth,
   security, concurrency, migrations or a task the maintainer marks as hard. Never
-  xhigh or max. No Sonnet, no Haiku for implementation or review.
-- Every subagent starts fresh and gets a short brief: goal, files, constraints,
-  what is already ruled out. Reviewers get the code and the diff, never the
-  orchestrator's own conclusion.
+  xhigh or max, and never `/code-review max` or `/code-review ultra` unless the
+  maintainer asks for it in the task. No Sonnet, no Haiku.
 - At most two subagents run at the same time.
 
-## 4. Round 1: one deep review with fixed fan-out
+## 4. The review
 
-- Review the committed branch against `origin/main`. Reviewers are read-only
-  (read, grep, glob, read-only git). They may read outside the diff to follow
-  callers and dependencies.
-- Fan-out is fixed and does not grow with diff size:
-  - small change (one subsystem, roughly under 300 changed lines): 1 `code-reviewer`
-  - default: 2 `code-reviewer` runs in parallel with different focus
-    - **Correctness and boundaries**: logic, edge values, error paths, API and DB contracts
-    - **Security, concurrency and state**: auth, injection, secrets, locks, tasks,
-      retries, shared state, migrations
-  - at most 3, and only with a stated reason
-- Depth is hypothesis driven, not a matrix. Check an input class only where the
-  code touches it:
-  - concurrency: locks, tasks, channels, shared state
-  - retry and idempotency: queues, network calls, webhooks
-  - null, missing and malformed data: API payloads, serde, DB rows
-  - overflow and limits: sizes, indices, counters, pagination
-  - time: time zones, expiry, ordering
+Run it once the checks from section 2 are green and the work is committed on the
+task branch:
 
-## 5. Severity: only high blocks
+1. `/code-review medium <branch>` (`/code-review high <branch>` for the risky areas
+   listed in section 3). Add `--fix` to let it apply its findings directly.
+2. Fix every real finding (section 5) and its whole class with an `implementer`
+   run where `--fix` was not enough. Rerun section 2.
+3. One confirmation run: `/code-review low <branch>`. Only findings on lines
+   the fix changed count here.
+
+## 5. Severity: what must be fixed
 
 | Severity | Meaning | Effect |
 |---|---|---|
-| high | A concrete failure scenario: input or state X leads to wrong output, crash, data loss, security hole or rule violation from section 9 | blocks merge |
-| medium | Real weakness without a concrete failing scenario today | fix if cheap, else note in the task |
-| low | Style, naming, nice-to-have | hint only, never blocks |
+| high | A concrete failure scenario: input or state X leads to wrong output, crash, data loss, security hole or rule violation from section 9 | fix before the pull request |
+| medium | Real weakness without a concrete failing scenario today | fix if cheap, else list in the pull request |
+| low | Style, naming, nice-to-have | ignore or list, never blocks |
 
 A finding without a concrete scenario and a `file:line` anchor is not high.
-Each finding states: file and line, failure scenario, root cause, class. Findings
-with the same root cause are merged into one.
+A finding you think is wrong is not fixed; it goes into the pull request as
+`FALSE` with one line of reason.
 
-## 6. After round 1 the findings are frozen
+## 6. No review loops
 
-- The round-1 findings are the only review agenda from now on.
-- The fixer (an `implementer` run) fixes each high finding and its whole class,
-  reruns section 2 and reviews its own diff before asking for verification.
-- Verification is **one `review-verifier` run** that reads the open findings and
-  the fix diff and returns one state per finding:
-  `FIXED`, `STILL`, `FALSE` (finding was wrong) or `NEW_REGRESSION`.
-- A new finding is only allowed when the fix itself introduces a defect on a line
-  the fix changed.
-- A new full review happens only when the scope changes: a new subsystem, a new
-  external interface, auth or security code, a data migration. Never because
-  verification still shows open items.
+- The first review sets the agenda. The confirmation run checks the fixes; it is
+  not a new review of the whole branch.
+- A new full review happens only when the scope changed after the first review
+  (new subsystem, new external interface, auth or security code, a data migration).
 
-## 7. Technical failures are not rounds
+## 7. Technical failures
 
-- Malformed reviewer output gets one format-only repair request. It never triggers
-  a second code reading.
-- After two technical failures in a row the review is marked `REVIEW_INCONCLUSIVE`
-  in the pull request and the task moves on.
-- Runs without a verdict (tool failure, usage limit) do not count as rounds.
+- A review run that fails for technical reasons (tool error, usage limit) does not
+  count. Retry it once. If it fails again, note `REVIEW_INCONCLUSIVE` in the pull
+  request and move on.
 
 ## 8. Hard budget per task
 
-The old gate ran up to 20 rounds per branch and burned the usage without making the
-code better. That does not come back. Per task:
+The old setup ran up to 20 gate rounds per branch and burned the usage without making
+the code better. That does not come back. Per task:
 
-- 1 deep review (round 1, section 4)
-- at most 2 verification runs (section 6)
+- 1 review run and 1 confirmation run, nothing more
 - then the pull request is opened, also if something is still open. Open items go
   into the pull request description with finding, state and reason. The maintainer
   decides on them.
 
-Never rerun a review just to see what is left. Never start a fresh full review to
-get a cleaner result.
+Never rerun a review just to see what is left.
 
 ## 9. House rules the review checks
 
@@ -143,12 +123,11 @@ get a cleaner result.
 - One task, one branch (`<name>/<slug>`), one pull request. Never push to `main`.
   Commit verified intermediate states. No force push to shared branches, no
   bypassed hooks.
-- Open the pull request with `gh pr create` once the budget in section 8 is used
-  or all findings are `FIXED` or `FALSE`. The description holds:
+- Open the pull request with `gh pr create` after the confirmation run. The description holds:
   - goal and acceptance criterion, and whether it was checked against real data
   - what changed
   - check results from section 2
-  - review: reviewers used, findings with their final state, open items with reason
+  - review: `/code-review` level used, findings and what was done, open items with reason
   - decisions taken by default (from `DECISIONS.md`) and decisions still open
 - Only the maintainer merges. A green review is not acceptance; the result is also
   judged against the goal and the rules above.
@@ -161,7 +140,7 @@ into the task text; they take precedence over this file where they conflict.
 
 ```text
 You are the orchestrator for this task in <repo>. Read CODE-REVIEW.md and follow it.
-You coordinate; subagents from .claude/agents/ do the reading-heavy work.
+You coordinate; `implementer` subagents write code, `/code-review` reviews it.
 
 Task: <the task text from the maintainer, verbatim>
 
@@ -171,13 +150,11 @@ Task: <the task text from the maintainer, verbatim>
 3. Create branch <name>/<slug> from origin/main. Implement in small vertical steps
    with `implementer` subagents. Run the checks from section 2 and commit each
    verified state.
-4. Review round 1 per section 4: one or two `code-reviewer` subagents in parallel,
-   each with its focus. Merge duplicate findings. Fix every high finding and its
-   class with an `implementer` run, rerun section 2.
-5. Verify with one `review-verifier` run. If something is STILL or NEW_REGRESSION,
-   fix once more and verify once more. That is the end of the review budget.
-6. Check the acceptance criterion against real data or the real runtime.
-7. Push the branch and open the pull request with the description from section 10.
+4. Review per section 4: `/code-review medium <branch>` (high for risky areas), fix the real
+   findings and their class, rerun section 2, then one `/code-review low <branch>` to
+   confirm. That is the whole review budget.
+5. Check the acceptance criterion against real data or the real runtime.
+6. Push the branch and open the pull request with the description from section 10.
    Reply with the pull request URL and one line per open item.
 
 Decisions:
