@@ -2934,7 +2934,7 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
         {
             Ok(_) => SurveyDmDelivery::Sent,
             Err(err) if is_discord_cannot_send_messages(&err) => SurveyDmDelivery::Blocked,
-            Err(err) => failed_survey_dm(user_id, err),
+            Err(err) => failed_survey_dm(user_id, *err),
         }
     }
 
@@ -4063,7 +4063,7 @@ impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
             .adapter
             .reaction_users(channel_id, message_id, emoji, after)
             .await
-            .map_err(reaction_role_port_err)?;
+            .map_err(|err| reaction_role_port_err(*err))?;
         Ok(users
             .into_iter()
             .map(|user| dl_community::reaction_roles::ReactedUser {
