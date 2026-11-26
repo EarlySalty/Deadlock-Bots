@@ -701,28 +701,6 @@ pub(crate) async fn attach_comment_db(
     .map_err(|error| error.to_string())
 }
 
-/// Hat einer der beiden den anderen zuletzt abgelehnt? Der Pairing-Vorschlag
-/// fragt das, bevor er zwei Leute zusammenbringen will.
-pub async fn pair_is_unwanted(pool: &PgPool, one: u64, other: u64) -> Result<bool, String> {
-    let one = i64::try_from(one).map_err(|error| error.to_string())?;
-    let other = i64::try_from(other).map_err(|error| error.to_string())?;
-    let unwanted: Option<bool> = sqlx::query_scalar(
-        "SELECT rating = $3
-           FROM activity.voice_mate_ratings
-          WHERE (rater_user_id = $1 AND mate_user_id = $2)
-             OR (rater_user_id = $2 AND mate_user_id = $1)
-          ORDER BY created_at DESC
-          LIMIT 1",
-    )
-    .bind(one)
-    .bind(other)
-    .bind(RATING_RATHER_NOT)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-    Ok(unwanted.unwrap_or(false))
-}
-
 struct SurveyHandler {
     survey: Arc<MateSurvey>,
 }

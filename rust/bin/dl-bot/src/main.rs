@@ -14,6 +14,7 @@ mod master;
 mod mcp;
 mod modglue;
 mod onboardglue;
+mod retired_buttons;
 mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
@@ -944,17 +945,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::router::register(&mut router, lane_router.clone());
 
-    // Lane-Pairing (Doppel-Opt-in): zwei Einzelsitzer werden gefragt, ob sie
-    // zusammen zocken wollen. Kill-Switch: DL_LANE_PAIRING_ENABLED=0.
-    let lane_pairing_enabled = env_bool_default("DL_LANE_PAIRING_ENABLED", true);
-    let lane_pairing = dl_voice::pairing::LanePairing::new(Arc::new(dl_voice::glue::PairingGlue {
-        adapter: adapter.clone(),
-        pool: central_pool.clone(),
-        engine: tempvoice.clone(),
-    }));
-    if lane_pairing_enabled {
-        dl_voice::pairing::register(&mut router, lane_pairing.clone());
-    }
+    retired_buttons::register(&mut router);
 
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
@@ -1686,11 +1677,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
         }
         dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
-        if lane_pairing_enabled {
-            dl_voice::pairing::spawn(lane_pairing.clone());
-        } else {
-            tracing::warn!("Lane-Pairing deaktiviert (DL_LANE_PAIRING_ENABLED=0)");
-        }
         // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
         dl_voice::feedback::spawn_dm_responses(
             voice_feedback.clone(),

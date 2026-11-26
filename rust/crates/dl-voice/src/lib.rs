@@ -19,7 +19,6 @@ mod lfg_watch;
 pub mod live_dot;
 pub mod mate_survey;
 pub mod nudge;
-pub mod pairing;
 pub mod rank;
 pub mod rename_queue;
 pub mod router;
