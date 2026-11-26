@@ -74,7 +74,8 @@ impl ToolBackend for ChatProviderBackend {
             .map_err(provider_error)?;
         let output = json_payload(&crate::strip_think(&response.content))
             .ok_or_else(|| BackendError::new(FailureKind::InvalidOutput, "invalid_json"))?;
-        let (content, stop_reason) = emulation::decision(&output, &request.tools)?;
+        let (content, stop_reason) =
+            emulation::decision(&output, &request.tools, request.output_schema.as_ref())?;
         let usage = match (
             response.usage.prompt_tokens,
             response.usage.completion_tokens,

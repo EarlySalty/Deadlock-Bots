@@ -24,24 +24,44 @@ pub fn prompt(request: &ToolChatRequest) -> Result<EmulatedPrompt, BackendError>
             "last_message_not_user",
         ));
     }
+    if request
+        .output_schema
+        .as_ref()
+        .is_some_and(|schema| schema.get("type").and_then(Value::as_str) != Some("object"))
+    {
+        return Err(BackendError::new(
+            FailureKind::InvalidRequest,
+            "output_schema_not_object",
+        ));
+    }
     let mut images = Vec::new();
     let user = transcript(&request.messages, &mut images)?;
     Ok(EmulatedPrompt {
-        system: system_prompt(&request.system, &request.tools)?,
+        system: system_prompt(
+            &request.system,
+            &request.tools,
+            request.output_schema.is_some(),
+        )?,
         user,
         images,
-        schema: schema(&request.tools),
+        schema: schema(&request.tools, request.output_schema.as_ref()),
     })
 }
 
-fn system_prompt(system: &str, tools: &[ToolSpec]) -> Result<String, BackendError> {
+fn system_prompt(
+    system: &str,
+    tools: &[ToolSpec],
+    structured: bool,
+) -> Result<String, BackendError> {
     let mut prompt = system.trim().to_owned();
     if !prompt.is_empty() {
         prompt.push_str("\n\n");
     }
-    prompt.push_str(
-        "Reply only through the structured output. Put your final reply for the user into `answer`.",
-    );
+    prompt.push_str(if structured {
+        "Reply only through the structured output. Put the final JSON object required by the caller directly into `answer` as an object, not a JSON string. Do not add an additional envelope or prose."
+    } else {
+        "Reply only through the structured output. Put your final reply for the user into `answer`."
+    });
     if tools.is_empty() {
         return Ok(prompt);
     }
@@ -132,11 +152,14 @@ fn attribute(value: &str) -> String {
         .collect()
 }
 
-pub fn schema(tools: &[ToolSpec]) -> Value {
+pub fn schema(tools: &[ToolSpec], output_schema: Option<&Value>) -> Value {
+    let answer_schema = output_schema
+        .cloned()
+        .unwrap_or_else(|| json!({"type": "string"}));
     if tools.is_empty() {
         return json!({
             "type": "object",
-            "properties": {"answer": {"type": "string"}},
+            "properties": {"answer": answer_schema},
             "required": ["answer"],
             "additionalProperties": false
         });
@@ -145,7 +168,7 @@ pub fn schema(tools: &[ToolSpec]) -> Value {
     json!({
         "type": "object",
         "properties": {
-            "answer": {"type": "string"},
+            "answer": answer_schema,
             "tool_calls": {
                 "type": "array",
                 "items": {
@@ -166,24 +189,35 @@ pub fn schema(tools: &[ToolSpec]) -> Value {
 pub fn decision(
     output: &Value,
     tools: &[ToolSpec],
+    output_schema: Option<&Value>,
 ) -> Result<(Vec<ContentBlock>, StopReason), BackendError> {
     let invalid = |reason| BackendError::new(FailureKind::InvalidOutput, reason);
     let object = output.as_object().ok_or_else(|| invalid("not_object"))?;
-    let answer = object
-        .get("answer")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
+    let answer = match object.get("answer") {
+        None => None,
+        Some(value) if output_schema.is_some() => {
+            if !value.is_object() {
+                return Err(invalid("answer_not_object"));
+            }
+            Some(serde_json::to_string(value).map_err(|_| invalid("answer_json"))?)
+        }
+        Some(value) => value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+    };
     let calls = match object.get("tool_calls") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(calls)) => calls.clone(),
         Some(_) => return Err(invalid("tool_calls_not_array")),
     };
+    if output_schema.is_some() && answer.is_some() && !calls.is_empty() {
+        return Err(invalid("mixed_structured_answer_and_calls"));
+    }
     let mut content = Vec::new();
     if let Some(text) = answer {
-        content.push(ContentBlock::Text {
-            text: text.to_owned(),
-        });
+        content.push(ContentBlock::Text { text });
     }
     if calls.is_empty() {
         return if content.is_empty() {
@@ -238,6 +272,7 @@ mod tests {
         let (content, stop) = decision(
             &json!({"tool_calls": [{"name": "hero_lookup", "input": {"hero": "Haze"}}, {"name": "hero_lookup", "input": {}}]}),
             &[tool()],
+            None,
         )
         .expect("tool round");
         assert_eq!(stop, StopReason::ToolUse);
@@ -255,7 +290,7 @@ mod tests {
     #[test]
     fn answers_unknown_tools_and_empty_outputs_are_checked() {
         let (content, stop) =
-            decision(&json!({"answer": " Haze "}), &[tool()]).expect("final answer");
+            decision(&json!({"answer": " Haze "}), &[tool()], None).expect("final answer");
         assert_eq!(stop, StopReason::EndTurn);
         assert_eq!(
             content,
@@ -270,11 +305,74 @@ mod tests {
             json!([]),
         ] {
             assert_eq!(
-                decision(&output, &[tool()])
+                decision(&output, &[tool()], None)
                     .map(|_| ())
                     .err()
                     .map(|e| e.kind),
                 Some(FailureKind::InvalidOutput)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_output_schema_is_embedded_and_the_answer_is_serialized_once() {
+        let output_schema = json!({"type":"object","properties":{"text":{"type":"string"},"cited_evidence_ids":{"type":"array","items":{"type":"string"}},"claims":{"type":"array"}},"required":["text","cited_evidence_ids","claims"],"additionalProperties":false});
+        let request = ToolChatRequest {
+            system: "Return the grounded JSON object".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "question".into(),
+                }],
+            }],
+            tools: vec![tool()],
+            max_tokens: None,
+            output_schema: Some(output_schema.clone()),
+        };
+        let rendered = prompt(&request).unwrap();
+        assert_eq!(rendered.schema["properties"]["answer"], output_schema);
+        assert!(rendered.system.contains("as an object, not a JSON string"));
+        assert_eq!(
+            schema(&[], Some(&output_schema))["required"],
+            json!(["answer"])
+        );
+        for answer in [
+            json!({"text":"Grounded","cited_evidence_ids":["receipt"],"claims":[]}),
+            json!({"text":"","cited_evidence_ids":[],"claims":[]}),
+        ] {
+            let (content, stop) = decision(
+                &json!({"answer":answer}),
+                &request.tools,
+                request.output_schema.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(stop, StopReason::EndTurn);
+            let [ContentBlock::Text { text }] = content.as_slice() else {
+                panic!("expected one text block")
+            };
+            assert_eq!(serde_json::from_str::<Value>(text).unwrap(), answer);
+        }
+        let calls = json!([{"name":"hero_lookup","input":{"hero":"Haze"}}]);
+        assert_eq!(
+            decision(
+                &json!({"tool_calls":calls}),
+                &request.tools,
+                request.output_schema.as_ref()
+            )
+            .unwrap()
+            .1,
+            StopReason::ToolUse
+        );
+        for bad in [
+            json!({"answer":"{\"text\":\"not an object\"}"}),
+            json!({"answer":null}),
+            json!({"answer":{"text":"x"},"tool_calls":calls}),
+        ] {
+            assert_eq!(
+                decision(&bad, &request.tools, request.output_schema.as_ref())
+                    .unwrap_err()
+                    .kind,
+                FailureKind::InvalidOutput
             );
         }
     }

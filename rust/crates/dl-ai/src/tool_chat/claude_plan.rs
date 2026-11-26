@@ -379,8 +379,11 @@ impl ToolBackend for ClaudePlanBackend {
         let outcome = self
             .run(&target.model, &prompt, target.max_tokens, &mut observation)
             .await?;
-        let (content, stop_reason) =
-            emulation::decision(&outcome.structured_output, &request.tools)?;
+        let (content, stop_reason) = emulation::decision(
+            &outcome.structured_output,
+            &request.tools,
+            request.output_schema.as_ref(),
+        )?;
         observation.stage("decision_validated");
         observation.completed = true;
         Ok(ToolChatResponse {
