@@ -329,7 +329,7 @@ mod tests {
             max_tokens: None,
             output_schema: Some(output_schema.clone()),
         };
-        let rendered = prompt(&request).unwrap();
+        let rendered = prompt(&request).expect("valid structured output");
         assert_eq!(rendered.schema["properties"]["answer"], output_schema);
         assert!(rendered.system.contains("as an object, not a JSON string"));
         assert_eq!(
@@ -345,12 +345,15 @@ mod tests {
                 &request.tools,
                 request.output_schema.as_ref(),
             )
-            .unwrap();
+            .expect("valid structured output");
             assert_eq!(stop, StopReason::EndTurn);
             let [ContentBlock::Text { text }] = content.as_slice() else {
                 panic!("expected one text block")
             };
-            assert_eq!(serde_json::from_str::<Value>(text).unwrap(), answer);
+            assert_eq!(
+                serde_json::from_str::<Value>(text).expect("valid structured output"),
+                answer
+            );
         }
         let calls = json!([{"name":"hero_lookup","input":{"hero":"Haze"}}]);
         assert_eq!(
@@ -359,7 +362,7 @@ mod tests {
                 &request.tools,
                 request.output_schema.as_ref()
             )
-            .unwrap()
+            .expect("valid structured output")
             .1,
             StopReason::ToolUse
         );
@@ -370,7 +373,7 @@ mod tests {
         ] {
             assert_eq!(
                 decision(&bad, &request.tools, request.output_schema.as_ref())
-                    .unwrap_err()
+                    .expect_err("invalid structured output")
                     .kind,
                 FailureKind::InvalidOutput
             );
