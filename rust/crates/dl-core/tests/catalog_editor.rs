@@ -177,3 +177,35 @@ fn automatic_model_bindings_reject_manual_writes_without_changing_the_config() {
         assert_eq!(fs::read(store.path()).expect("Datei"), bytes);
     }
 }
+#[test]
+fn editor_write_removes_retired_keys_and_keeps_the_rest() {
+    let directory = tempfile::tempdir().expect("Tempdir");
+    let path = directory.path().join("bot.toml");
+    fs::write(
+        &path,
+        "# Betreiberkommentar\nschema_version=1\n[runtime.community]\nlane_pairing=false\nconcierge_proactive=false\n",
+    )
+    .expect("Fixture");
+    let store = BotConfigStore::open(path.clone()).expect("Store");
+    let before = store.read_versioned().expect("Stand");
+    store
+        .save_changes_if_revision(
+            &before.revision,
+            &changes(json!({"runtime.community.concierge_proactive":true})),
+        )
+        .expect("Speichern");
+    let written = fs::read_to_string(&path).expect("Datei");
+    assert!(!written.contains("lane_pairing"));
+    assert!(written.contains("# Betreiberkommentar"));
+    assert_eq!(
+        BotConfigStore::open(path)
+            .expect("Neustart")
+            .read_versioned()
+            .expect("Stand")
+            .config
+            .runtime
+            .community
+            .concierge_proactive,
+        Some(true)
+    );
+}
