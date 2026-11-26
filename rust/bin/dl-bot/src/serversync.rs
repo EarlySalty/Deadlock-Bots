@@ -6257,6 +6257,7 @@ fn build_welle2b_onboarding_config(
         frischling_role,
         mitspieler_suche,
     )];
+    prompts.push(interest_prompt(model, &mut blockers));
     prompts.push(ping_prompt(model, &mut blockers));
     if let Some(mut prompt) = rank_prompt {
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
@@ -6472,33 +6473,7 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
                 "Spielersuche Ping Rolle",
                 "Spielersuche",
                 "Spieler-Suche",
-                // Live-Rollenname (Ist-Zustand 2026-07-03).
                 "Spieler Suche Ping",
-            ],
-        ),
-        (
-            "Events & Turniere",
-            &[
-                "Events & Turniere Ping Rolle",
-                "Events und Turniere Ping Rolle",
-                "Events & Turniere",
-                "Events Turniere",
-                "Turniere",
-                "Events",
-                // Live existiert keine Events/Turniere-Rolle; Competitive-
-                // Turniere/Scrims pingen heute "Grind Custom Ping" (Ist-Zustand
-                // 2026-07-03, alte Onboarding-Interessen-Frage).
-                "Grind Custom Ping",
-            ],
-        ),
-        (
-            "Custom Games",
-            &[
-                "Custom Games Ping Rolle",
-                "Custom Games",
-                // Live-Pendant: spaßige Customs (Hide and Seek etc.) pingen
-                // heute "Funny Custom Ping" (Ist-Zustand 2026-07-03).
-                "Funny Custom Ping",
             ],
         ),
         ("Streams", &["Streams"]),
@@ -6529,8 +6504,66 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
     }
 }
 
-// Discord erlaubt hart maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS,
-// live verifiziert 2026-07-15). Wir publishen drei: Weiche, Pings, Rang.
+struct InterestOption {
+    title: &'static str,
+    description: &'static str,
+    emoji: (&'static str, &'static str),
+    role_id: u64,
+}
+
+const INTEREST_OPTIONS: [InterestOption; 3] = [
+    InterestOption {
+        title: "Scrims",
+        description: "Trainingsspiele mit festen Teams. Danach mit /scrim-signup eintragen.",
+        emoji: dl_voice::router::ROUTER_EMOJI_RANKED,
+        role_id: dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID,
+    },
+    InterestOption {
+        title: "Lustige Custom Games",
+        description: "Hide and Seek, Spaßmodi und andere Customs. Du wirst gepingt, wenn eine Runde startet.",
+        emoji: dl_voice::router::ROUTER_EMOJI_BRAWL,
+        role_id: dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+    },
+    InterestOption {
+        title: "Turniere",
+        description: "Schaltet den Turnier-Bereich frei: Regeln, Ankündigungen, Team- und Spielersuche.",
+        emoji: dl_voice::router::ROUTER_EMOJI_CROWN,
+        role_id: dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+    },
+];
+
+fn interest_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardingPrompt {
+    let options = INTEREST_OPTIONS
+        .iter()
+        .map(|option| NativeOnboardingOption {
+            id: None,
+            title: option.title.to_string(),
+            description: Some(option.description.to_string()),
+            emoji: Some(json!({
+                "id": option.emoji.1,
+                "name": option.emoji.0,
+                "animated": false,
+            })),
+            role_ids: require_role_id_by_id(model, option.role_id, option.title, blockers)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        })
+        .collect();
+
+    NativeOnboardingPrompt {
+        id: None,
+        prompt_type: 0,
+        title: "Worauf hast du Lust?".to_string(),
+        options,
+        single_select: false,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
 fn find_rank_prompt(
     live: &NativeOnboardingConfig,
     model: &GuildModel,
@@ -6636,6 +6669,22 @@ fn require_role_id(
         ));
     }
     id
+}
+
+fn require_role_id_by_id(
+    model: &GuildModel,
+    role_id: u64,
+    label: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    if model.roles.contains_key(&role_id) {
+        Some(role_id)
+    } else {
+        blockers.push(format!(
+            "Rolle `{label}` ({role_id}) wurde im Live-Guild-Modell nicht gefunden"
+        ));
+        None
+    }
 }
 
 fn resolve_role_id(model: &GuildModel, aliases: &[&str]) -> Option<u64> {
@@ -10241,11 +10290,24 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             (5002, "Frischling", false),
             (5003, "Patchnotes Ping Rolle", true),
             (5004, "Spieler-Suche Ping Rolle", true),
-            (5005, "Events & Turniere Ping Rolle", true),
-            (5006, "Custom Games Ping Rolle", true),
             (5007, "Streams", true),
             (5008, "Rang-Verknüpfung", false),
             (5009, "Server-Tour", false),
+            (
+                dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID,
+                "Scrims Teilnehmer",
+                false,
+            ),
+            (
+                dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+                "Custom Games",
+                true,
+            ),
+            (
+                dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+                "Turnier-Teilnehmer",
+                false,
+            ),
         ] {
             model
                 .roles
@@ -10831,7 +10893,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn onboarding_builder_baut_drei_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+    fn onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -10849,23 +10911,81 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .warnings
             .iter()
             .any(|warning| warning.contains("stale Live-IDs")));
-        assert_eq!(built.config.prompts.len(), 3);
+        assert_eq!(built.config.prompts.len(), 4);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
         assert!(built.config.prompts[0].single_select);
         assert!(built.config.prompts[0].required);
         assert!(built.config.prompts[0].in_onboarding);
-        assert_eq!(
-            built.config.prompts[1].title,
-            "Wofür willst du Pings bekommen?"
-        );
+        assert_eq!(built.config.prompts[1].title, "Worauf hast du Lust?");
         assert!(!built.config.prompts[1].single_select);
         assert!(!built.config.prompts[1].required);
-        assert_eq!(built.config.prompts[2].title, "Dein Rang");
-        assert_eq!(built.config.prompts[2].id.as_deref(), Some("rank-prompt"));
-        assert_eq!(built.config.prompts[2].options.len(), 12);
+        assert!(built.config.prompts[1].in_onboarding);
         assert_eq!(
-            serde_json::to_value(&built.config.prompts[2]).expect("rank prompt"),
+            built.config.prompts[1]
+                .options
+                .iter()
+                .map(|option| (option.title.as_str(), option.role_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "Scrims",
+                    vec![dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID.to_string()]
+                ),
+                (
+                    "Lustige Custom Games",
+                    vec![dl_community::onboarding::ROLE_CUSTOM_GAMES_ID.to_string()]
+                ),
+                (
+                    "Turniere",
+                    vec![dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID.to_string()]
+                ),
+            ]
+        );
+        assert_eq!(
+            built.config.prompts[2].title,
+            "Wofür willst du Pings bekommen?"
+        );
+        assert!(!built.config.prompts[2].single_select);
+        assert!(!built.config.prompts[2].required);
+        assert_eq!(
+            built.config.prompts[2]
+                .options
+                .iter()
+                .map(|option| option.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Patchnotes", "Spielersuche", "Streams"]
+        );
+        assert_eq!(built.config.prompts[3].title, "Dein Rang");
+        assert_eq!(built.config.prompts[3].id.as_deref(), Some("rank-prompt"));
+        assert_eq!(built.config.prompts[3].options.len(), 12);
+        assert_eq!(
+            serde_json::to_value(&built.config.prompts[3]).expect("rank prompt"),
             live["prompts"][1]
+        );
+    }
+
+    #[test]
+    fn onboarding_interessen_prompt_blockt_fehlende_rolle_per_id_statt_namenssuche() {
+        let mut model = onboarding_model();
+        model
+            .roles
+            .remove(&dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID);
+        model.roles.insert(
+            5998,
+            onboarding_role(5998, "Turnier-Teilnehmer", false),
+        );
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("builder returns blockers");
+
+        assert!(built.blockers.iter().any(|blocker| blocker.contains(&format!(
+            "Rolle `Turniere` ({})",
+            dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID
+        ))));
+        assert!(built.config.prompts[1].options[2].role_ids.is_empty());
+        assert_eq!(
+            built.config.prompts[1].options[0].role_ids,
+            vec![dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID.to_string()]
         );
     }
 
@@ -10878,15 +10998,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
-        assert_eq!(prompts.len(), 3);
-        for prompt in [&prompts[0], &prompts[1]] {
+        assert_eq!(prompts.len(), 4);
+        for prompt in [&prompts[0], &prompts[1], &prompts[2]] {
             assert!(!prompt.as_object().expect("prompt").contains_key("id"));
             for option in prompt["options"].as_array().expect("options") {
                 assert!(!option.as_object().expect("option").contains_key("id"));
             }
         }
-        assert_eq!(prompts[2]["id"], "rank-prompt");
-        assert_eq!(prompts[2]["options"][0]["id"], "rank-option-0");
+        assert_eq!(prompts[3]["id"], "rank-prompt");
+        assert_eq!(prompts[3]["options"][0]["id"], "rank-option-0");
 
         let weiche = &payload["prompts"][0]["options"];
         assert_eq!(
@@ -10898,13 +11018,14 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(weiche[1]["role_ids"], json!(["5001"]));
         assert_eq!(weiche[2]["role_ids"], json!(["5002"]));
 
-        let ping_options = payload["prompts"][1]["options"]
+        let ping_options = payload["prompts"][2]["options"]
             .as_array()
             .expect("ping options");
+        assert_eq!(ping_options.len(), 3);
         assert_eq!(ping_options[0]["title"], "Patchnotes");
         assert_eq!(ping_options[0]["role_ids"], json!(["5003"]));
-        assert_eq!(ping_options[4]["title"], "Streams");
-        assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
+        assert_eq!(ping_options[2]["title"], "Streams");
+        assert_eq!(ping_options[2]["role_ids"], json!(["5007"]));
     }
 
     #[test]
@@ -10926,8 +11047,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
         assert_eq!(prompts[0]["id"], "0");
         assert!(prompts[1]["id"].is_string());
+        assert!(prompts[2]["id"].is_string());
+        let interest_option = &prompts[1]["options"][0];
+        assert_eq!(
+            interest_option["emoji_id"],
+            dl_voice::router::ROUTER_EMOJI_RANKED.1
+        );
+        assert_eq!(
+            interest_option["emoji_name"],
+            dl_voice::router::ROUTER_EMOJI_RANKED.0
+        );
+        assert_eq!(interest_option["emoji_animated"], false);
 
-        let rank_option = &prompts[2]["options"][0];
+        let rank_option = &prompts[3]["options"][0];
         assert_eq!(rank_option["id"], "rank-option-0");
         assert_eq!(rank_option["emoji_id"], "9000");
         assert_eq!(rank_option["emoji_name"], "ranked");
@@ -10972,7 +11104,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Rolle `Patchnotes`")));
-        assert!(built.config.prompts[1].options[0].role_ids.is_empty());
+        assert!(built.config.prompts[2].options[0].role_ids.is_empty());
     }
 
     #[test]
@@ -10981,12 +11113,14 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             build_welle2b_onboarding_config(&rank_live_onboarding_config(), &onboarding_model())
                 .expect("build")
                 .config;
-        config.prompts[1].options[0].role_ids = vec!["999999".to_string()];
+        config.prompts[1].options[2].role_ids = vec!["999998".to_string()];
+        config.prompts[2].options[0].role_ids = vec!["999999".to_string()];
         config.prompts[0].options[0].channel_ids = vec!["kaputt".to_string()];
 
         let err = validate_onboarding_references(&onboarding_model(), &config)
             .expect_err("missing refs block apply");
 
+        assert!(err.contains("Rolle `999998` fehlt"));
         assert!(err.contains("Rolle `999999` fehlt"));
         assert!(err.contains("Kanal `kaputt` ist keine Discord-ID"));
     }

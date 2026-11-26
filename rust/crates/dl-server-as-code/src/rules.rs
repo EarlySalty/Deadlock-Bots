@@ -104,6 +104,8 @@ const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Custom Games",
 ];
 
+const SAMMELPUNKT_CUSTOM_GAMES_ROLE: &str = "Custom Games";
+
 const USER_BAN_X3_COACHING_VIEW_ONLY: DiscordId = 364_796_363_709_349_912;
 
 const EXPECTED_CATEGORIES: &[&str] = &[
@@ -2305,9 +2307,10 @@ fn is_sammelpunkt_custom_ping_overwrite(
         .get(&overwrite.key.target_id)
         .is_some_and(|role| {
             let key = matching_key(&role.name);
-            (key.contains("funny") || key.contains("grind"))
-                && key.contains("custom")
-                && key.contains("ping")
+            key == matching_key(SAMMELPUNKT_CUSTOM_GAMES_ROLE)
+                || ((key.contains("funny") || key.contains("grind"))
+                    && key.contains("custom")
+                    && key.contains("ping"))
         })
 }
 
@@ -2673,6 +2676,8 @@ mod tests {
     const OLD_ARCHIVE_ROLE: u64 = 304;
     const FUNNY_CUSTOM_PING_ROLE: u64 = 305;
     const GRIND_CUSTOM_PING_ROLE: u64 = 306;
+    const CUSTOM_GAMES_ROLE: u64 = 309;
+    const CUSTOM_GAMES_FANS_ROLE: u64 = 310;
     const COMMUNITY_MOD_ROLE: u64 = 307;
     const BOT_ROLE: u64 = 308;
     const PLUS_VIP_ROLE: u64 = 320;
@@ -4519,6 +4524,55 @@ mod tests {
 
         assert_eq!(derived.desired.overwrites.get(&funny.key), Some(&funny));
         assert_eq!(derived.desired.overwrites.get(&grind.key), Some(&grind));
+        Ok(())
+    }
+
+    #[test]
+    fn sammelpunkt_custom_games_overwrite_bleibt_nur_bei_exaktem_rollennamen() -> anyhow::Result<()>
+    {
+        let mut actual = actual_model();
+        actual.categories.insert(
+            CUSTOM_GAME_CATEGORY,
+            category(CUSTOM_GAME_CATEGORY, "Custom Game"),
+        );
+        actual.channels.insert(
+            SAMMELPUNKT,
+            channel(SAMMELPUNKT, "Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual.roles.insert(
+            CUSTOM_GAMES_ROLE,
+            role(CUSTOM_GAMES_ROLE, "Custom Games", 0),
+        );
+        actual.roles.insert(
+            CUSTOM_GAMES_FANS_ROLE,
+            role(CUSTOM_GAMES_FANS_ROLE, "Custom Games Fans", 0),
+        );
+        let custom_games = overwrite(
+            SAMMELPUNKT,
+            TargetKind::Role,
+            CUSTOM_GAMES_ROLE,
+            Permissions::CONNECT.bits(),
+            0,
+        );
+        let fans = overwrite(
+            SAMMELPUNKT,
+            TargetKind::Role,
+            CUSTOM_GAMES_FANS_ROLE,
+            Permissions::CONNECT.bits(),
+            0,
+        );
+        actual
+            .overwrites
+            .insert(custom_games.key.clone(), custom_games.clone());
+        actual.overwrites.insert(fans.key.clone(), fans.clone());
+
+        let derived = derive_desired_model(&actual)?;
+
+        assert_eq!(
+            derived.desired.overwrites.get(&custom_games.key),
+            Some(&custom_games)
+        );
+        assert_eq!(derived.desired.overwrites.get(&fans.key), None);
         Ok(())
     }
 

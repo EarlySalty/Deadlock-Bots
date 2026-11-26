@@ -136,10 +136,10 @@ const WEICHE_ROLE_CHOICES: &[(u64, &str)] = &[
         dl_community::onboarding::ROLE_STREAMER_PARTNER_ID,
         "streamer_partner",
     ),
-    (dl_community::onboarding::ROLE_LFG_PING_ID, "lfg_ping"),
+    (dl_community::onboarding::ROLE_CUSTOM_GAMES_ID, "custom_games"),
     (
-        dl_community::onboarding::ROLE_CUSTOM_GAMES_PING_ID,
-        "custom_games_ping",
+        dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
+        "funny_custom_ping",
     ),
     (
         dl_community::onboarding::ROLE_PATCHNOTES_PING_ID,
