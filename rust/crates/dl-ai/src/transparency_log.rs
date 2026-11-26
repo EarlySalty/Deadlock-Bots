@@ -1221,14 +1221,17 @@ mod tests {
                 let permit = gate.acquire().await.map_err(|_| "gate".to_string())?;
                 permit.forget();
             }
-            if self
-                .fehlschlaege
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |offen| {
-                    offen.checked_sub(1)
-                })
-                .is_ok()
-            {
-                return Err("Discord antwortet nicht".to_string());
+            let mut offen = self.fehlschlaege.load(Ordering::Relaxed);
+            while let Some(rest) = offen.checked_sub(1) {
+                match self.fehlschlaege.compare_exchange_weak(
+                    offen,
+                    rest,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return Err("Discord antwortet nicht".to_string()),
+                    Err(aktuell) => offen = aktuell,
+                }
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut sent) = self.sent.lock() {

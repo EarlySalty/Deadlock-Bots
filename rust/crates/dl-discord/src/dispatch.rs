@@ -759,7 +759,7 @@ pub async fn sync_commands(
     http: &Http,
     router: &InteractionRouter,
     guild_id: Option<u64>,
-) -> Result<usize, serenity::Error> {
+) -> Result<usize, Box<serenity::Error>> {
     let definitions = router.command_definitions();
     let count = definitions.len();
     match guild_id {
