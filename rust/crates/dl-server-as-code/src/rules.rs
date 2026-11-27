@@ -24,8 +24,6 @@ const ROLE_VC_MOVE_RECHTE: &str = "VC Move Rechte";
 const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
 const ROLE_INVITE_GAST: &str = "Invite-Gast";
 const ROLE_FRISCHLING: &str = "Frischling";
-const ROLE_RANG_VERKNUEPFUNG: &str = "Rang-Verknüpfung";
-const ROLE_SERVER_TOUR: &str = "Server-Tour";
 const ROLE_STREAMS: &str = "Streams";
 /// Bezahltes Plus-Tier. Die Rolle ist bewusst rein kosmetisch und
 /// organisatorisch: eigene Farbe, eigene Gruppe in der Mitgliederliste,
@@ -88,15 +86,11 @@ const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
 pub const ROLE_INVITE_GAST_ID: DiscordId = 1_522_384_960_021_856_368;
 pub const ROLE_FRISCHLING_ID: DiscordId = 1_522_384_961_481_609_236;
-pub const ROLE_RANG_VERKNUEPFUNG_ID: DiscordId = 1_522_762_890_174_529_546;
-pub const ROLE_SERVER_TOUR_ID: DiscordId = 1_527_047_393_164_529_684;
 pub const ROLE_STREAMS_ID: DiscordId = 1_522_384_962_207_088_773;
 pub const CASTER_CHANNEL_ID: DiscordId = 1_495_155_113_772_450_042;
 const WELLE2B_MARKER_ROLES: &[(DiscordId, &str)] = &[
     (ROLE_INVITE_GAST_ID, ROLE_INVITE_GAST),
     (ROLE_FRISCHLING_ID, ROLE_FRISCHLING),
-    (ROLE_RANG_VERKNUEPFUNG_ID, ROLE_RANG_VERKNUEPFUNG),
-    (ROLE_SERVER_TOUR_ID, ROLE_SERVER_TOUR),
 ];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Patchnotes Ping Rolle",
@@ -3550,12 +3544,13 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
-        for role_name in [
-            "Invite-Gast",
-            "Frischling",
-            "Rang-Verknüpfung",
-            "Server-Tour",
-        ] {
+        for role_name in ["Rang-Verknüpfung", "Server-Tour"] {
+            assert!(
+                role_by_name(&derived.desired, role_name).is_none(),
+                "{role_name} ist ausgemustert und darf nicht neu entstehen"
+            );
+        }
+        for role_name in ["Invite-Gast", "Frischling"] {
             let role = role_by_name(&derived.desired, role_name).expect("marker role");
             assert_eq!(role.permissions_bitmask, 0);
             assert!(!role.hoist);
@@ -3614,8 +3609,6 @@ mod tests {
         for (id, name) in [
             (ROLE_INVITE_GAST_ID, "Gast"),
             (ROLE_FRISCHLING_ID, "Neuling"),
-            (ROLE_RANG_VERKNUEPFUNG_ID, "Rang"),
-            (ROLE_SERVER_TOUR_ID, "Tour"),
             (ROLE_STREAMS_ID, "Live-Ping"),
         ] {
             actual
@@ -3625,13 +3618,7 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
-        for name in [
-            "Invite-Gast",
-            "Frischling",
-            "Rang-Verknüpfung",
-            "Server-Tour",
-            "Streams",
-        ] {
+        for name in ["Invite-Gast", "Frischling", "Streams"] {
             assert!(
                 role_by_name(&derived.desired, name).is_none(),
                 "{name} darf neben der umbenannten Rolle nicht neu entstehen"
@@ -4789,7 +4776,7 @@ mod tests {
                 "bestehende Rolle {role_name} muss erhalten bleiben"
             );
         }
-        for role_name in ["Invite-Gast", "Frischling", "Rang-Verknüpfung", "Streams"] {
+        for role_name in ["Invite-Gast", "Frischling", "Streams"] {
             assert!(
                 desired_role_names.contains(role_name),
                 "Welle2b-Rolle {role_name} muss im Soll-Modell existieren"

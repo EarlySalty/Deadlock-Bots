@@ -11189,10 +11189,6 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             dl_community::onboarding::ROLE_STREAMS_PING_ID
         );
         assert_eq!(
-            [rules::ROLE_RANG_VERKNUEPFUNG_ID, rules::ROLE_SERVER_TOUR_ID],
-            dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS
-        );
-        assert_eq!(
             rules::CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS,
             [
                 dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
