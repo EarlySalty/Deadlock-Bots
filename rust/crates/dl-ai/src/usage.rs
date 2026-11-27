@@ -393,320 +393,6 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-    #[test]
-    fn unbekannte_zaehler_bleiben_unbekannt_und_ids_enthalten_keine_inhalte() {
-        assert_eq!(count(&json!({}), "prompt_tokens"), None);
-        assert_eq!(
-            count(&json!({"usage":{"prompt_tokens":-1}}), "prompt_tokens"),
-            None
-        );
-        assert_eq!(
-            count(&json!({"usage":{"prompt_tokens":0}}), "prompt_tokens"),
-            Some(0)
-        );
-        assert!(safe_id("req-fixture_123"));
-        assert!(!safe_id("Bearer geheimes token"));
-        assert!(!safe_id(&"a".repeat(201)));
-        let completion = Completion {
-            project: "Deadlock-Bots".into(),
-            service: "dl-bot".into(),
-            id: 7,
-            tokens_in: None,
-            tokens_out: None,
-            total: None,
-            request_id: None,
-            success: false,
-            error_code: Some("cancelled".into()),
-            http_status: None,
-            latency_ms: 12,
-        };
-        let message = format!("LLM_USAGE_RECOVERY: Abschluss aus dem Journal nachliefern \u{1b}[3mrecovery\u{1b}[0m\u{1b}[2m=\u{1b}[0m{}",serde_json::to_string(&completion).unwrap());
-        let record = json!({"MESSAGE":message}).to_string();
-        assert_eq!(recovery_from_journal(&record).unwrap().id, 7);
-        assert!(
-            recovery_from_journal(&json!({"MESSAGE":"kein Verbrauchsbeleg"}).to_string()).is_none()
-        );
-    }
-
-    #[test]
-    fn journalbeleg_bleibt_bei_error_filter_sichtbar() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                "usage::tests::journalbeleg_stderr_kind",
-                "--nocapture",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let message = stderr
-            .lines()
-            .find(|line| line.starts_with("LLM_USAGE_RECOVERY: recovery="))
-            .expect("Vorabbeleg wird unabhängig vom Tracingfilter geschrieben");
-        let record = json!({"MESSAGE":message}).to_string();
-        let completion = recovery_from_journal(&record).expect("Echter Stderrbeleg ist replaybar");
-        assert_eq!(completion.total, Some(15));
-    }
-
-    #[test]
-    #[ignore = "Isolierter Kindprozess für den Error-Filter"]
-    fn journalbeleg_stderr_kind() {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::ERROR)
-            .init();
-        recovery_log(&Completion {
-            project: "Deadlock-Bots".into(),
-            service: "test-fixture".into(),
-            id: 7,
-            tokens_in: Some(12),
-            tokens_out: Some(3),
-            total: Some(15),
-            request_id: None,
-            success: true,
-            error_code: None,
-            http_status: Some(200),
-            latency_ms: 1,
-        });
-    }
-
-    #[tokio::test]
-    #[ignore = "Benötigt lokale PostgreSQL-Peer-Authentifizierung und CREATE DATABASE"]
-    async fn lokale_datenbank_belegt_abschluss_abbruch_nullwerte_und_herkunft() {
-        let options = PgConnectOptions::new()
-            .host("/var/run/postgresql")
-            .username("nathanael")
-            .database("postgres");
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(options.clone())
-            .await
-            .unwrap();
-        let database = format!("fireworks_bots_usage_test_{}", std::process::id());
-        sqlx::query(&format!("CREATE DATABASE {database}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(options.database(&database))
-            .await
-            .unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../dl-central-db/migrations/20261005120200_llm_usage_attempts.sql"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
-        initialize(pool.clone(), "test-fixture").unwrap();
-        let request = reqwest::Client::new()
-            .post("https://api.fireworks.ai/inference/v1/chat/completions")
-            .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
-            .build()
-            .unwrap();
-        let mut lock = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE public.llm_usage IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *lock)
-            .await
-            .unwrap();
-        let started = Instant::now();
-        let result =
-            Attempt::begin_before(&request, started + std::time::Duration::from_millis(100)).await;
-        assert!(matches!(result, Err(ChatProviderError::Timeout)));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        lock.rollback().await.unwrap();
-
-        let delayed = Attempt::begin(&request).await.unwrap();
-        let delayed_id = delayed.completion.as_ref().unwrap().id;
-        let mut lock = pool.begin().await.unwrap();
-        sqlx::query("SELECT id FROM public.llm_usage WHERE id=$1 FOR UPDATE")
-            .bind(delayed_id)
-            .fetch_one(&mut *lock)
-            .await
-            .unwrap();
-        let started = Instant::now();
-        delayed
-            .finish_before(
-                Some(
-                    &json!({"usage":{"prompt_tokens":19,"completion_tokens":5,"total_tokens":24}}),
-                ),
-                None,
-                started + std::time::Duration::from_millis(100),
-            )
-            .await;
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        lock.rollback().await.unwrap();
-        let total = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                let total: Option<i64> =
-                    sqlx::query_scalar("SELECT total FROM public.llm_usage WHERE id=$1")
-                        .bind(delayed_id)
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap();
-                if let Some(total) = total {
-                    break total;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("Drop-Recovery liefert echte Fixtureusage nach");
-        assert_eq!(total, 24);
-
-        let attempt = with_purpose("fixture.text", Attempt::begin(&request))
-            .await
-            .unwrap();
-        let completion = attempt.completion.as_ref().unwrap().clone();
-        attempt.finish(Some(&json!({"id":"fixture-request","usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}})), None).await;
-        let row: (String,Option<i64>,Option<i64>,Option<i64>,String,String,String) = sqlx::query_as("SELECT attempt_state,tokens_in,tokens_out,total,project,service,purpose FROM public.llm_usage WHERE id=$1").bind(completion.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(
-            row,
-            (
-                "succeeded".into(),
-                Some(12),
-                Some(3),
-                Some(15),
-                "Deadlock-Bots".into(),
-                "test-fixture".into(),
-                "fixture.text".into()
-            )
-        );
-        recover(&completion).await.unwrap();
-        let state: String =
-            sqlx::query_scalar("SELECT attempt_state FROM public.llm_usage WHERE id=$1")
-                .bind(completion.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(state, "succeeded");
-        let mut foreign = completion.clone();
-        foreign.project = "Deadlock-Twitch-Bot".into();
-        assert!(recover(&foreign).await.is_err());
-        let mut missing = completion.clone();
-        missing.id = i64::MAX;
-        assert!(matches!(
-            recover(&missing).await,
-            Err(sqlx::Error::RowNotFound)
-        ));
-        let unknown = Attempt::begin(&request).await.unwrap();
-        let unknown_id = unknown.completion.as_ref().unwrap().id;
-        unknown.finish(Some(&json!({})), None).await;
-        let tokens: Option<i64> =
-            sqlx::query_scalar("SELECT total FROM public.llm_usage WHERE id=$1")
-                .bind(unknown_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(tokens, None);
-        let cancelled = Attempt::begin(&request).await.unwrap();
-        let id = cancelled.completion.as_ref().unwrap().id;
-        drop(cancelled);
-        for _ in 0..100 {
-            let state: String =
-                sqlx::query_scalar("SELECT attempt_state FROM public.llm_usage WHERE id=$1")
-                    .bind(id)
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            if state == "failed" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let error: String = sqlx::query_scalar(
-            "SELECT error_code FROM public.llm_usage WHERE id=$1 AND attempt_state='failed'",
-        )
-        .bind(id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(error, "cancelled");
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let server_calls = calls.clone();
-        let server_pool = pool.clone();
-        let app = axum::Router::new().route("/chat/completions", axum::routing::post(move || {
-            let calls = server_calls.clone();
-            let pool = server_pool.clone();
-            async move {
-                let started: i64 = sqlx::query_scalar("SELECT count(*) FROM public.llm_usage WHERE purpose='fixture.retry' AND attempt_state='started'")
-                    .fetch_one(&pool).await.unwrap();
-                assert_eq!(started,1,"Vor jeder HTTP-Anfrage muss genau ihr Start stehen");
-                if calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {
-                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({})))
-                } else {
-                    (axum::http::StatusCode::OK, axum::Json(json!({"choices":[{"message":{"content":"Fixtureantwort"}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}})))
-                }
-            }
-        }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let provider = crate::OpenAiChatProvider::from_fireworks_env(
-            |key| match key {
-                "FIREWORK_API_KEY" => Some("synthetischer-fixture-schluessel".into()),
-                "FIREWORK_BASE_URL" => Some(base.clone()),
-                _ => None,
-            },
-            crate::RetryConfig {
-                request_timeout: std::time::Duration::from_secs(2),
-                max_retries: 1,
-                base_backoff: std::time::Duration::from_millis(1),
-            },
-        )
-        .unwrap();
-        TRACK_LOCAL_FIXTURE
-            .scope(
-                true,
-                with_purpose(
-                    "fixture.retry",
-                    provider.chat(&[ChatMessage::user("Fixture")], ChatParams::default()),
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        let attempts: Vec<(String,Option<i64>)> = sqlx::query_as("SELECT attempt_state,total FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
-            .fetch_all(&pool).await.unwrap();
-        assert_eq!(
-            attempts,
-            vec![("failed".into(), None), ("succeeded".into(), Some(9))]
-        );
-        sqlx::query("DROP TABLE public.llm_usage")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(Attempt::begin(&request).await.is_err());
-        assert!(TRACK_LOCAL_FIXTURE
-            .scope(
-                true,
-                provider.chat(&[ChatMessage::user("Fixture")], ChatParams::default())
-            )
-            .await
-            .is_err());
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "Ohne gespeicherten Start darf keine weitere HTTP-Anfrage rausgehen"
-        );
-        server.abort();
-        pool.close().await;
-        sqlx::query(&format!("DROP DATABASE {database}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-}
-
 pub(crate) fn wrap(inner: Arc<dyn ChatProvider>, purpose: String) -> Arc<dyn ChatProvider> {
     Arc::new(UsageProvider { inner, purpose })
 }
@@ -766,5 +452,348 @@ impl crate::VisionGenerator for PurposeVision {
         request: crate::GenerateMultimodalRequest,
     ) -> Option<String> {
         with_purpose(self.purpose, self.inner.generate_multimodal(request)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unbekannte_zaehler_bleiben_unbekannt_und_ids_enthalten_keine_inhalte() {
+        assert_eq!(count(&json!({}), "prompt_tokens"), None);
+        assert_eq!(
+            count(&json!({"usage":{"prompt_tokens":-1}}), "prompt_tokens"),
+            None
+        );
+        assert_eq!(
+            count(&json!({"usage":{"prompt_tokens":0}}), "prompt_tokens"),
+            Some(0)
+        );
+        assert!(safe_id("req-fixture_123"));
+        assert!(!safe_id("Bearer geheimes token"));
+        assert!(!safe_id(&"a".repeat(201)));
+        let completion = Completion {
+            project: "Deadlock-Bots".into(),
+            service: "dl-bot".into(),
+            id: 7,
+            tokens_in: None,
+            tokens_out: None,
+            total: None,
+            request_id: None,
+            success: false,
+            error_code: Some("cancelled".into()),
+            http_status: None,
+            latency_ms: 12,
+        };
+        let message = format!("LLM_USAGE_RECOVERY: Abschluss aus dem Journal nachliefern \u{1b}[3mrecovery\u{1b}[0m\u{1b}[2m=\u{1b}[0m{}",serde_json::to_string(&completion).expect("Testfixture muss erfolgreich sein"));
+        let record = json!({"MESSAGE":message}).to_string();
+        assert_eq!(
+            recovery_from_journal(&record)
+                .expect("Testfixture muss erfolgreich sein")
+                .id,
+            7
+        );
+        assert!(
+            recovery_from_journal(&json!({"MESSAGE":"kein Verbrauchsbeleg"}).to_string()).is_none()
+        );
+    }
+
+    #[test]
+    fn journalbeleg_bleibt_bei_error_filter_sichtbar() {
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("Testfixture muss erfolgreich sein"),
+        )
+        .args([
+            "--ignored",
+            "--exact",
+            "usage::tests::journalbeleg_stderr_kind",
+            "--nocapture",
+        ])
+        .output()
+        .expect("Testfixture muss erfolgreich sein");
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).expect("Testfixture muss erfolgreich sein");
+        let message = stderr
+            .lines()
+            .find(|line| line.starts_with("LLM_USAGE_RECOVERY: recovery="))
+            .expect("Vorabbeleg wird unabhängig vom Tracingfilter geschrieben");
+        let record = json!({"MESSAGE":message}).to_string();
+        let completion = recovery_from_journal(&record).expect("Echter Stderrbeleg ist replaybar");
+        assert_eq!(completion.total, Some(15));
+    }
+
+    #[test]
+    #[ignore = "Isolierter Kindprozess für den Error-Filter"]
+    fn journalbeleg_stderr_kind() {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .init();
+        recovery_log(&Completion {
+            project: "Deadlock-Bots".into(),
+            service: "test-fixture".into(),
+            id: 7,
+            tokens_in: Some(12),
+            tokens_out: Some(3),
+            total: Some(15),
+            request_id: None,
+            success: true,
+            error_code: None,
+            http_status: Some(200),
+            latency_ms: 1,
+        });
+    }
+
+    #[tokio::test]
+    #[ignore = "Benötigt eine isolierte Testdatenbank über test-db-run"]
+    async fn lokale_datenbank_belegt_abschluss_abbruch_nullwerte_und_herkunft() {
+        let database = dl_central_db::testing::test_pool()
+            .await
+            .expect("Isolierte Testdatenbank muss verfügbar sein");
+        let pool = database.pool().clone();
+        initialize(pool.clone(), "test-fixture").expect("Testfixture muss erfolgreich sein");
+        let request = reqwest::Client::new()
+            .post("https://api.fireworks.ai/inference/v1/chat/completions")
+            .json(&json!({"model":"fixture-model","messages":[{"content":"nicht speichern"}]}))
+            .build()
+            .expect("Testfixture muss erfolgreich sein");
+        let mut lock = pool
+            .begin()
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        sqlx::query("LOCK TABLE public.llm_usage IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let started = Instant::now();
+        let result =
+            Attempt::begin_before(&request, started + std::time::Duration::from_millis(100)).await;
+        assert!(matches!(result, Err(ChatProviderError::Timeout)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        lock.rollback()
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+
+        let delayed = Attempt::begin(&request)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let delayed_id = delayed
+            .completion
+            .as_ref()
+            .expect("Testfixture muss erfolgreich sein")
+            .id;
+        let mut lock = pool
+            .begin()
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        sqlx::query("SELECT id FROM public.llm_usage WHERE id=$1 FOR UPDATE")
+            .bind(delayed_id)
+            .fetch_one(&mut *lock)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let started = Instant::now();
+        delayed
+            .finish_before(
+                Some(
+                    &json!({"usage":{"prompt_tokens":19,"completion_tokens":5,"total_tokens":24}}),
+                ),
+                None,
+                started + std::time::Duration::from_millis(100),
+            )
+            .await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        lock.rollback()
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let total = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let total: Option<i64> =
+                    sqlx::query_scalar("SELECT total FROM public.llm_usage WHERE id=$1")
+                        .bind(delayed_id)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("Testfixture muss erfolgreich sein");
+                if let Some(total) = total {
+                    break total;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Drop-Recovery liefert echte Fixtureusage nach");
+        assert_eq!(total, 24);
+
+        let attempt = with_purpose("fixture.text", Attempt::begin(&request))
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let completion = attempt
+            .completion
+            .as_ref()
+            .expect("Testfixture muss erfolgreich sein")
+            .clone();
+        attempt.finish(Some(&json!({"id":"fixture-request","usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}})), None).await;
+        let row: (String,Option<i64>,Option<i64>,Option<i64>,String,String,String) = sqlx::query_as("SELECT attempt_state,tokens_in,tokens_out,total,project,service,purpose FROM public.llm_usage WHERE id=$1").bind(completion.id).fetch_one(&pool).await.expect("Testfixture muss erfolgreich sein");
+        assert_eq!(
+            row,
+            (
+                "succeeded".into(),
+                Some(12),
+                Some(3),
+                Some(15),
+                "Deadlock-Bots".into(),
+                "test-fixture".into(),
+                "fixture.text".into()
+            )
+        );
+        recover(&completion)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let state: String =
+            sqlx::query_scalar("SELECT attempt_state FROM public.llm_usage WHERE id=$1")
+                .bind(completion.id)
+                .fetch_one(&pool)
+                .await
+                .expect("Testfixture muss erfolgreich sein");
+        assert_eq!(state, "succeeded");
+        let mut foreign = completion.clone();
+        foreign.project = "Deadlock-Twitch-Bot".into();
+        assert!(recover(&foreign).await.is_err());
+        let mut missing = completion.clone();
+        missing.id = i64::MAX;
+        assert!(matches!(
+            recover(&missing).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+        let unknown = Attempt::begin(&request)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let unknown_id = unknown
+            .completion
+            .as_ref()
+            .expect("Testfixture muss erfolgreich sein")
+            .id;
+        unknown.finish(Some(&json!({})), None).await;
+        let tokens: Option<i64> =
+            sqlx::query_scalar("SELECT total FROM public.llm_usage WHERE id=$1")
+                .bind(unknown_id)
+                .fetch_one(&pool)
+                .await
+                .expect("Testfixture muss erfolgreich sein");
+        assert_eq!(tokens, None);
+        let cancelled = Attempt::begin(&request)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let id = cancelled
+            .completion
+            .as_ref()
+            .expect("Testfixture muss erfolgreich sein")
+            .id;
+        drop(cancelled);
+        for _ in 0..100 {
+            let state: String =
+                sqlx::query_scalar("SELECT attempt_state FROM public.llm_usage WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("Testfixture muss erfolgreich sein");
+            if state == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let error: String = sqlx::query_scalar(
+            "SELECT error_code FROM public.llm_usage WHERE id=$1 AND attempt_state='failed'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("Testfixture muss erfolgreich sein");
+        assert_eq!(error, "cancelled");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_calls = calls.clone();
+        let server_pool = pool.clone();
+        let app = axum::Router::new().route("/chat/completions", axum::routing::post(move || {
+            let calls = server_calls.clone();
+            let pool = server_pool.clone();
+            async move {
+                let started: i64 = sqlx::query_scalar("SELECT count(*) FROM public.llm_usage WHERE purpose='fixture.retry' AND attempt_state='started'")
+                    .fetch_one(&pool).await.expect("Testfixture muss erfolgreich sein");
+                assert_eq!(started,1,"Vor jeder HTTP-Anfrage muss genau ihr Start stehen");
+                if calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({})))
+                } else {
+                    (axum::http::StatusCode::OK, axum::Json(json!({"choices":[{"message":{"content":"Fixtureantwort"}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}})))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        let base = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("Testfixture muss erfolgreich sein")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("Testfixture muss erfolgreich sein");
+        });
+        let provider = crate::OpenAiChatProvider::from_fireworks_env(
+            |key| match key {
+                "FIREWORK_API_KEY" => Some("synthetischer-fixture-schluessel".into()),
+                "FIREWORK_BASE_URL" => Some(base.clone()),
+                _ => None,
+            },
+            crate::RetryConfig {
+                request_timeout: std::time::Duration::from_secs(2),
+                max_retries: 1,
+                base_backoff: std::time::Duration::from_millis(1),
+            },
+        )
+        .expect("Testfixture muss erfolgreich sein");
+        TRACK_LOCAL_FIXTURE
+            .scope(
+                true,
+                with_purpose(
+                    "fixture.retry",
+                    provider.chat(&[ChatMessage::user("Fixture")], ChatParams::default()),
+                ),
+            )
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let attempts: Vec<(String,Option<i64>)> = sqlx::query_as("SELECT attempt_state,total FROM public.llm_usage WHERE purpose='fixture.retry' ORDER BY id")
+            .fetch_all(&pool).await.expect("Testfixture muss erfolgreich sein");
+        assert_eq!(
+            attempts,
+            vec![("failed".into(), None), ("succeeded".into(), Some(9))]
+        );
+        sqlx::query("DROP TABLE public.llm_usage")
+            .execute(&pool)
+            .await
+            .expect("Testfixture muss erfolgreich sein");
+        assert!(Attempt::begin(&request).await.is_err());
+        assert!(TRACK_LOCAL_FIXTURE
+            .scope(
+                true,
+                provider.chat(&[ChatMessage::user("Fixture")], ChatParams::default())
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "Ohne gespeicherten Start darf keine weitere HTTP-Anfrage rausgehen"
+        );
+        server.abort();
+        assert!(server
+            .await
+            .expect_err("Testserver muss abbrechen")
+            .is_cancelled());
+        pool.close().await;
+        drop(database);
     }
 }

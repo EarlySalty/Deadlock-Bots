@@ -76,19 +76,24 @@ const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
-// memes + deadlock-invite liegen seit W3.x im Archiv (kein @everyone-VIEW mehr);
-// off-topic + gameplay-clips halten die Discord-Regel "mind. 5 Defaults mit
-// @everyone VIEW+SEND" ein (live verifiziert 2026-07-15).
-const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
-    "allgemein",
-    "frag-die-community",
-    "mitspieler-suche",
-    "off-topic",
-    "gameplay-clips",
-    "rank-ups",
-    "patchnotes",
-    "deadlock-rang",
-    "server-support",
+const ALLGEMEIN_CHANNEL_ID: u64 = 1_289_721_245_281_292_291;
+const OFF_TOPIC_CHANNEL_ID: u64 = 1_327_664_119_649_800_284;
+const GAMEPLAY_CLIPS_CHANNEL_ID: u64 = 1_342_057_180_421_165_131;
+const RANK_UPS_CHANNEL_ID: u64 = 1_444_646_330_319_241_337;
+const PATCHNOTES_CHANNEL_ID: u64 = 1_326_973_956_825_284_628;
+const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = dl_community::concierge::FRAG_DIE_COMMUNITY_CHANNEL_ID;
+const DEADLOCK_RANG_CHANNEL_ID: u64 = dl_community::concierge_community::VERIFY_CHANNEL_ID;
+const MITSPIELER_SUCHE_CHANNEL_ID: u64 = dl_activity::lfg::LFG_CHANNEL_ID;
+const DEFAULT_ONBOARDING_CHANNELS: [(&str, u64); 9] = [
+    ("allgemein", ALLGEMEIN_CHANNEL_ID),
+    ("frag-die-community", FRAG_DIE_COMMUNITY_CHANNEL_ID),
+    ("mitspieler-suche", MITSPIELER_SUCHE_CHANNEL_ID),
+    ("off-topic", OFF_TOPIC_CHANNEL_ID),
+    ("gameplay-clips", GAMEPLAY_CLIPS_CHANNEL_ID),
+    ("rank-ups", RANK_UPS_CHANNEL_ID),
+    ("patchnotes", PATCHNOTES_CHANNEL_ID),
+    ("deadlock-rang", DEADLOCK_RANG_CHANNEL_ID),
+    ("server-support", support_publish::SUPPORT_CHANNEL_ID),
 ];
 
 pub type SharedServerSync = Arc<dyn ServerSyncOps>;
@@ -3393,8 +3398,8 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         let live = self.fetch_live_guild_model_bounded().await?;
-        // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
-        // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
+        let live_onboarding = self.fetch_native_onboarding_config().await?;
+        ensure_live_onboarding_unchanged(&preview.live_at_preview, &live_onboarding)?;
         validate_onboarding_references(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -5955,10 +5960,11 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
 }
 
 fn build_regelwerk_text(model: &GuildModel) -> ServerSyncResult<String> {
-    let deadlock_rang = require_channel_mention(model, "deadlock-rang")?;
+    let deadlock_rang = require_channel_mention(model, DEADLOCK_RANG_CHANNEL_ID, "deadlock-rang")?;
     let support_ticket = format!("<#{SUPPORT_TICKET_CHANNEL_ID}>");
     let server_bot_fragen = format!("<#{}>", faq_publish::FAQ_CHANNEL_ID);
-    let frag_die_community = require_channel_mention(model, "frag-die-community")?;
+    let frag_die_community =
+        require_channel_mention(model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")?;
 
     Ok(format!(
         "**📜 Regelwerk · Deutsche Deadlock Community**\n\n\
@@ -5980,30 +5986,51 @@ Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's di
     ))
 }
 
-fn require_channel_mention(model: &GuildModel, name: &str) -> ServerSyncResult<String> {
-    resolve_channel_id(model, name)
-        .map_err(ServerSyncError::bad_request)?
-        .map(|id| format!("<#{id}>"))
-        .ok_or_else(|| ServerSyncError::bad_request(format!("Kanal `{name}` wurde nicht gefunden")))
+fn require_channel_mention(
+    model: &GuildModel,
+    channel_id: u64,
+    label: &str,
+) -> ServerSyncResult<String> {
+    if model.channels.contains_key(&channel_id) {
+        Ok(format!("<#{channel_id}>"))
+    } else {
+        Err(ServerSyncError::bad_request(format!(
+            "Kanal `{label}` ({channel_id}) wurde nicht gefunden"
+        )))
+    }
 }
 
 fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> ServerGuideBuildOutput {
     let mut blockers = Vec::new();
     let warnings = Vec::new();
 
-    let frag_die_community =
-        require_serverguide_channel_id(model, "frag-die-community", &mut blockers);
-    let deadlock_rang = require_serverguide_channel_id(model, "deadlock-rang", &mut blockers);
-    let mitspieler_suche = require_serverguide_channel_id(model, "mitspieler-suche", &mut blockers);
-    let patchnotes = require_serverguide_channel_id(model, "patchnotes", &mut blockers);
-    let support_ticket = require_serverguide_channel_id_by_id(
+    let frag_die_community = require_channel_id_by_id(
+        model,
+        FRAG_DIE_COMMUNITY_CHANNEL_ID,
+        "frag-die-community",
+        &mut blockers,
+    );
+    let deadlock_rang = require_channel_id_by_id(
+        model,
+        DEADLOCK_RANG_CHANNEL_ID,
+        "deadlock-rang",
+        &mut blockers,
+    );
+    let mitspieler_suche = require_channel_id_by_id(
+        model,
+        MITSPIELER_SUCHE_CHANNEL_ID,
+        "mitspieler-suche",
+        &mut blockers,
+    );
+    let patchnotes =
+        require_channel_id_by_id(model, PATCHNOTES_CHANNEL_ID, "patchnotes", &mut blockers);
+    let support_ticket = require_channel_id_by_id(
         model,
         SUPPORT_TICKET_CHANNEL_ID,
         "Support-Tickets",
         &mut blockers,
     );
-    let regelwerk =
-        require_serverguide_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
+    let regelwerk = require_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
 
     let (
         Some(frag_die_community),
@@ -6091,42 +6118,6 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
     }
 }
 
-fn require_serverguide_channel_id(
-    model: &GuildModel,
-    name: &str,
-    blockers: &mut Vec<String>,
-) -> Option<u64> {
-    match resolve_channel_id(model, name) {
-        Ok(Some(id)) => Some(id),
-        Ok(None) => {
-            blockers.push(format!(
-                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-            ));
-            None
-        }
-        Err(err) => {
-            blockers.push(err);
-            None
-        }
-    }
-}
-
-fn require_serverguide_channel_id_by_id(
-    model: &GuildModel,
-    channel_id: u64,
-    label: &str,
-    blockers: &mut Vec<String>,
-) -> Option<u64> {
-    if model.channels.contains_key(&channel_id) {
-        Some(channel_id)
-    } else {
-        blockers.push(format!(
-            "Kanal `{label}` ({channel_id}) wurde im Live-Guild-Modell nicht gefunden"
-        ));
-        None
-    }
-}
-
 fn validate_server_guide_config(
     model: &GuildModel,
     config: &ServerGuideConfig,
@@ -6206,10 +6197,6 @@ fn build_welle2b_onboarding_config(
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
 
-    // Die Default-Kanaele gestaltet der Owner im Discord-UI; der Bot uebernimmt
-    // sie 1:1 und published nur die Prompts (Owner-Vorfall 2026-07-15: die alte
-    // Code-Namensliste ueberschrieb die Owner-Auswahl beim Apply). Nur wenn live
-    // noch gar keine Defaults existieren, greift die Namensliste als Fallback.
     let default_channel_ids = if live.default_channel_ids.is_empty() {
         let ids = resolve_default_channel_ids(model, &mut blockers);
         if !ids.is_empty() {
@@ -6219,13 +6206,11 @@ fn build_welle2b_onboarding_config(
         }
         ids
     } else {
-        let (kept, dropped): (Vec<String>, Vec<String>) =
-            live.default_channel_ids.iter().cloned().partition(|id| {
-                // Discord erlaubt auch Kategorien als Onboarding-Defaults.
-                id.parse::<u64>().ok().is_some_and(|id| {
-                    model.channels.contains_key(&id) || model.categories.contains_key(&id)
-                })
-            });
+        let (kept, dropped): (Vec<String>, Vec<String>) = live
+            .default_channel_ids
+            .iter()
+            .cloned()
+            .partition(|id| is_default_channel_target(model, id));
         if !dropped.is_empty() {
             warnings.push(format!(
                 "Default-Kanaele: stale Live-IDs entfernt: {}",
@@ -6235,33 +6220,50 @@ fn build_welle2b_onboarding_config(
         kept
     };
 
-    let mitspieler_suche = match resolve_channel_id(model, "mitspieler-suche") {
-        Ok(id) => id,
-        Err(err) => {
-            blockers.push(err);
-            None
-        }
-    };
-    let invite_role = require_role_id(model, &["Invite-Gast"], "Invite-Gast", &mut blockers);
-    let frischling_role = require_role_id(model, &["Frischling"], "Frischling", &mut blockers);
-    let rank_prompt = find_rank_prompt(&live, model);
+    let mitspieler_suche = require_channel_id_by_id(
+        model,
+        dl_activity::lfg::LFG_CHANNEL_ID,
+        "mitspieler-suche",
+        &mut blockers,
+    );
+    let invite_role = require_role_id_by_id(
+        model,
+        dl_community::onboarding::ROLE_INVITE_GAST_ID,
+        "Invite-Gast",
+        &mut blockers,
+    );
+    let frischling_role = require_role_id_by_id(
+        model,
+        dl_community::concierge::FRESHLING_ROLE_ID,
+        "Frischling",
+        &mut blockers,
+    );
+    let rank_prompt = find_rank_prompt(&live);
     if rank_prompt.is_none() {
         blockers.push(
-            "Rang-Prompt mit 12 Optionen auf `(unverifiziert)`-Rollen wurde in der Live-Onboarding-Config nicht gefunden"
+            "Rang-Prompt mit 12 Optionen auf die unverifizierten Rang-Rollen wurde in der Live-Onboarding-Config nicht gefunden"
                 .to_string(),
         );
     }
 
-    let mut prompts = vec![weiche_prompt(
-        invite_role,
-        frischling_role,
-        mitspieler_suche,
-    )];
-    prompts.push(ping_prompt(model, &mut blockers));
+    let mut prompts = vec![
+        weiche_prompt(invite_role, frischling_role, mitspieler_suche),
+        interest_prompt(model, &mut blockers),
+        ping_prompt(model, &mut blockers),
+    ];
+    let rank_prompt_id = rank_prompt.as_ref().and_then(|prompt| prompt.id.clone());
     if let Some(mut prompt) = rank_prompt {
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
     }
+    let carried = carry_over_foreign_prompts(
+        &live,
+        &prompts,
+        rank_prompt_id.as_deref(),
+        model,
+        &mut warnings,
+    );
+    prompts.extend(carried);
     if mitspieler_suche.is_some() {
         warnings.push(
             "`Ich spiele Deadlock und suche Mitspieler` nutzt `mitspieler-suche` als channel_id-Fallback, damit Discord Optionen ohne Rollen/Kanaele sicher akzeptiert."
@@ -6269,16 +6271,85 @@ fn build_welle2b_onboarding_config(
         );
     }
 
+    let config = NativeOnboardingConfig {
+        prompts,
+        default_channel_ids,
+        enabled: true,
+        mode: live_config.get("mode").cloned().unwrap_or(live.mode),
+    };
+    if let Err(err) = validate_onboarding_references(model, &config) {
+        blockers.push(err);
+    }
     Ok(OnboardingBuildOutput {
-        config: NativeOnboardingConfig {
-            prompts,
-            default_channel_ids,
-            enabled: true,
-            mode: live_config.get("mode").cloned().unwrap_or(live.mode),
-        },
+        config,
         blockers,
         warnings,
     })
+}
+
+const MAX_IN_ONBOARDING_PROMPTS: usize = 4;
+
+fn carry_over_foreign_prompts(
+    live: &NativeOnboardingConfig,
+    built: &[NativeOnboardingPrompt],
+    rank_prompt_id: Option<&str>,
+    model: &GuildModel,
+    warnings: &mut Vec<String>,
+) -> Vec<NativeOnboardingPrompt> {
+    let built_titles = built
+        .iter()
+        .map(|prompt| normalized_name(&prompt.title))
+        .collect::<Vec<_>>();
+    let built_role_ids = prompt_role_ids(built);
+    let retired_role_ids = dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>();
+    let mut carried = Vec::new();
+    for prompt in &live.prompts {
+        if rank_prompt_id.is_some() && prompt.id.as_deref() == rank_prompt_id {
+            continue;
+        }
+        let role_ids = prompt_role_ids(std::slice::from_ref(prompt));
+        if role_ids.iter().any(|id| retired_role_ids.contains(id)) {
+            warnings.push(format!(
+                "Prompt `{}` entfällt: er vergibt Rollen der eingestellten Starthilfe",
+                prompt.title
+            ));
+            continue;
+        }
+        if built_titles.contains(&normalized_name(&prompt.title))
+            || role_ids.iter().any(|id| built_role_ids.contains(id))
+        {
+            warnings.push(format!(
+                "Prompt `{}` wird durch die Code-Fassung ersetzt",
+                prompt.title
+            ));
+            continue;
+        }
+        let mut prompt = prompt.clone();
+        sanitize_carried_over_channel_ids(&mut prompt, model, warnings);
+        warnings.push(format!(
+            "Prompt `{}` stammt nicht aus dem Code und wird unverändert übernommen",
+            prompt.title
+        ));
+        carried.push(prompt);
+    }
+    carried
+}
+
+fn prompt_role_ids(prompts: &[NativeOnboardingPrompt]) -> Vec<String> {
+    prompts
+        .iter()
+        .flat_map(|prompt| prompt.options.iter())
+        .flat_map(|option| option.role_ids.iter().cloned())
+        .collect()
+}
+
+fn is_default_channel_target(model: &GuildModel, raw: &str) -> bool {
+    raw.parse::<u64>()
+        .ok()
+        .is_some_and(|id| model.channels.contains_key(&id) || model.categories.contains_key(&id))
 }
 
 fn parse_live_onboarding_config(live_config: &Value) -> ServerSyncResult<NativeOnboardingConfig> {
@@ -6459,63 +6530,33 @@ fn weiche_prompt(
     }
 }
 
+const PING_OPTIONS: [(&str, u64); 3] = [
+    (
+        "Patchnotes",
+        dl_community::onboarding::ROLE_PATCHNOTES_PING_ID,
+    ),
+    (
+        "Spielersuche",
+        dl_community::onboarding::ROLE_SPIELER_SUCHE_PING_ID,
+    ),
+    ("Streams", dl_community::onboarding::ROLE_STREAMS_PING_ID),
+];
+
 fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardingPrompt {
-    let options = [
-        (
-            "Patchnotes",
-            &["Patchnotes Ping Rolle", "Patchnotes"] as &[&str],
-        ),
-        (
-            "Spielersuche",
-            &[
-                "Spieler-Suche Ping Rolle",
-                "Spielersuche Ping Rolle",
-                "Spielersuche",
-                "Spieler-Suche",
-                // Live-Rollenname (Ist-Zustand 2026-07-03).
-                "Spieler Suche Ping",
-            ],
-        ),
-        (
-            "Events & Turniere",
-            &[
-                "Events & Turniere Ping Rolle",
-                "Events und Turniere Ping Rolle",
-                "Events & Turniere",
-                "Events Turniere",
-                "Turniere",
-                "Events",
-                // Live existiert keine Events/Turniere-Rolle; Competitive-
-                // Turniere/Scrims pingen heute "Grind Custom Ping" (Ist-Zustand
-                // 2026-07-03, alte Onboarding-Interessen-Frage).
-                "Grind Custom Ping",
-            ],
-        ),
-        (
-            "Custom Games",
-            &[
-                "Custom Games Ping Rolle",
-                "Custom Games",
-                // Live-Pendant: spaßige Customs (Hide and Seek etc.) pingen
-                // heute "Funny Custom Ping" (Ist-Zustand 2026-07-03).
-                "Funny Custom Ping",
-            ],
-        ),
-        ("Streams", &["Streams"]),
-    ]
-    .into_iter()
-    .map(|(title, aliases)| NativeOnboardingOption {
-        id: None,
-        title: title.to_string(),
-        description: None,
-        emoji: None,
-        role_ids: require_role_id(model, aliases, title, blockers)
-            .map(|id| vec![id.to_string()])
-            .unwrap_or_default(),
-        channel_ids: Vec::new(),
-        extra: BTreeMap::new(),
-    })
-    .collect();
+    let options = PING_OPTIONS
+        .into_iter()
+        .map(|(title, role_id)| NativeOnboardingOption {
+            id: None,
+            title: title.to_string(),
+            description: None,
+            emoji: None,
+            role_ids: require_role_id_by_id(model, role_id, title, blockers)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        })
+        .collect();
 
     NativeOnboardingPrompt {
         id: None,
@@ -6529,12 +6570,69 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
     }
 }
 
-// Discord erlaubt hart maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS,
-// live verifiziert 2026-07-15). Wir publishen drei: Weiche, Pings, Rang.
-fn find_rank_prompt(
-    live: &NativeOnboardingConfig,
-    model: &GuildModel,
-) -> Option<NativeOnboardingPrompt> {
+struct InterestOption {
+    title: &'static str,
+    description: &'static str,
+    emoji: (&'static str, &'static str),
+    role_id: u64,
+}
+
+const INTEREST_OPTIONS: [InterestOption; 3] = [
+    InterestOption {
+        title: "Scrims",
+        description: "Trainingsspiele mit festen Teams. Danach mit /scrim-signup eintragen.",
+        emoji: dl_voice::router::ROUTER_EMOJI_RANKED,
+        role_id: dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID,
+    },
+    InterestOption {
+        title: "Lustige Custom Games",
+        description:
+            "Hide and Seek, Spaßmodi und andere Customs. Du wirst gepingt, wenn eine Runde startet.",
+        emoji: dl_voice::router::ROUTER_EMOJI_BRAWL,
+        role_id: dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+    },
+    InterestOption {
+        title: "Turniere",
+        description:
+            "Schaltet den Turnier-Bereich frei: Regeln, Ankündigungen, Team- und Spielersuche.",
+        emoji: dl_voice::router::ROUTER_EMOJI_CROWN,
+        role_id: dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+    },
+];
+
+fn interest_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardingPrompt {
+    let options = INTEREST_OPTIONS
+        .iter()
+        .map(|option| NativeOnboardingOption {
+            id: None,
+            title: option.title.to_string(),
+            description: Some(option.description.to_string()),
+            emoji: Some(json!({
+                "id": option.emoji.1,
+                "name": option.emoji.0,
+                "animated": false,
+            })),
+            role_ids: require_role_id_by_id(model, option.role_id, option.title, blockers)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        })
+        .collect();
+
+    NativeOnboardingPrompt {
+        id: None,
+        prompt_type: 0,
+        title: "Worauf hast du Lust?".to_string(),
+        options,
+        single_select: false,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn find_rank_prompt(live: &NativeOnboardingConfig) -> Option<NativeOnboardingPrompt> {
     live.prompts
         .iter()
         .find(|prompt| {
@@ -6542,16 +6640,13 @@ fn find_rank_prompt(
                 && prompt
                     .options
                     .iter()
-                    .filter(|option| option_points_to_unverified_role(option, model))
+                    .filter(|option| option_points_to_unverified_rank_role(option))
                     .count()
                     >= 10
         })
         .cloned()
 }
 
-/// Discord behaelt in der Onboarding-Config Kanal-IDs geloeschter Kanaele;
-/// uebernommene Prompts muessen vor dem PUT gegen das Live-Modell bereinigt
-/// werden, sonst blockt die Apply-Revalidierung dauerhaft an stale IDs.
 fn sanitize_carried_over_channel_ids(
     prompt: &mut NativeOnboardingPrompt,
     model: &GuildModel,
@@ -6577,82 +6672,56 @@ fn sanitize_carried_over_channel_ids(
     }
 }
 
-fn option_points_to_unverified_role(option: &NativeOnboardingOption, model: &GuildModel) -> bool {
+fn option_points_to_unverified_rank_role(option: &NativeOnboardingOption) -> bool {
     option.role_ids.iter().any(|role_id| {
-        role_id
-            .parse::<u64>()
-            .ok()
-            .and_then(|id| model.roles.get(&id))
-            .is_some_and(|role| role.name.contains("(unverifiziert)"))
+        role_id.parse::<u64>().ok().is_some_and(|id| {
+            crate::modglue::UNVERIFIED_RANK_ROLES
+                .iter()
+                .any(|(rank_role_id, _, _)| *rank_role_id == id)
+        })
     })
 }
 
 fn resolve_default_channel_ids(model: &GuildModel, blockers: &mut Vec<String>) -> Vec<String> {
-    let mut ids = Vec::new();
-    for name in DEFAULT_ONBOARDING_CHANNEL_NAMES {
-        match resolve_channel_id(model, name) {
-            Ok(Some(id)) => ids.push(id.to_string()),
-            Ok(None) => blockers.push(format!(
-                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-            )),
-            Err(err) => blockers.push(err),
-        }
-    }
-    ids
+    DEFAULT_ONBOARDING_CHANNELS
+        .iter()
+        .filter_map(|(label, channel_id)| {
+            require_channel_id_by_id(model, *channel_id, label, blockers)
+        })
+        .map(|id| id.to_string())
+        .collect()
 }
 
-fn resolve_channel_id(model: &GuildModel, name: &str) -> Result<Option<u64>, String> {
-    let expected = normalized_name(name);
-    let mut candidates = model
-        .channels
-        .values()
-        .filter(|channel| normalized_name(&channel.name) == expected)
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|channel| channel.channel_id);
-    match candidates.as_slice() {
-        [] => Ok(None),
-        [channel] => Ok(Some(channel.channel_id)),
-        _ => Err(format!(
-            "Kanal `{name}` ist im Live-Guild-Modell mehrdeutig: {}",
-            candidates
-                .iter()
-                .map(|channel| format!("{}:{}", channel.channel_id, channel.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
-}
-
-fn require_role_id(
+fn require_channel_id_by_id(
     model: &GuildModel,
-    aliases: &[&str],
+    channel_id: u64,
     label: &str,
     blockers: &mut Vec<String>,
 ) -> Option<u64> {
-    let id = resolve_role_id(model, aliases);
-    if id.is_none() {
+    if model.channels.contains_key(&channel_id) {
+        Some(channel_id)
+    } else {
         blockers.push(format!(
-            "Rolle `{label}` wurde im Live-Guild-Modell nicht gefunden"
+            "Kanal `{label}` ({channel_id}) wurde im Live-Guild-Modell nicht gefunden"
         ));
+        None
     }
-    id
 }
 
-fn resolve_role_id(model: &GuildModel, aliases: &[&str]) -> Option<u64> {
-    let normalized_aliases = aliases
-        .iter()
-        .map(|alias| normalized_name(alias))
-        .collect::<Vec<_>>();
-    let mut candidates = model
-        .roles
-        .values()
-        .filter(|role| {
-            let role_name = normalized_name(&role.name);
-            normalized_aliases.contains(&role_name)
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|role| (role.managed, !role.mentionable, role.position));
-    candidates.first().map(|role| role.role_id)
+fn require_role_id_by_id(
+    model: &GuildModel,
+    role_id: u64,
+    label: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    if model.roles.contains_key(&role_id) {
+        Some(role_id)
+    } else {
+        blockers.push(format!(
+            "Rolle `{label}` ({role_id}) wurde im Live-Guild-Modell nicht gefunden"
+        ));
+        None
+    }
 }
 
 fn normalized_name(name: &str) -> String {
@@ -6694,12 +6763,13 @@ fn validate_onboarding_references(
     config: &NativeOnboardingConfig,
 ) -> Result<(), String> {
     let mut missing = Vec::new();
-    validate_channel_ids_present(
-        model,
-        "default_channel_ids",
-        &config.default_channel_ids,
-        &mut missing,
-    );
+    for raw in &config.default_channel_ids {
+        if !is_default_channel_target(model, raw) {
+            missing.push(format!(
+                "default_channel_ids: Kanal oder Kategorie `{raw}` fehlt"
+            ));
+        }
+    }
     for prompt in &config.prompts {
         for option in &prompt.options {
             let context = format!("Prompt `{}` Option `{}`", prompt.title, option.title);
@@ -6708,14 +6778,27 @@ fn validate_onboarding_references(
         }
     }
 
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
+    if !missing.is_empty() {
+        return Err(format!(
             "Native-Onboarding-Apply blockiert: Live-Guild-Modell enthaelt referenzierte Rollen/Kanaele nicht mehr:\n- {}",
             missing.join("\n- ")
-        ))
+        ));
     }
+    validate_onboarding_prompt_count(config)
+}
+
+fn validate_onboarding_prompt_count(config: &NativeOnboardingConfig) -> Result<(), String> {
+    let in_onboarding = config
+        .prompts
+        .iter()
+        .filter(|prompt| prompt.in_onboarding)
+        .count();
+    if in_onboarding > MAX_IN_ONBOARDING_PROMPTS {
+        return Err(format!(
+            "Native-Onboarding-Apply blockiert: {in_onboarding} Fragen im Onboarding, Discord erlaubt höchstens {MAX_IN_ONBOARDING_PROMPTS}"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_role_ids_present(
@@ -6955,6 +7038,7 @@ struct StoredOnboardingPreview {
     guild_id: u64,
     diff_hash: String,
     config: NativeOnboardingConfig,
+    live_at_preview: NativeOnboardingConfig,
 }
 
 #[derive(Debug)]
@@ -7053,10 +7137,12 @@ async fn load_onboarding_preview(
         )));
     }
     let config = extract_onboarding_config_from_diff(&diff, guild_id)?;
+    let live_at_preview = extract_onboarding_live_config_from_diff(&diff, guild_id)?;
     Ok(StoredOnboardingPreview {
         guild_id: i64_to_u64(row.try_get::<i64, _>("guild_id")?)?,
         diff_hash: stored_hash,
         config,
+        live_at_preview,
     })
 }
 
@@ -7135,6 +7221,38 @@ fn extract_onboarding_config_from_diff(
     serde_json::from_value(desired["config"].clone()).map_err(|err| {
         ServerSyncError::bad_request(format!("Native-Onboarding-Zielconfig ist ungueltig: {err}"))
     })
+}
+
+fn extract_onboarding_live_config_from_diff(
+    diff: &ServerDiff,
+    expected_guild_id: u64,
+) -> ServerSyncResult<NativeOnboardingConfig> {
+    let actual = diff
+        .changes
+        .iter()
+        .find(|change| is_native_onboarding_change(change, expected_guild_id))
+        .and_then(|change| change.actual.as_ref())
+        .ok_or_else(|| {
+            ServerSyncError::bad_request("Preview enthaelt keine Live-Onboarding-Config")
+        })?;
+    serde_json::from_value(actual["config"].clone()).map_err(|err| {
+        ServerSyncError::bad_request(format!(
+            "Live-Onboarding-Config der Preview ist ungueltig: {err}"
+        ))
+    })
+}
+
+fn ensure_live_onboarding_unchanged(
+    live_at_preview: &NativeOnboardingConfig,
+    live_config: &Value,
+) -> ServerSyncResult<()> {
+    let live_now = parse_live_onboarding_config(live_config)?;
+    if serde_json::to_value(&live_now)? != serde_json::to_value(live_at_preview)? {
+        return Err(ServerSyncError::bad_request(
+            "Native-Onboarding-Apply blockiert: Die Live-Onboarding-Config wurde seit der Preview geändert. Bitte eine neue Preview erstellen.",
+        ));
+    }
+    Ok(())
 }
 
 fn extract_serverguide_config_from_diff(
@@ -10237,40 +10355,75 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             },
         );
         for (id, name, mentionable) in [
-            (5001, "Invite-Gast", false),
-            (5002, "Frischling", false),
-            (5003, "Patchnotes Ping Rolle", true),
-            (5004, "Spieler-Suche Ping Rolle", true),
-            (5005, "Events & Turniere Ping Rolle", true),
-            (5006, "Custom Games Ping Rolle", true),
-            (5007, "Streams", true),
-            (5008, "Rang-Verknüpfung", false),
-            (5009, "Server-Tour", false),
+            (ONBOARDING_INVITE_ROLE, "Invite-Gast", false),
+            (ONBOARDING_FRISCHLING_ROLE, "Frischling", false),
+            (ONBOARDING_PATCHNOTES_ROLE, "Patchnotes Ping Rolle", true),
+            (
+                dl_community::onboarding::ROLE_SPIELER_SUCHE_PING_ID,
+                "Spieler Suche Ping",
+                true,
+            ),
+            (ONBOARDING_STREAMS_ROLE, "Streams", true),
+            (
+                dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID,
+                "Scrims Teilnehmer",
+                false,
+            ),
+            (
+                dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+                "Custom Games",
+                true,
+            ),
+            (
+                dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
+                "Funny Custom Ping",
+                true,
+            ),
+            (
+                dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+                "Turnier Teilnehmer",
+                false,
+            ),
+            (
+                dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS[0],
+                "Rang-Verknüpfung",
+                false,
+            ),
+            (
+                dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS[1],
+                "Server-Tour",
+                false,
+            ),
+            (
+                dl_community::onboarding::ONBOARD_COMPLETE_ROLE_ID,
+                "Onboarding abgeschlossen",
+                false,
+            ),
         ] {
             model
                 .roles
                 .insert(id, onboarding_role(id, name, mentionable));
         }
-        for id in 5100..5112 {
+        for (id, name, _) in crate::modglue::UNVERIFIED_RANK_ROLES {
             model.roles.insert(
                 id,
-                onboarding_role(id, &format!("Rank {} (unverifiziert)", id - 5099), false),
+                onboarding_role(id, &format!("{name} (unverifiziert)"), false),
             );
         }
         for (id, name) in [
-            (6001, "allgemein"),
-            (6002, "frag-die-community"),
-            (6003, "🎯mitspieler-suche"),
-            (6004, "🎲off-topic"),
-            (6005, "rank-ups"),
-            (6006, "patchnotes"),
-            (6007, "deadlock-rang"),
-            (6008, "📼gameplay-clips"),
-            (6009, "server-support"),
+            (ALLGEMEIN_CHANNEL_ID, "allgemein"),
+            (FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community"),
+            (MITSPIELER_SUCHE_CHANNEL_ID, "🔎mitspieler-suche"),
+            (OFF_TOPIC_CHANNEL_ID, "🎲off-topic"),
+            (RANK_UPS_CHANNEL_ID, "rank-ups"),
+            (PATCHNOTES_CHANNEL_ID, "patchnotes"),
+            (DEADLOCK_RANG_CHANNEL_ID, "deadlock-rang"),
+            (GAMEPLAY_CLIPS_CHANNEL_ID, "📼gameplay-clips"),
+            (support_publish::SUPPORT_CHANNEL_ID, "server-support"),
         ] {
             model.channels.insert(id, onboarding_channel(id, name));
         }
-        for channel_id in [6006, 6007] {
+        for channel_id in [PATCHNOTES_CHANNEL_ID, DEADLOCK_RANG_CHANNEL_ID] {
             let overwrite = PermissionOverwriteSpec {
                 guild_id: GUILD_ID,
                 key: OverwriteKey {
@@ -10290,35 +10443,54 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn regelwerk_text_ersetzt_channelnamen_durch_mentions() {
         let text = build_regelwerk_text(&onboarding_model()).expect("regelwerk text");
 
-        assert!(text.contains("- <#6007> — Steam verknüpfen, Rang eintragen"));
+        assert!(text.contains(&format!(
+            "- <#{DEADLOCK_RANG_CHANNEL_ID}> — Steam verknüpfen, Rang eintragen"
+        )));
         assert!(text.contains(
             "- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"
         ));
         assert!(text.contains("- <#1491953161747955853> — Fragen über Server, Bots und Concierge"));
-        assert!(text.contains("- <#6002> — Community-Fragen und Deadlock-Invite"));
+        assert!(text.contains(&format!(
+            "- <#{FRAG_DIE_COMMUNITY_CHANNEL_ID}> — Community-Fragen und Deadlock-Invite"
+        )));
         assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
         assert!(!text.contains("#deadlock-rang"));
         assert!(!text.contains("<@&"));
     }
 
     #[test]
-    fn channel_resolver_meldet_kanal_duplikat_statt_ersten_treffer() {
+    fn channel_resolver_bleibt_bei_namensduplikat_und_umbenennung_an_der_id() {
         let mut model = onboarding_model();
         model
             .channels
             .insert(6010, onboarding_channel(6010, "💬frag-die-community"));
+        model
+            .channels
+            .get_mut(&FRAG_DIE_COMMUNITY_CHANNEL_ID)
+            .expect("frag channel")
+            .name = "💬fragen".to_string();
 
-        let err = require_channel_mention(&model, "frag-die-community")
-            .expect_err("duplicate channel names must fail");
+        assert_eq!(
+            require_channel_mention(&model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")
+                .expect("id resolves despite rename and name twin"),
+            format!("<#{FRAG_DIE_COMMUNITY_CHANNEL_ID}>")
+        );
 
-        assert!(err.to_string().contains("mehrdeutig"));
-        assert!(err.to_string().contains("6002:frag-die-community"));
-        assert!(err.to_string().contains("6010:💬frag-die-community"));
+        model.channels.remove(&FRAG_DIE_COMMUNITY_CHANNEL_ID);
+        let err =
+            require_channel_mention(&model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")
+                .expect_err("missing id must fail instead of taking the name twin");
+        assert!(err.to_string().contains("frag-die-community"));
+        assert!(err
+            .to_string()
+            .contains(&FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string()));
     }
 
     fn serverguide_model() -> GuildModel {
         let mut model = onboarding_model();
-        model.overwrites.retain(|key, _| key.channel_id != 6007);
+        model
+            .overwrites
+            .retain(|key, _| key.channel_id != DEADLOCK_RANG_CHANNEL_ID);
         model.channels.insert(
             RULES_CHANNEL_ID,
             onboarding_channel(RULES_CHANNEL_ID, "regelwerk"),
@@ -10330,13 +10502,25 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         model
     }
 
+    const ONBOARDING_INVITE_ROLE: u64 = dl_community::onboarding::ROLE_INVITE_GAST_ID;
+    const ONBOARDING_FRISCHLING_ROLE: u64 = dl_community::concierge::FRESHLING_ROLE_ID;
+    const ONBOARDING_PATCHNOTES_ROLE: u64 = dl_community::onboarding::ROLE_PATCHNOTES_PING_ID;
+    const ONBOARDING_STREAMS_ROLE: u64 = dl_community::onboarding::ROLE_STREAMS_PING_ID;
+
+    fn rank_option_role_id(idx: usize) -> u64 {
+        crate::modglue::UNVERIFIED_RANK_ROLES
+            .get(idx)
+            .map(|(id, _, _)| *id)
+            .unwrap_or(dl_community::onboarding::ONBOARD_COMPLETE_ROLE_ID)
+    }
+
     fn rank_live_onboarding_config() -> Value {
         let rank_options = (0..12)
             .map(|idx| {
                 let mut option = json!({
                     "id": format!("rank-option-{idx}"),
                     "title": format!("Rank {idx}"),
-                    "role_ids": [format!("{}", 5100 + idx)],
+                    "role_ids": [rank_option_role_id(idx).to_string()],
                     "channel_ids": [],
                 });
                 if idx == 0 {
@@ -10349,14 +10533,23 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "enabled": false,
             "mode": 1,
             // 9 gueltige Modell-IDs + eine stale ID (Kanal existiert nicht mehr)
-            "default_channel_ids": ["6001","6002","6003","6004","6005","6006","6007","6008","6009","1"],
+            "default_channel_ids": DEFAULT_ONBOARDING_CHANNELS
+                .iter()
+                .map(|(_, id)| id.to_string())
+                .chain(std::iter::once("1".to_string()))
+                .collect::<Vec<_>>(),
             "prompts": [
                 {
-                    "id": "old-meta",
+                    "id": "starthilfe",
                     "type": 0,
-                    "title": "Alter Prompt",
-                    "options": [{"id": "old-meta-opt", "title": "Alt", "role_ids": [], "channel_ids": []}],
-                    "single_select": true,
+                    "title": "Willst du Starthilfe?",
+                    "options": [{
+                        "id": "starthilfe-rang",
+                        "title": "Echten Rang automatisch bekommen",
+                        "role_ids": [dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS[0].to_string()],
+                        "channel_ids": []
+                    }],
+                    "single_select": false,
                     "required": false,
                     "in_onboarding": true
                 },
@@ -10368,6 +10561,20 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     "single_select": true,
                     "required": false,
                     "in_onboarding": true
+                },
+                {
+                    "id": "account-link",
+                    "type": 0,
+                    "title": "Deinen Account verknüpfen",
+                    "options": [{
+                        "id": "account-link-steam",
+                        "title": "Steam",
+                        "role_ids": [],
+                        "channel_ids": [DEADLOCK_RANG_CHANNEL_ID.to_string(), "1"]
+                    }],
+                    "single_select": false,
+                    "required": false,
+                    "in_onboarding": false
                 }
             ]
         })
@@ -10382,7 +10589,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             },
             "new_member_actions": [
                 {
-                    "channel_id": "6002",
+                    "channel_id": FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string(),
                     "action_type": action_type,
                     "title": "Alt",
                     "description": ""
@@ -10410,7 +10617,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert_eq!(config.new_member_actions.len(), 3);
         assert_eq!(config.new_member_actions[0].title, "Sag Hallo");
-        assert_eq!(config.new_member_actions[0].channel_id, "6002");
+        assert_eq!(
+            config.new_member_actions[0].channel_id,
+            FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string()
+        );
         assert_eq!(
             config.new_member_actions[0].action_type,
             SERVER_GUIDE_ACTION_TYPE_CHAT
@@ -10419,9 +10629,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             config.new_member_actions[1].title,
             "Steam verknüpfen & Rang eintragen"
         );
-        assert_eq!(config.new_member_actions[1].channel_id, "6007");
+        assert_eq!(
+            config.new_member_actions[1].channel_id,
+            DEADLOCK_RANG_CHANNEL_ID.to_string()
+        );
         assert_eq!(config.new_member_actions[2].title, "Such dir Mitspieler");
-        assert_eq!(config.new_member_actions[2].channel_id, "6003");
+        assert_eq!(
+            config.new_member_actions[2].channel_id,
+            MITSPIELER_SUCHE_CHANNEL_ID.to_string()
+        );
         assert_eq!(
             config.new_member_actions[2].action_type,
             SERVER_GUIDE_ACTION_TYPE_VIEW
@@ -10451,12 +10667,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             without_live_actions.blockers
         );
 
-        // deadlock-rang (6007) ist eine VIEW-Action: read-only darf NICHT blocken.
         let mut rang_read_only = serverguide_model();
         let rang_overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6007,
+                channel_id: DEADLOCK_RANG_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -10472,17 +10687,16 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
 
-        // mitspieler-suche (6003) ist eine VIEW-Action: Forum mit Post-Deny darf NICHT blocken.
         let mut lfg_forum_read_only = serverguide_model();
         lfg_forum_read_only
             .channels
-            .get_mut(&6003)
+            .get_mut(&MITSPIELER_SUCHE_CHANNEL_ID)
             .expect("lfg channel")
             .kind = ChannelKind::Forum;
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6003,
+                channel_id: MITSPIELER_SUCHE_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -10502,12 +10716,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             lfg_view_ok.blockers
         );
 
-        // Eine CHAT-Action auf einem read-only-Kanal blockt weiter.
         let mut read_only_chat = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6002,
+                channel_id: FRAG_DIE_COMMUNITY_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -10831,7 +11044,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn onboarding_builder_baut_drei_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+    fn onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -10840,37 +11053,223 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
-        // Live-Uebernahme: 9 gueltige Owner-IDs bleiben, die stale ID faellt raus.
         assert_eq!(
             built.config.default_channel_ids,
-            (6001..=6009).map(|id| id.to_string()).collect::<Vec<_>>()
+            DEFAULT_ONBOARDING_CHANNELS
+                .iter()
+                .map(|(_, id)| id.to_string())
+                .collect::<Vec<_>>()
         );
         assert!(built
             .warnings
             .iter()
             .any(|warning| warning.contains("stale Live-IDs")));
-        assert_eq!(built.config.prompts.len(), 3);
+        assert_eq!(built.config.prompts.len(), 5);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
         assert!(built.config.prompts[0].single_select);
         assert!(built.config.prompts[0].required);
         assert!(built.config.prompts[0].in_onboarding);
-        assert_eq!(
-            built.config.prompts[1].title,
-            "Wofür willst du Pings bekommen?"
-        );
+        assert_eq!(built.config.prompts[1].title, "Worauf hast du Lust?");
         assert!(!built.config.prompts[1].single_select);
         assert!(!built.config.prompts[1].required);
-        assert_eq!(built.config.prompts[2].title, "Dein Rang");
-        assert_eq!(built.config.prompts[2].id.as_deref(), Some("rank-prompt"));
-        assert_eq!(built.config.prompts[2].options.len(), 12);
         assert_eq!(
-            serde_json::to_value(&built.config.prompts[2]).expect("rank prompt"),
+            built.config.prompts[2].title,
+            "Wofür willst du Pings bekommen?"
+        );
+        assert!(!built.config.prompts[2].single_select);
+        assert!(!built.config.prompts[2].required);
+        assert_eq!(built.config.prompts[3].title, "Dein Rang");
+        assert_eq!(built.config.prompts[3].id.as_deref(), Some("rank-prompt"));
+        assert_eq!(built.config.prompts[3].options.len(), 12);
+        assert_eq!(
+            serde_json::to_value(&built.config.prompts[3]).expect("rank prompt"),
             live["prompts"][1]
+        );
+        assert_eq!(
+            built
+                .config
+                .prompts
+                .iter()
+                .filter(|prompt| prompt.in_onboarding)
+                .count(),
+            MAX_IN_ONBOARDING_PROMPTS
         );
     }
 
     #[test]
-    fn onboarding_payload_laesst_neue_ids_weg_und_nutzt_name_resolved_ids() {
+    fn onboarding_builder_uebernimmt_fremde_prompts_und_verwirft_starthilfe() {
+        let built =
+            build_welle2b_onboarding_config(&rank_live_onboarding_config(), &onboarding_model())
+                .expect("build");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        let titles = built
+            .config
+            .prompts
+            .iter()
+            .map(|prompt| prompt.title.as_str())
+            .collect::<Vec<_>>();
+        assert!(!titles.contains(&"Willst du Starthilfe?"));
+        assert!(built
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Willst du Starthilfe?")
+                && warning.contains("Starthilfe")));
+        let account = built
+            .config
+            .prompts
+            .iter()
+            .find(|prompt| prompt.title == "Deinen Account verknüpfen")
+            .expect("owner prompt carried over");
+        assert_eq!(account.id.as_deref(), Some("account-link"));
+        assert!(!account.in_onboarding);
+        assert_eq!(
+            account.options[0].channel_ids,
+            vec![DEADLOCK_RANG_CHANNEL_ID.to_string()]
+        );
+    }
+
+    #[test]
+    fn onboarding_builder_blockt_zu_viele_onboarding_fragen() {
+        let mut live = rank_live_onboarding_config();
+        live["prompts"][2]["in_onboarding"] = json!(true);
+
+        let built = build_welle2b_onboarding_config(&live, &onboarding_model()).expect("build");
+
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("5 Fragen im Onboarding")));
+        let err = validate_onboarding_references(&onboarding_model(), &built.config)
+            .expect_err("apply must reject five onboarding prompts");
+        assert!(err.contains(&format!("höchstens {MAX_IN_ONBOARDING_PROMPTS}")));
+    }
+
+    #[test]
+    fn onboarding_builder_ersetzt_alte_code_prompts_mit_gleichen_rollen() {
+        let mut live = rank_live_onboarding_config();
+        live["prompts"][0] = json!({
+            "id": "old-pings",
+            "type": 0,
+            "title": "Alte Ping-Frage",
+            "options": [{
+                "id": "old-pings-patchnotes",
+                "title": "Patchnotes",
+                "role_ids": [ONBOARDING_PATCHNOTES_ROLE.to_string()],
+                "channel_ids": []
+            }],
+            "single_select": false,
+            "required": false,
+            "in_onboarding": true
+        });
+
+        let built = build_welle2b_onboarding_config(&live, &onboarding_model()).expect("build");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        assert!(!built
+            .config
+            .prompts
+            .iter()
+            .any(|prompt| prompt.title == "Alte Ping-Frage"));
+    }
+
+    #[test]
+    fn server_as_code_rollen_ids_stimmen_mit_onboarding_ueberein() {
+        use dl_server_as_code::rules;
+        assert_eq!(
+            rules::ROLE_INVITE_GAST_ID,
+            dl_community::onboarding::ROLE_INVITE_GAST_ID
+        );
+        assert_eq!(
+            rules::ROLE_FRISCHLING_ID,
+            dl_community::concierge::FRESHLING_ROLE_ID
+        );
+        assert_eq!(
+            rules::ROLE_STREAMS_ID,
+            dl_community::onboarding::ROLE_STREAMS_PING_ID
+        );
+        assert_eq!(
+            rules::CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS,
+            [
+                dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
+                dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+            ]
+        );
+    }
+
+    #[test]
+    fn onboarding_builder_haelt_rollen_ids_trotz_umbenennung() {
+        let mut model = onboarding_model();
+        for (role_id, new_name) in [
+            (ONBOARDING_INVITE_ROLE, "Gast ohne Spiel"),
+            (ONBOARDING_FRISCHLING_ROLE, "Neuling"),
+            (ONBOARDING_PATCHNOTES_ROLE, "Update-Ping"),
+            (
+                dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID,
+                "Turnier Spieler",
+            ),
+        ] {
+            model.roles.get_mut(&role_id).expect("role").name = new_name.to_string();
+        }
+        for (id, _, _) in crate::modglue::UNVERIFIED_RANK_ROLES {
+            model.roles.get_mut(&id).expect("rank role").name = format!("Rang {id}");
+        }
+
+        let built =
+            build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model).expect("build");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        let weiche = &built.config.prompts[0].options;
+        assert_eq!(weiche[1].role_ids, vec![ONBOARDING_INVITE_ROLE.to_string()]);
+        assert_eq!(
+            weiche[2].role_ids,
+            vec![ONBOARDING_FRISCHLING_ROLE.to_string()]
+        );
+        assert_eq!(
+            built.config.prompts[1].options[2].role_ids,
+            vec![dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID.to_string()]
+        );
+        assert_eq!(
+            built.config.prompts[2].options[0].role_ids,
+            vec![ONBOARDING_PATCHNOTES_ROLE.to_string()]
+        );
+        assert_eq!(built.config.prompts[3].id.as_deref(), Some("rank-prompt"));
+    }
+
+    #[test]
+    fn onboarding_interest_prompt_zeigt_auf_turnier_scrim_und_custom_games_rollen() {
+        let built =
+            build_welle2b_onboarding_config(&rank_live_onboarding_config(), &onboarding_model())
+                .expect("build");
+        let interest = &built.config.prompts[1];
+
+        assert!(interest.in_onboarding);
+        let role_ids = interest
+            .options
+            .iter()
+            .map(|option| (option.title.as_str(), option.role_ids.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            role_ids,
+            vec![
+                (
+                    "Scrims",
+                    vec![dl_community::reaction_roles::SCRIM_SIGNUP_ROLE_ID.to_string()]
+                ),
+                (
+                    "Lustige Custom Games",
+                    vec![dl_community::onboarding::ROLE_CUSTOM_GAMES_ID.to_string()]
+                ),
+                (
+                    "Turniere",
+                    vec![dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID.to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn onboarding_payload_laesst_neue_ids_weg_und_nutzt_feste_rollen_ids() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -10878,15 +11277,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
-        assert_eq!(prompts.len(), 3);
-        for prompt in [&prompts[0], &prompts[1]] {
+        assert_eq!(prompts.len(), 5);
+        for prompt in [&prompts[0], &prompts[1], &prompts[2]] {
             assert!(!prompt.as_object().expect("prompt").contains_key("id"));
             for option in prompt["options"].as_array().expect("options") {
                 assert!(!option.as_object().expect("option").contains_key("id"));
             }
         }
-        assert_eq!(prompts[2]["id"], "rank-prompt");
-        assert_eq!(prompts[2]["options"][0]["id"], "rank-option-0");
+        assert_eq!(prompts[3]["id"], "rank-prompt");
+        assert_eq!(prompts[3]["options"][0]["id"], "rank-option-0");
 
         let weiche = &payload["prompts"][0]["options"];
         assert_eq!(
@@ -10894,17 +11293,33 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "Ich spiele Deadlock und suche Mitspieler"
         );
         assert_eq!(weiche[0]["role_ids"], json!([]));
-        assert_eq!(weiche[0]["channel_ids"], json!(["6003"]));
-        assert_eq!(weiche[1]["role_ids"], json!(["5001"]));
-        assert_eq!(weiche[2]["role_ids"], json!(["5002"]));
+        assert_eq!(
+            weiche[0]["channel_ids"],
+            json!([dl_activity::lfg::LFG_CHANNEL_ID.to_string()])
+        );
+        assert_eq!(
+            weiche[1]["role_ids"],
+            json!([ONBOARDING_INVITE_ROLE.to_string()])
+        );
+        assert_eq!(
+            weiche[2]["role_ids"],
+            json!([ONBOARDING_FRISCHLING_ROLE.to_string()])
+        );
 
-        let ping_options = payload["prompts"][1]["options"]
+        let ping_options = payload["prompts"][2]["options"]
             .as_array()
             .expect("ping options");
+        assert_eq!(ping_options.len(), 3);
         assert_eq!(ping_options[0]["title"], "Patchnotes");
-        assert_eq!(ping_options[0]["role_ids"], json!(["5003"]));
-        assert_eq!(ping_options[4]["title"], "Streams");
-        assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
+        assert_eq!(
+            ping_options[0]["role_ids"],
+            json!([ONBOARDING_PATCHNOTES_ROLE.to_string()])
+        );
+        assert_eq!(ping_options[2]["title"], "Streams");
+        assert_eq!(
+            ping_options[2]["role_ids"],
+            json!([ONBOARDING_STREAMS_ROLE.to_string()])
+        );
     }
 
     #[test]
@@ -10922,12 +11337,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(prompts[0]["options"][0]["emoji_animated"], false);
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
-        // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
-        // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
         assert_eq!(prompts[0]["id"], "0");
         assert!(prompts[1]["id"].is_string());
+        assert_eq!(prompts[1]["options"][0]["emoji_name"], "dl_ranked");
 
-        let rank_option = &prompts[2]["options"][0];
+        let rank_option = &prompts[3]["options"][0];
         assert_eq!(rank_option["id"], "rank-option-0");
         assert_eq!(rank_option["emoji_id"], "9000");
         assert_eq!(rank_option["emoji_name"], "ranked");
@@ -10955,15 +11369,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn onboarding_ping_rollen_matching_ist_exakt_statt_token_fuzzy() {
+    fn onboarding_ping_rolle_wird_nicht_per_namen_ersetzt() {
         let mut model = onboarding_model();
+        model.roles.remove(&ONBOARDING_PATCHNOTES_ROLE);
         model
             .roles
-            .retain(|_, role| role.name != "Patchnotes Ping Rolle");
-        model.roles.insert(
-            5999,
-            onboarding_role(5999, "Deadlock Patchnotes Ping Rolle", true),
-        );
+            .insert(5999, onboarding_role(5999, "Patchnotes Ping Rolle", true));
 
         let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
             .expect("builder returns blockers");
@@ -10972,7 +11383,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Rolle `Patchnotes`")));
-        assert!(built.config.prompts[1].options[0].role_ids.is_empty());
+        assert!(built.config.prompts[2].options[0].role_ids.is_empty());
     }
 
     #[test]
@@ -10989,6 +11400,51 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
 
         assert!(err.contains("Rolle `999999` fehlt"));
         assert!(err.contains("Kanal `kaputt` ist keine Discord-ID"));
+    }
+
+    #[test]
+    fn onboarding_apply_akzeptiert_kategorien_als_default_kanaele() {
+        let mut model = onboarding_model();
+        model.categories.insert(
+            7001,
+            CategorySpec {
+                guild_id: GUILD_ID,
+                category_id: 7001,
+                name: "Chill".to_string(),
+                position: 0,
+            },
+        );
+        let mut config = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("build")
+            .config;
+        config.default_channel_ids.push("7001".to_string());
+
+        assert_eq!(validate_onboarding_references(&model, &config), Ok(()));
+
+        config.default_channel_ids.push("7002".to_string());
+        let err = validate_onboarding_references(&model, &config)
+            .expect_err("unknown default target blocks apply");
+        assert!(err.contains("Kanal oder Kategorie `7002` fehlt"));
+    }
+
+    #[test]
+    fn onboarding_apply_blockt_geaenderte_live_config_seit_preview() {
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+        let config = build_welle2b_onboarding_config(&live, &model)
+            .expect("build")
+            .config;
+        let diff = onboarding_diff(GUILD_ID, &live, &config).expect("diff");
+        let live_at_preview =
+            extract_onboarding_live_config_from_diff(&diff, GUILD_ID).expect("live at preview");
+
+        assert!(ensure_live_onboarding_unchanged(&live_at_preview, &live).is_ok());
+
+        let mut changed = live.clone();
+        changed["prompts"][2]["title"] = json!("Neu vom Owner");
+        let err = ensure_live_onboarding_unchanged(&live_at_preview, &changed)
+            .expect_err("owner edit after preview must block apply");
+        assert!(err.to_string().contains("seit der Preview geändert"));
     }
 
     #[test]
@@ -11120,7 +11576,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     #[test]
     fn onboarding_builder_listet_fehlende_rollen_und_kanaele_als_blocker() {
         let mut model = onboarding_model();
-        model.roles.retain(|_, role| role.name != "Invite-Gast");
+        model.roles.remove(&ONBOARDING_INVITE_ROLE);
+        model
+            .roles
+            .remove(&dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID);
         model
             .channels
             .retain(|_, channel| channel.name != "server-support");
@@ -11132,24 +11591,36 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Rolle `Invite-Gast`")));
-        // Verschwundene Default-Kanaele blocken nicht mehr (Live-Uebernahme),
-        // sie fallen als stale ID mit Warnung raus.
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains(&format!(
+                "Rolle `Turniere` ({})",
+                dl_community::onboarding::ROLE_TURNIER_TEILNEHMER_ID
+            ))));
+        assert!(built.config.prompts[1].options[2].role_ids.is_empty());
         assert!(built
             .warnings
             .iter()
-            .any(|warning| warning.contains("stale Live-IDs") && warning.contains("6009")));
+            .any(|warning| warning.contains("stale Live-IDs")
+                && warning.contains(&support_publish::SUPPORT_CHANNEL_ID.to_string())));
     }
 
     #[test]
     fn onboarding_default_channel_validation_prueft_sieben_und_fuenf_sendefaehige() {
         let mut model = onboarding_model();
-        let defaults = ["6001", "6002", "6003", "6004", "6005", "6006", "6007"]
-            .into_iter()
-            .map(str::to_string)
+        let defaults = DEFAULT_ONBOARDING_CHANNELS
+            .iter()
+            .take(7)
+            .map(|(_, id)| id.to_string())
             .collect::<Vec<_>>();
         validate_default_channels_7_5(&model, &defaults).expect("five writable defaults");
 
-        for channel_id in [6001, 6002, 6003] {
+        for channel_id in [
+            ALLGEMEIN_CHANNEL_ID,
+            FRAG_DIE_COMMUNITY_CHANNEL_ID,
+            MITSPIELER_SUCHE_CHANNEL_ID,
+        ] {
             let overwrite = PermissionOverwriteSpec {
                 guild_id: GUILD_ID,
                 key: OverwriteKey {

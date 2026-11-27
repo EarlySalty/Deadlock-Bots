@@ -14,6 +14,7 @@ mod master;
 mod mcp;
 mod modglue;
 mod onboardglue;
+mod retired_buttons;
 mod runtime_assets;
 mod scrim_adapter;
 mod scrimglue;
@@ -806,14 +807,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
 
-    let solo_watch =
-        dl_voice::solo_watch::SoloWatch::without_prompts(Arc::new(dl_voice::glue::SoloWatchGlue {
-            adapter: adapter.clone(),
-            pool: central_pool.clone(),
-            log_channel_id: dl_voice::solo_watch::LOG_CHANNEL_ID,
-        }));
-    dl_voice::solo_watch::register(&mut router, solo_watch.clone());
-
     // TempVoice-Engine (4b/4c) — Panel-Buttons brauchen den Router,
     // der Event-Subscriber startet erst mit dem Gateway
     let voice_pair_store = Arc::new(dl_voice::voice_pair_guard::VoicePairGuardStore::new(
@@ -944,17 +937,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::router::register(&mut router, lane_router.clone());
 
-    // Lane-Pairing (Doppel-Opt-in): zwei Einzelsitzer werden gefragt, ob sie
-    // zusammen zocken wollen. Kill-Switch: DL_LANE_PAIRING_ENABLED=0.
-    let lane_pairing_enabled = env_bool_default("DL_LANE_PAIRING_ENABLED", true);
-    let lane_pairing = dl_voice::pairing::LanePairing::new(Arc::new(dl_voice::glue::PairingGlue {
-        adapter: adapter.clone(),
-        pool: central_pool.clone(),
-        engine: tempvoice.clone(),
-    }));
-    if lane_pairing_enabled {
-        dl_voice::pairing::register(&mut router, lane_pairing.clone());
-    }
+    retired_buttons::register(&mut router, central_pool.clone());
 
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
@@ -1013,8 +996,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
-
-    tracing::info!("Mitspieler-Umfrage deaktiviert");
 
     // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
     // nur die Wellen-Planung läuft hinter dem Opt-in-Flag.
@@ -1684,12 +1665,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             tracing::info!(
                 "Steam-Link-Voice-Nudge deaktiviert (DL_STEAM_VOICE_NUDGE_ENABLED nicht gesetzt)"
             );
-        }
-        dl_voice::solo_watch::spawn(solo_watch.clone(), &dispatcher);
-        if lane_pairing_enabled {
-            dl_voice::pairing::spawn(lane_pairing.clone());
-        } else {
-            tracing::warn!("Lane-Pairing deaktiviert (DL_LANE_PAIRING_ENABLED=0)");
         }
         // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
         dl_voice::feedback::spawn_dm_responses(

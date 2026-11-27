@@ -254,7 +254,6 @@ section!(CommunityOptions {
     lfg_forum_channel_id: u64 => "DL_LFG_FORUM_CHANNEL_ID",
     router_auto_move: bool => "DL_ROUTER_AUTO_MOVE_ENABLED",
     router_auto_move_delay_seconds: u64 => "DL_ROUTER_AUTO_MOVE_DELAY_SECONDS",
-    lane_pairing: bool => "DL_LANE_PAIRING_ENABLED",
     survey_pulse: bool => "SURVEY_PULSE_ENABLED",
     survey_interval_days: i64 => "SURVEY_PULSE_INTERVAL_DAYS",
     scrim_visible_vcs: bool => "DL_SCRIM_VISIBLE_VCS_ENABLED",

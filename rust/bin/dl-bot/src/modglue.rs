@@ -2934,7 +2934,7 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
         {
             Ok(_) => SurveyDmDelivery::Sent,
             Err(err) if is_discord_cannot_send_messages(&err) => SurveyDmDelivery::Blocked,
-            Err(err) => failed_survey_dm(user_id, err),
+            Err(err) => failed_survey_dm(user_id, *err),
         }
     }
 
@@ -4063,7 +4063,7 @@ impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
             .adapter
             .reaction_users(channel_id, message_id, emoji, after)
             .await
-            .map_err(reaction_role_port_err)?;
+            .map_err(|err| reaction_role_port_err(*err))?;
         Ok(users
             .into_iter()
             .map(|user| dl_community::reaction_roles::ReactedUser {
@@ -4163,7 +4163,7 @@ const DISCORD_RANK_ROLES: [(u64, &str, i64); 12] = [
     (1331458087349129296, "Eternus", 11),
     (1397687886580547745, "Unbekannt", 0),
 ];
-const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
+pub(crate) const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
     (1492959003700101180, "Eternus", 11),
     (1491935935414276198, "Ascendant", 10),
     (1492959474468655134, "Phantom", 9),

@@ -13,12 +13,6 @@ use tokio::sync::Mutex;
 pub const NATIVE_ONBOARDING_DEDUPE_NS: &str = "native_onboarding:completed";
 const NATIVE_ONBOARDING_PROCESS_DEDUPE_LIMIT: usize = 8192;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeOnboardingRole {
-    pub role_id: u64,
-    pub name: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeOnboardingChoice {
     InviteGuest,
@@ -80,11 +74,7 @@ impl NativeOnboardingProcessDedupe {
 
 #[async_trait]
 pub trait NativeOnboardingLookup: Send + Sync {
-    async fn member_roles_and_guild_roles(
-        &self,
-        guild_id: u64,
-        user_id: u64,
-    ) -> Result<(Vec<u64>, Vec<NativeOnboardingRole>), String>;
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Result<Vec<u64>, String>;
 }
 
 struct SerenityNativeOnboardingLookup {
@@ -93,16 +83,11 @@ struct SerenityNativeOnboardingLookup {
 
 #[async_trait]
 impl NativeOnboardingLookup for SerenityNativeOnboardingLookup {
-    async fn member_roles_and_guild_roles(
-        &self,
-        guild_id: u64,
-        user_id: u64,
-    ) -> Result<(Vec<u64>, Vec<NativeOnboardingRole>), String> {
-        let guild = GuildId::new(guild_id);
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Result<Vec<u64>, String> {
         let member = self
             .adapter
             .http
-            .get_member(guild, UserId::new(user_id))
+            .get_member(GuildId::new(guild_id), UserId::new(user_id))
             .await
             .map_err(|err| err.to_string())?;
         let mut member_role_ids = member
@@ -111,19 +96,7 @@ impl NativeOnboardingLookup for SerenityNativeOnboardingLookup {
             .map(|role| role.get())
             .collect::<Vec<_>>();
         member_role_ids.sort_unstable();
-        let roles = self
-            .adapter
-            .http
-            .get_guild_roles(guild)
-            .await
-            .map_err(|err| err.to_string())?
-            .into_iter()
-            .map(|role| NativeOnboardingRole {
-                role_id: role.id.get(),
-                name: role.name,
-            })
-            .collect();
-        Ok((member_role_ids, roles))
+        Ok(member_role_ids)
     }
 }
 
@@ -133,13 +106,16 @@ const WEICHE_ROLE_CHOICES: &[(u64, &str)] = &[
         "streamer_onboarding",
     ),
     (
-        dl_community::onboarding::ROLE_STREAMER_PARTNER_ID,
+        dl_community::onboarding::ROLE_SPIELER_SUCHE_PING_ID,
         "streamer_partner",
     ),
-    (dl_community::onboarding::ROLE_LFG_PING_ID, "lfg_ping"),
     (
-        dl_community::onboarding::ROLE_CUSTOM_GAMES_PING_ID,
-        "custom_games_ping",
+        dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+        "custom_games",
+    ),
+    (
+        dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
+        "funny_custom_ping",
     ),
     (
         dl_community::onboarding::ROLE_PATCHNOTES_PING_ID,
@@ -155,31 +131,22 @@ fn weiche_choice_for_role(role_id: u64) -> Option<&'static str> {
         .find_map(|(candidate, choice)| (*candidate == role_id).then_some(*choice))
 }
 
-pub fn classify_native_onboarding_choice(
-    member_role_ids: &[u64],
-    roles: &[NativeOnboardingRole],
-) -> NativeOnboardingChoice {
-    if has_named_role(member_role_ids, roles, "Invite-Gast") {
+pub fn classify_native_onboarding_choice(member_role_ids: &[u64]) -> NativeOnboardingChoice {
+    if member_role_ids.contains(&dl_community::onboarding::ROLE_INVITE_GAST_ID) {
         NativeOnboardingChoice::InviteGuest
-    } else if has_named_role(member_role_ids, roles, "Frischling") {
+    } else if member_role_ids.contains(&dl_community::concierge::FRESHLING_ROLE_ID) {
         NativeOnboardingChoice::Freshling
     } else {
         NativeOnboardingChoice::Player
     }
 }
 
-fn has_named_role(member_role_ids: &[u64], roles: &[NativeOnboardingRole], expected: &str) -> bool {
-    let expected = normalized_role_name(expected);
-    roles.iter().any(|role| {
-        member_role_ids.contains(&role.role_id) && normalized_role_name(&role.name) == expected
-    })
-}
-
-fn normalized_role_name(name: &str) -> String {
-    name.trim()
-        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-        .trim()
-        .to_lowercase()
+fn matched_weiche_role_id(choice: NativeOnboardingChoice) -> Option<u64> {
+    match choice {
+        NativeOnboardingChoice::InviteGuest => Some(dl_community::onboarding::ROLE_INVITE_GAST_ID),
+        NativeOnboardingChoice::Freshling => Some(dl_community::concierge::FRESHLING_ROLE_ID),
+        NativeOnboardingChoice::Player => None,
+    }
 }
 
 #[cfg(test)]
@@ -291,10 +258,7 @@ async fn handle_native_onboarding_completed(
     reread_delay: Duration,
 ) {
     tokio::time::sleep(reread_delay).await;
-    let (member_role_ids, roles) = match lookup
-        .member_roles_and_guild_roles(guild_id, user_id)
-        .await
-    {
+    let member_role_ids = match lookup.member_role_ids(guild_id, user_id).await {
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(%err, guild_id, user_id, "Native-Onboarding Rollen-Nachlese fehlgeschlagen");
@@ -302,16 +266,8 @@ async fn handle_native_onboarding_completed(
             return;
         }
     };
-    let choice = classify_native_onboarding_choice(&member_role_ids, &roles);
-    let matched_role_id = match choice {
-        NativeOnboardingChoice::InviteGuest => {
-            role_id_by_name(&member_role_ids, &roles, "Invite-Gast")
-        }
-        NativeOnboardingChoice::Freshling => {
-            role_id_by_name(&member_role_ids, &roles, "Frischling")
-        }
-        NativeOnboardingChoice::Player => None,
-    };
+    let choice = classify_native_onboarding_choice(&member_role_ids);
+    let matched_role_id = matched_weiche_role_id(choice);
     if let Err(err) = record_native_onboarding_completed_once(
         &pool,
         guild_id,
@@ -325,20 +281,6 @@ async fn handle_native_onboarding_completed(
         tracing::warn!(%err, guild_id, user_id, "Native-Onboarding Claim+Journey-Record fehlgeschlagen");
         process_dedupe.forget(&dedupe_key).await;
     }
-}
-
-fn role_id_by_name(
-    member_role_ids: &[u64],
-    roles: &[NativeOnboardingRole],
-    expected: &str,
-) -> Option<u64> {
-    let expected = normalized_role_name(expected);
-    roles
-        .iter()
-        .find(|role| {
-            member_role_ids.contains(&role.role_id) && normalized_role_name(&role.name) == expected
-        })
-        .map(|role| role.role_id)
 }
 
 pub fn spawn_native_onboarding_completed(
@@ -532,28 +474,55 @@ mod tests {
 
     #[test]
     fn native_onboarding_weiche_klassifikation_priorisiert_invite_vor_frischling() {
-        let roles = vec![
-            NativeOnboardingRole {
-                role_id: 10,
-                name: "Frischling".to_string(),
-            },
-            NativeOnboardingRole {
-                role_id: 11,
-                name: "Invite-Gast".to_string(),
-            },
-        ];
+        let invite = dl_community::onboarding::ROLE_INVITE_GAST_ID;
+        let frischling = dl_community::concierge::FRESHLING_ROLE_ID;
 
         assert_eq!(
-            classify_native_onboarding_choice(&[10, 11], &roles),
+            classify_native_onboarding_choice(&[frischling, invite]),
             NativeOnboardingChoice::InviteGuest
         );
         assert_eq!(
-            classify_native_onboarding_choice(&[10], &roles),
+            classify_native_onboarding_choice(&[frischling]),
             NativeOnboardingChoice::Freshling
         );
         assert_eq!(
-            classify_native_onboarding_choice(&[], &roles),
+            classify_native_onboarding_choice(&[]),
             NativeOnboardingChoice::Player
+        );
+        assert_eq!(
+            matched_weiche_role_id(NativeOnboardingChoice::InviteGuest),
+            Some(invite)
+        );
+        assert_eq!(matched_weiche_role_id(NativeOnboardingChoice::Player), None);
+    }
+
+    #[test]
+    fn native_onboarding_weiche_erkennt_umbenannte_rollen_per_id() {
+        let unrelated_role_named_invite = 10;
+
+        assert_eq!(
+            classify_native_onboarding_choice(&[unrelated_role_named_invite]),
+            NativeOnboardingChoice::Player
+        );
+        assert_eq!(
+            classify_native_onboarding_choice(&[dl_community::onboarding::ROLE_INVITE_GAST_ID]),
+            NativeOnboardingChoice::InviteGuest
+        );
+    }
+
+    #[test]
+    fn weiche_journey_labels_bleiben_an_rollen_ids_gebunden() {
+        assert_eq!(
+            weiche_choice_for_role(dl_community::onboarding::ROLE_SPIELER_SUCHE_PING_ID),
+            Some("streamer_partner")
+        );
+        assert_eq!(
+            weiche_choice_for_role(dl_community::onboarding::ROLE_CUSTOM_GAMES_ID),
+            Some("custom_games")
+        );
+        assert_eq!(
+            weiche_choice_for_role(dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID),
+            Some("funny_custom_ping")
         );
     }
 
@@ -577,13 +546,9 @@ mod tests {
 
     #[async_trait]
     impl NativeOnboardingLookup for CountingLookup {
-        async fn member_roles_and_guild_roles(
-            &self,
-            _guild_id: u64,
-            _user_id: u64,
-        ) -> Result<(Vec<u64>, Vec<NativeOnboardingRole>), String> {
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Result<Vec<u64>, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok((Vec::new(), Vec::new()))
+            Ok(Vec::new())
         }
     }
 

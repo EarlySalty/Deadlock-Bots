@@ -273,11 +273,39 @@ impl Default for TwitchInvitesConfig {
     }
 }
 
+const RETIRED_KEYS: &[&[&str]] = &[&["runtime", "community", "lane_pairing"]];
+
+pub(crate) fn strip_retired_keys(document: &mut toml_edit::DocumentMut) -> bool {
+    let mut removed = false;
+    for path in RETIRED_KEYS {
+        removed |= remove_path(document.as_table_mut(), path);
+    }
+    removed
+}
+
+fn remove_path(table: &mut dyn toml_edit::TableLike, path: &[&str]) -> bool {
+    match path {
+        [] => false,
+        [leaf] => table.remove(leaf).is_some(),
+        [head, rest @ ..] => table
+            .get_mut(head)
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .is_some_and(|child| remove_path(child, rest)),
+    }
+}
+
+fn without_retired_keys(text: &str) -> Option<String> {
+    let mut document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    strip_retired_keys(&mut document).then(|| document.to_string())
+}
+
 impl BotConfig {
     pub fn parse(text: &str) -> Result<Self, BotConfigError> {
         if text.len() as u64 > MAX_CONFIG_BYTES {
             return Err(BotConfigError::TooLarge);
         }
+        let stripped = without_retired_keys(text);
+        let text = stripped.as_deref().unwrap_or(text);
         let config: Self =
             toml::from_str(text).map_err(|error: toml::de::Error| BotConfigError::Parse {
                 offset: error.span().map_or(0, |span| span.start),
@@ -537,6 +565,20 @@ mod tests {
     #[test]
     fn schema_version_is_required() {
         rejected("");
+    }
+
+    #[test]
+    fn retired_keys_are_accepted_in_every_form_but_unknown_keys_stay_rejected() {
+        for text in [
+            "schema_version = 1\n[runtime.community]\nlane_pairing = false\nconcierge_proactive = true\n",
+            "schema_version = 1\nruntime.community.lane_pairing = true\nruntime.community.concierge_proactive = true\n",
+            "schema_version = 1\n[runtime]\ncommunity = { lane_pairing = false, concierge_proactive = true }\n",
+        ] {
+            let config = BotConfig::parse(text).expect("retired key tolerated");
+            assert_eq!(config.runtime.community.concierge_proactive, Some(true));
+        }
+        rejected("schema_version = 1\n[runtime.community]\nlane_pairing_x = false\n");
+        rejected("schema_version = 1\n[runtime.start]\nlane_pairing = false\n");
     }
 
     #[test]

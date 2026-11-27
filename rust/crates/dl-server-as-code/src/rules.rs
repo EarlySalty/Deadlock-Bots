@@ -24,8 +24,6 @@ const ROLE_VC_MOVE_RECHTE: &str = "VC Move Rechte";
 const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
 const ROLE_INVITE_GAST: &str = "Invite-Gast";
 const ROLE_FRISCHLING: &str = "Frischling";
-const ROLE_RANG_VERKNUEPFUNG: &str = "Rang-Verknüpfung";
-const ROLE_SERVER_TOUR: &str = "Server-Tour";
 const ROLE_STREAMS: &str = "Streams";
 /// Bezahltes Plus-Tier. Die Rolle ist bewusst rein kosmetisch und
 /// organisatorisch: eigene Farbe, eigene Gruppe in der Mitgliederliste,
@@ -86,11 +84,13 @@ const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
 const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
-const WELLE2B_MARKER_ROLES: &[&str] = &[
-    ROLE_INVITE_GAST,
-    ROLE_FRISCHLING,
-    ROLE_RANG_VERKNUEPFUNG,
-    ROLE_SERVER_TOUR,
+pub const ROLE_INVITE_GAST_ID: DiscordId = 1_522_384_960_021_856_368;
+pub const ROLE_FRISCHLING_ID: DiscordId = 1_522_384_961_481_609_236;
+pub const ROLE_STREAMS_ID: DiscordId = 1_522_384_962_207_088_773;
+pub const CASTER_CHANNEL_ID: DiscordId = 1_495_155_113_772_450_042;
+const WELLE2B_MARKER_ROLES: &[(DiscordId, &str)] = &[
+    (ROLE_INVITE_GAST_ID, ROLE_INVITE_GAST),
+    (ROLE_FRISCHLING_ID, ROLE_FRISCHLING),
 ];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Patchnotes Ping Rolle",
@@ -199,6 +199,11 @@ const CATEGORY_MATCH_ALIASES: &[(&str, &str)] = &[
     ("support", CATEGORY_SUPPORT),
     ("archiv", CATEGORY_ARCHIV),
 ];
+
+pub const CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS: &[DiscordId] =
+    &[1_407_085_699_374_649_364, 1_407_086_020_331_311_144];
+const CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS: &[DiscordId] =
+    &[1_512_624_055_814_062_090, 1_412_411_665_713_987_635];
 
 const FUNCTIONAL_EXCEPTION_USER_IDS: &[DiscordId] = &[
     271_549_384_787_755_008,
@@ -562,6 +567,10 @@ fn apply_everyone_basis(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     );
 }
 
+fn has_role(model: &GuildModel, role_id: DiscordId, name: &str) -> bool {
+    model.roles.contains_key(&role_id) || model.roles.values().any(|role| role.name == name)
+}
+
 fn apply_welle2b_roles(desired: &mut GuildModel) {
     let mut next_role_id = next_synthetic_role_id(desired);
     let mut next_position = desired
@@ -572,8 +581,8 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         .unwrap_or(0)
         + 1;
 
-    for role_name in WELLE2B_MARKER_ROLES {
-        if desired.roles.values().any(|role| role.name == *role_name) {
+    for (role_id, role_name) in WELLE2B_MARKER_ROLES {
+        if has_role(desired, *role_id, role_name) {
             continue;
         }
         let role = RoleSpec {
@@ -592,7 +601,7 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         next_position += 1;
     }
 
-    if desired.roles.values().any(|role| role.name == ROLE_STREAMS) {
+    if has_role(desired, ROLE_STREAMS_ID, ROLE_STREAMS) {
         return;
     }
 
@@ -1426,8 +1435,7 @@ fn apply_neue_spieler_lanes(
 fn apply_custom_game(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category_id: DiscordId) {
     set_exact_overwrites(desired, ctx, category_id, Vec::new());
     for channel_id in child_channel_ids(desired, category_id) {
-        let name = desired.channel_name(channel_id).unwrap_or_default();
-        if name.contains("Caster") {
+        if channel_id == CASTER_CHANNEL_ID {
             let mut overwrites = vec![everyone_overwrite(
                 desired.guild_id,
                 channel_id,
@@ -2265,7 +2273,7 @@ fn is_documented_exception_overwrite(
     ctx: &RuleContext<'_>,
     overwrite: &PermissionOverwriteSpec,
 ) -> bool {
-    if is_sammelpunkt_custom_ping_overwrite(ctx.actual, overwrite) {
+    if is_custom_game_ping_overwrite(overwrite) {
         return true;
     }
     if overwrite.key.target_kind != TargetKind::Member {
@@ -2287,28 +2295,10 @@ fn is_documented_exception_overwrite(
     false
 }
 
-fn is_sammelpunkt_custom_ping_overwrite(
-    actual: &GuildModel,
-    overwrite: &PermissionOverwriteSpec,
-) -> bool {
-    if overwrite.key.target_kind != TargetKind::Role {
-        return false;
-    }
-    if !actual
-        .channel_name(overwrite.key.channel_id)
-        .is_some_and(|name| channel_matches(name, &["Sammelpunkt"]))
-    {
-        return false;
-    }
-    actual
-        .roles
-        .get(&overwrite.key.target_id)
-        .is_some_and(|role| {
-            let key = matching_key(&role.name);
-            (key.contains("funny") || key.contains("grind"))
-                && key.contains("custom")
-                && key.contains("ping")
-        })
+fn is_custom_game_ping_overwrite(overwrite: &PermissionOverwriteSpec) -> bool {
+    overwrite.key.target_kind == TargetKind::Role
+        && CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS.contains(&overwrite.key.target_id)
+        && CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS.contains(&overwrite.key.channel_id)
 }
 
 fn build_documented_exceptions(
@@ -2672,7 +2662,6 @@ mod tests {
     const DL_RANG_ROLE: u64 = 303;
     const OLD_ARCHIVE_ROLE: u64 = 304;
     const FUNNY_CUSTOM_PING_ROLE: u64 = 305;
-    const GRIND_CUSTOM_PING_ROLE: u64 = 306;
     const COMMUNITY_MOD_ROLE: u64 = 307;
     const BOT_ROLE: u64 = 308;
     const PLUS_VIP_ROLE: u64 = 320;
@@ -3555,12 +3544,13 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
-        for role_name in [
-            "Invite-Gast",
-            "Frischling",
-            "Rang-Verknüpfung",
-            "Server-Tour",
-        ] {
+        for role_name in ["Rang-Verknüpfung", "Server-Tour"] {
+            assert!(
+                role_by_name(&derived.desired, role_name).is_none(),
+                "{role_name} ist ausgemustert und darf nicht neu entstehen"
+            );
+        }
+        for role_name in ["Invite-Gast", "Frischling"] {
             let role = role_by_name(&derived.desired, role_name).expect("marker role");
             assert_eq!(role.permissions_bitmask, 0);
             assert!(!role.hoist);
@@ -3610,6 +3600,78 @@ mod tests {
             assert_eq!(matches.len(), 1, "{name} darf nicht dupliziert werden");
             assert_eq!(matches[0].role_id, id);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_umbenannte_rollen_bleiben_an_der_id() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        for (id, name) in [
+            (ROLE_INVITE_GAST_ID, "Gast"),
+            (ROLE_FRISCHLING_ID, "Neuling"),
+            (ROLE_STREAMS_ID, "Live-Ping"),
+        ] {
+            actual
+                .roles
+                .insert(id, role(id, name, Permissions::empty().bits()));
+        }
+
+        let derived = derive_desired_model(&actual)?;
+
+        for name in ["Invite-Gast", "Frischling", "Streams"] {
+            assert!(
+                role_by_name(&derived.desired, name).is_none(),
+                "{name} darf neben der umbenannten Rolle nicht neu entstehen"
+            );
+        }
+        assert_eq!(
+            derived
+                .desired
+                .roles
+                .get(&ROLE_FRISCHLING_ID)
+                .map(|role| role.name.as_str()),
+            Some("Neuling")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_game_caster_kanal_wird_an_der_id_erkannt() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        let category_id = 9_100;
+        let lookalike_id = 9_101;
+        actual
+            .categories
+            .insert(category_id, category(category_id, "Custom Game"));
+        actual.channels.insert(
+            CASTER_CHANNEL_ID,
+            channel(CASTER_CHANNEL_ID, "Bühne", Some(category_id)),
+        );
+        actual.channels.insert(
+            lookalike_id,
+            channel(lookalike_id, "Caster-Talk", Some(category_id)),
+        );
+
+        let derived = derive_desired_model(&actual)?;
+
+        let everyone_caster = OverwriteKey {
+            channel_id: CASTER_CHANNEL_ID,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        };
+        let everyone_lookalike = OverwriteKey {
+            channel_id: lookalike_id,
+            ..everyone_caster.clone()
+        };
+        assert_eq!(
+            derived
+                .desired
+                .overwrites
+                .get(&everyone_caster)
+                .map(|overwrite| overwrite.deny_bits),
+            Some(Permissions::CONNECT.bits())
+        );
+        assert!(!derived.desired.overwrites.contains_key(&everyone_lookalike));
         Ok(())
     }
 
@@ -4480,45 +4542,87 @@ mod tests {
     }
 
     #[test]
-    fn sammelpunkt_funny_grind_custom_ping_overwrites_bleiben_im_soll() -> anyhow::Result<()> {
+    fn custom_game_ping_overwrites_bleiben_nur_fuer_exakte_ids_im_soll() -> anyhow::Result<()> {
+        let sammelpunkt = CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS[0];
+        let custom_games_chat = CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS[1];
+        let funny_role = CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS[0];
+        let custom_games_role = CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS[1];
         let mut actual = actual_model();
         actual.categories.insert(
             CUSTOM_GAME_CATEGORY,
             category(CUSTOM_GAME_CATEGORY, "Custom Game"),
         );
         actual.channels.insert(
+            sammelpunkt,
+            channel(sammelpunkt, "🏳️Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual.channels.insert(
+            custom_games_chat,
+            channel(
+                custom_games_chat,
+                "🧩custom-games-chat",
+                Some(CUSTOM_GAME_CATEGORY),
+            ),
+        );
+        actual.channels.insert(
             SAMMELPUNKT,
-            channel(SAMMELPUNKT, "Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+            channel(SAMMELPUNKT, "Team 1", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual
+            .roles
+            .insert(funny_role, role(funny_role, "Umbenannter Funny Ping", 0));
+        actual.roles.insert(
+            custom_games_role,
+            role(custom_games_role, "Custom Games", 0),
         );
         actual.roles.insert(
             FUNNY_CUSTOM_PING_ROLE,
             role(FUNNY_CUSTOM_PING_ROLE, "Funny Custom Ping", 0),
         );
-        actual.roles.insert(
-            GRIND_CUSTOM_PING_ROLE,
-            role(GRIND_CUSTOM_PING_ROLE, "Grind Custom Ping", 0),
-        );
-        let funny = overwrite(
-            SAMMELPUNKT,
-            TargetKind::Role,
-            FUNNY_CUSTOM_PING_ROLE,
-            Permissions::CONNECT.bits(),
-            0,
-        );
-        let grind = overwrite(
-            SAMMELPUNKT,
-            TargetKind::Role,
-            GRIND_CUSTOM_PING_ROLE,
-            Permissions::CONNECT.bits(),
-            0,
-        );
-        actual.overwrites.insert(funny.key.clone(), funny.clone());
-        actual.overwrites.insert(grind.key.clone(), grind.clone());
+        let kept = [
+            overwrite(
+                sammelpunkt,
+                TargetKind::Role,
+                funny_role,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+            overwrite(
+                custom_games_chat,
+                TargetKind::Role,
+                custom_games_role,
+                Permissions::VIEW_CHANNEL.bits(),
+                0,
+            ),
+        ];
+        let dropped = [
+            overwrite(
+                sammelpunkt,
+                TargetKind::Role,
+                FUNNY_CUSTOM_PING_ROLE,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+            overwrite(
+                SAMMELPUNKT,
+                TargetKind::Role,
+                funny_role,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+        ];
+        for item in kept.iter().chain(dropped.iter()) {
+            actual.overwrites.insert(item.key.clone(), item.clone());
+        }
 
         let derived = derive_desired_model(&actual)?;
 
-        assert_eq!(derived.desired.overwrites.get(&funny.key), Some(&funny));
-        assert_eq!(derived.desired.overwrites.get(&grind.key), Some(&grind));
+        for item in &kept {
+            assert_eq!(derived.desired.overwrites.get(&item.key), Some(item));
+        }
+        for item in &dropped {
+            assert_eq!(derived.desired.overwrites.get(&item.key), None);
+        }
         Ok(())
     }
 
@@ -4672,7 +4776,7 @@ mod tests {
                 "bestehende Rolle {role_name} muss erhalten bleiben"
             );
         }
-        for role_name in ["Invite-Gast", "Frischling", "Rang-Verknüpfung", "Streams"] {
+        for role_name in ["Invite-Gast", "Frischling", "Streams"] {
             assert!(
                 desired_role_names.contains(role_name),
                 "Welle2b-Rolle {role_name} muss im Soll-Modell existieren"

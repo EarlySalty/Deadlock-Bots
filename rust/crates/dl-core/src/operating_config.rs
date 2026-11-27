@@ -139,6 +139,7 @@ impl BotConfigStore {
             .parse::<toml_edit::DocumentMut>()
             .map_err(|_| EditError::Io)?;
         crate::settings_catalog::apply(&mut document, &changes)?;
+        crate::bot_config::strip_retired_keys(&mut document);
         let text = document.to_string();
         let mut checked = BotConfig::parse(&text)?;
         checked.runtime.resolve_paths(directory);
