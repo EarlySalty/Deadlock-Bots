@@ -86,11 +86,17 @@ const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
 const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
-const WELLE2B_MARKER_ROLES: &[&str] = &[
-    ROLE_INVITE_GAST,
-    ROLE_FRISCHLING,
-    ROLE_RANG_VERKNUEPFUNG,
-    ROLE_SERVER_TOUR,
+pub const ROLE_INVITE_GAST_ID: DiscordId = 1_522_384_960_021_856_368;
+pub const ROLE_FRISCHLING_ID: DiscordId = 1_522_384_961_481_609_236;
+pub const ROLE_RANG_VERKNUEPFUNG_ID: DiscordId = 1_522_762_890_174_529_546;
+pub const ROLE_SERVER_TOUR_ID: DiscordId = 1_527_047_393_164_529_684;
+pub const ROLE_STREAMS_ID: DiscordId = 1_522_384_962_207_088_773;
+pub const CASTER_CHANNEL_ID: DiscordId = 1_495_155_113_772_450_042;
+const WELLE2B_MARKER_ROLES: &[(DiscordId, &str)] = &[
+    (ROLE_INVITE_GAST_ID, ROLE_INVITE_GAST),
+    (ROLE_FRISCHLING_ID, ROLE_FRISCHLING),
+    (ROLE_RANG_VERKNUEPFUNG_ID, ROLE_RANG_VERKNUEPFUNG),
+    (ROLE_SERVER_TOUR_ID, ROLE_SERVER_TOUR),
 ];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Patchnotes Ping Rolle",
@@ -200,7 +206,7 @@ const CATEGORY_MATCH_ALIASES: &[(&str, &str)] = &[
     ("archiv", CATEGORY_ARCHIV),
 ];
 
-const CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS: &[DiscordId] =
+pub const CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS: &[DiscordId] =
     &[1_407_085_699_374_649_364, 1_407_086_020_331_311_144];
 const CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS: &[DiscordId] =
     &[1_512_624_055_814_062_090, 1_412_411_665_713_987_635];
@@ -567,6 +573,10 @@ fn apply_everyone_basis(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     );
 }
 
+fn has_role(model: &GuildModel, role_id: DiscordId, name: &str) -> bool {
+    model.roles.contains_key(&role_id) || model.roles.values().any(|role| role.name == name)
+}
+
 fn apply_welle2b_roles(desired: &mut GuildModel) {
     let mut next_role_id = next_synthetic_role_id(desired);
     let mut next_position = desired
@@ -577,8 +587,8 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         .unwrap_or(0)
         + 1;
 
-    for role_name in WELLE2B_MARKER_ROLES {
-        if desired.roles.values().any(|role| role.name == *role_name) {
+    for (role_id, role_name) in WELLE2B_MARKER_ROLES {
+        if has_role(desired, *role_id, role_name) {
             continue;
         }
         let role = RoleSpec {
@@ -597,7 +607,7 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         next_position += 1;
     }
 
-    if desired.roles.values().any(|role| role.name == ROLE_STREAMS) {
+    if has_role(desired, ROLE_STREAMS_ID, ROLE_STREAMS) {
         return;
     }
 
@@ -1431,8 +1441,7 @@ fn apply_neue_spieler_lanes(
 fn apply_custom_game(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category_id: DiscordId) {
     set_exact_overwrites(desired, ctx, category_id, Vec::new());
     for channel_id in child_channel_ids(desired, category_id) {
-        let name = desired.channel_name(channel_id).unwrap_or_default();
-        if name.contains("Caster") {
+        if channel_id == CASTER_CHANNEL_ID {
             let mut overwrites = vec![everyone_overwrite(
                 desired.guild_id,
                 channel_id,
@@ -3596,6 +3605,86 @@ mod tests {
             assert_eq!(matches.len(), 1, "{name} darf nicht dupliziert werden");
             assert_eq!(matches[0].role_id, id);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_umbenannte_rollen_bleiben_an_der_id() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        for (id, name) in [
+            (ROLE_INVITE_GAST_ID, "Gast"),
+            (ROLE_FRISCHLING_ID, "Neuling"),
+            (ROLE_RANG_VERKNUEPFUNG_ID, "Rang"),
+            (ROLE_SERVER_TOUR_ID, "Tour"),
+            (ROLE_STREAMS_ID, "Live-Ping"),
+        ] {
+            actual
+                .roles
+                .insert(id, role(id, name, Permissions::empty().bits()));
+        }
+
+        let derived = derive_desired_model(&actual)?;
+
+        for name in [
+            "Invite-Gast",
+            "Frischling",
+            "Rang-Verknüpfung",
+            "Server-Tour",
+            "Streams",
+        ] {
+            assert!(
+                role_by_name(&derived.desired, name).is_none(),
+                "{name} darf neben der umbenannten Rolle nicht neu entstehen"
+            );
+        }
+        assert_eq!(
+            derived
+                .desired
+                .roles
+                .get(&ROLE_FRISCHLING_ID)
+                .map(|role| role.name.as_str()),
+            Some("Neuling")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_game_caster_kanal_wird_an_der_id_erkannt() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        let category_id = 9_100;
+        let lookalike_id = 9_101;
+        actual
+            .categories
+            .insert(category_id, category(category_id, "Custom Game"));
+        actual.channels.insert(
+            CASTER_CHANNEL_ID,
+            channel(CASTER_CHANNEL_ID, "Bühne", Some(category_id)),
+        );
+        actual.channels.insert(
+            lookalike_id,
+            channel(lookalike_id, "Caster-Talk", Some(category_id)),
+        );
+
+        let derived = derive_desired_model(&actual)?;
+
+        let everyone_caster = OverwriteKey {
+            channel_id: CASTER_CHANNEL_ID,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        };
+        let everyone_lookalike = OverwriteKey {
+            channel_id: lookalike_id,
+            ..everyone_caster.clone()
+        };
+        assert_eq!(
+            derived
+                .desired
+                .overwrites
+                .get(&everyone_caster)
+                .map(|overwrite| overwrite.deny_bits),
+            Some(Permissions::CONNECT.bits())
+        );
+        assert!(!derived.desired.overwrites.contains_key(&everyone_lookalike));
         Ok(())
     }
 

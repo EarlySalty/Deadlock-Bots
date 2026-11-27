@@ -76,19 +76,24 @@ const SUPPORT_PANEL_BUSY: &str = "Support-Panel wird gerade geschrieben";
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
-// memes + deadlock-invite liegen seit W3.x im Archiv (kein @everyone-VIEW mehr);
-// off-topic + gameplay-clips halten die Discord-Regel "mind. 5 Defaults mit
-// @everyone VIEW+SEND" ein (live verifiziert 2026-07-15).
-const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
-    "allgemein",
-    "frag-die-community",
-    "mitspieler-suche",
-    "off-topic",
-    "gameplay-clips",
-    "rank-ups",
-    "patchnotes",
-    "deadlock-rang",
-    "server-support",
+const ALLGEMEIN_CHANNEL_ID: u64 = 1_289_721_245_281_292_291;
+const OFF_TOPIC_CHANNEL_ID: u64 = 1_327_664_119_649_800_284;
+const GAMEPLAY_CLIPS_CHANNEL_ID: u64 = 1_342_057_180_421_165_131;
+const RANK_UPS_CHANNEL_ID: u64 = 1_444_646_330_319_241_337;
+const PATCHNOTES_CHANNEL_ID: u64 = 1_326_973_956_825_284_628;
+const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = dl_community::concierge::FRAG_DIE_COMMUNITY_CHANNEL_ID;
+const DEADLOCK_RANG_CHANNEL_ID: u64 = dl_community::concierge_community::VERIFY_CHANNEL_ID;
+const MITSPIELER_SUCHE_CHANNEL_ID: u64 = dl_activity::lfg::LFG_CHANNEL_ID;
+const DEFAULT_ONBOARDING_CHANNELS: [(&str, u64); 9] = [
+    ("allgemein", ALLGEMEIN_CHANNEL_ID),
+    ("frag-die-community", FRAG_DIE_COMMUNITY_CHANNEL_ID),
+    ("mitspieler-suche", MITSPIELER_SUCHE_CHANNEL_ID),
+    ("off-topic", OFF_TOPIC_CHANNEL_ID),
+    ("gameplay-clips", GAMEPLAY_CLIPS_CHANNEL_ID),
+    ("rank-ups", RANK_UPS_CHANNEL_ID),
+    ("patchnotes", PATCHNOTES_CHANNEL_ID),
+    ("deadlock-rang", DEADLOCK_RANG_CHANNEL_ID),
+    ("server-support", support_publish::SUPPORT_CHANNEL_ID),
 ];
 
 pub type SharedServerSync = Arc<dyn ServerSyncOps>;
@@ -5955,10 +5960,11 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
 }
 
 fn build_regelwerk_text(model: &GuildModel) -> ServerSyncResult<String> {
-    let deadlock_rang = require_channel_mention(model, "deadlock-rang")?;
+    let deadlock_rang = require_channel_mention(model, DEADLOCK_RANG_CHANNEL_ID, "deadlock-rang")?;
     let support_ticket = format!("<#{SUPPORT_TICKET_CHANNEL_ID}>");
     let server_bot_fragen = format!("<#{}>", faq_publish::FAQ_CHANNEL_ID);
-    let frag_die_community = require_channel_mention(model, "frag-die-community")?;
+    let frag_die_community =
+        require_channel_mention(model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")?;
 
     Ok(format!(
         "**📜 Regelwerk · Deutsche Deadlock Community**\n\n\
@@ -5980,30 +5986,51 @@ Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's di
     ))
 }
 
-fn require_channel_mention(model: &GuildModel, name: &str) -> ServerSyncResult<String> {
-    resolve_channel_id(model, name)
-        .map_err(ServerSyncError::bad_request)?
-        .map(|id| format!("<#{id}>"))
-        .ok_or_else(|| ServerSyncError::bad_request(format!("Kanal `{name}` wurde nicht gefunden")))
+fn require_channel_mention(
+    model: &GuildModel,
+    channel_id: u64,
+    label: &str,
+) -> ServerSyncResult<String> {
+    if model.channels.contains_key(&channel_id) {
+        Ok(format!("<#{channel_id}>"))
+    } else {
+        Err(ServerSyncError::bad_request(format!(
+            "Kanal `{label}` ({channel_id}) wurde nicht gefunden"
+        )))
+    }
 }
 
 fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> ServerGuideBuildOutput {
     let mut blockers = Vec::new();
     let warnings = Vec::new();
 
-    let frag_die_community =
-        require_serverguide_channel_id(model, "frag-die-community", &mut blockers);
-    let deadlock_rang = require_serverguide_channel_id(model, "deadlock-rang", &mut blockers);
-    let mitspieler_suche = require_serverguide_channel_id(model, "mitspieler-suche", &mut blockers);
-    let patchnotes = require_serverguide_channel_id(model, "patchnotes", &mut blockers);
-    let support_ticket = require_serverguide_channel_id_by_id(
+    let frag_die_community = require_channel_id_by_id(
+        model,
+        FRAG_DIE_COMMUNITY_CHANNEL_ID,
+        "frag-die-community",
+        &mut blockers,
+    );
+    let deadlock_rang = require_channel_id_by_id(
+        model,
+        DEADLOCK_RANG_CHANNEL_ID,
+        "deadlock-rang",
+        &mut blockers,
+    );
+    let mitspieler_suche = require_channel_id_by_id(
+        model,
+        MITSPIELER_SUCHE_CHANNEL_ID,
+        "mitspieler-suche",
+        &mut blockers,
+    );
+    let patchnotes =
+        require_channel_id_by_id(model, PATCHNOTES_CHANNEL_ID, "patchnotes", &mut blockers);
+    let support_ticket = require_channel_id_by_id(
         model,
         SUPPORT_TICKET_CHANNEL_ID,
         "Support-Tickets",
         &mut blockers,
     );
-    let regelwerk =
-        require_serverguide_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
+    let regelwerk = require_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
 
     let (
         Some(frag_die_community),
@@ -6088,42 +6115,6 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
         config: Some(config),
         blockers,
         warnings,
-    }
-}
-
-fn require_serverguide_channel_id(
-    model: &GuildModel,
-    name: &str,
-    blockers: &mut Vec<String>,
-) -> Option<u64> {
-    match resolve_channel_id(model, name) {
-        Ok(Some(id)) => Some(id),
-        Ok(None) => {
-            blockers.push(format!(
-                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-            ));
-            None
-        }
-        Err(err) => {
-            blockers.push(err);
-            None
-        }
-    }
-}
-
-fn require_serverguide_channel_id_by_id(
-    model: &GuildModel,
-    channel_id: u64,
-    label: &str,
-    blockers: &mut Vec<String>,
-) -> Option<u64> {
-    if model.channels.contains_key(&channel_id) {
-        Some(channel_id)
-    } else {
-        blockers.push(format!(
-            "Kanal `{label}` ({channel_id}) wurde im Live-Guild-Modell nicht gefunden"
-        ));
-        None
     }
 }
 
@@ -6692,39 +6683,13 @@ fn option_points_to_unverified_rank_role(option: &NativeOnboardingOption) -> boo
 }
 
 fn resolve_default_channel_ids(model: &GuildModel, blockers: &mut Vec<String>) -> Vec<String> {
-    let mut ids = Vec::new();
-    for name in DEFAULT_ONBOARDING_CHANNEL_NAMES {
-        match resolve_channel_id(model, name) {
-            Ok(Some(id)) => ids.push(id.to_string()),
-            Ok(None) => blockers.push(format!(
-                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-            )),
-            Err(err) => blockers.push(err),
-        }
-    }
-    ids
-}
-
-fn resolve_channel_id(model: &GuildModel, name: &str) -> Result<Option<u64>, String> {
-    let expected = normalized_name(name);
-    let mut candidates = model
-        .channels
-        .values()
-        .filter(|channel| normalized_name(&channel.name) == expected)
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|channel| channel.channel_id);
-    match candidates.as_slice() {
-        [] => Ok(None),
-        [channel] => Ok(Some(channel.channel_id)),
-        _ => Err(format!(
-            "Kanal `{name}` ist im Live-Guild-Modell mehrdeutig: {}",
-            candidates
-                .iter()
-                .map(|channel| format!("{}:{}", channel.channel_id, channel.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    }
+    DEFAULT_ONBOARDING_CHANNELS
+        .iter()
+        .filter_map(|(label, channel_id)| {
+            require_channel_id_by_id(model, *channel_id, label, blockers)
+        })
+        .map(|id| id.to_string())
+        .collect()
 }
 
 fn require_channel_id_by_id(
@@ -10445,24 +10410,20 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 onboarding_role(id, &format!("{name} (unverifiziert)"), false),
             );
         }
-        model.channels.insert(
-            dl_activity::lfg::LFG_CHANNEL_ID,
-            onboarding_channel(dl_activity::lfg::LFG_CHANNEL_ID, "lfg-forum"),
-        );
         for (id, name) in [
-            (6001, "allgemein"),
-            (6002, "frag-die-community"),
-            (6003, "🎯mitspieler-suche"),
-            (6004, "🎲off-topic"),
-            (6005, "rank-ups"),
-            (6006, "patchnotes"),
-            (6007, "deadlock-rang"),
-            (6008, "📼gameplay-clips"),
-            (6009, "server-support"),
+            (ALLGEMEIN_CHANNEL_ID, "allgemein"),
+            (FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community"),
+            (MITSPIELER_SUCHE_CHANNEL_ID, "🔎mitspieler-suche"),
+            (OFF_TOPIC_CHANNEL_ID, "🎲off-topic"),
+            (RANK_UPS_CHANNEL_ID, "rank-ups"),
+            (PATCHNOTES_CHANNEL_ID, "patchnotes"),
+            (DEADLOCK_RANG_CHANNEL_ID, "deadlock-rang"),
+            (GAMEPLAY_CLIPS_CHANNEL_ID, "📼gameplay-clips"),
+            (support_publish::SUPPORT_CHANNEL_ID, "server-support"),
         ] {
             model.channels.insert(id, onboarding_channel(id, name));
         }
-        for channel_id in [6006, 6007] {
+        for channel_id in [PATCHNOTES_CHANNEL_ID, DEADLOCK_RANG_CHANNEL_ID] {
             let overwrite = PermissionOverwriteSpec {
                 guild_id: GUILD_ID,
                 key: OverwriteKey {
@@ -10482,35 +10443,54 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     fn regelwerk_text_ersetzt_channelnamen_durch_mentions() {
         let text = build_regelwerk_text(&onboarding_model()).expect("regelwerk text");
 
-        assert!(text.contains("- <#6007> — Steam verknüpfen, Rang eintragen"));
+        assert!(text.contains(&format!(
+            "- <#{DEADLOCK_RANG_CHANNEL_ID}> — Steam verknüpfen, Rang eintragen"
+        )));
         assert!(text.contains(
             "- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"
         ));
         assert!(text.contains("- <#1491953161747955853> — Fragen über Server, Bots und Concierge"));
-        assert!(text.contains("- <#6002> — Community-Fragen und Deadlock-Invite"));
+        assert!(text.contains(&format!(
+            "- <#{FRAG_DIE_COMMUNITY_CHANNEL_ID}> — Community-Fragen und Deadlock-Invite"
+        )));
         assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
         assert!(!text.contains("#deadlock-rang"));
         assert!(!text.contains("<@&"));
     }
 
     #[test]
-    fn channel_resolver_meldet_kanal_duplikat_statt_ersten_treffer() {
+    fn channel_resolver_bleibt_bei_namensduplikat_und_umbenennung_an_der_id() {
         let mut model = onboarding_model();
         model
             .channels
             .insert(6010, onboarding_channel(6010, "💬frag-die-community"));
+        model
+            .channels
+            .get_mut(&FRAG_DIE_COMMUNITY_CHANNEL_ID)
+            .expect("frag channel")
+            .name = "💬fragen".to_string();
 
-        let err = require_channel_mention(&model, "frag-die-community")
-            .expect_err("duplicate channel names must fail");
+        assert_eq!(
+            require_channel_mention(&model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")
+                .expect("id resolves despite rename and name twin"),
+            format!("<#{FRAG_DIE_COMMUNITY_CHANNEL_ID}>")
+        );
 
-        assert!(err.to_string().contains("mehrdeutig"));
-        assert!(err.to_string().contains("6002:frag-die-community"));
-        assert!(err.to_string().contains("6010:💬frag-die-community"));
+        model.channels.remove(&FRAG_DIE_COMMUNITY_CHANNEL_ID);
+        let err =
+            require_channel_mention(&model, FRAG_DIE_COMMUNITY_CHANNEL_ID, "frag-die-community")
+                .expect_err("missing id must fail instead of taking the name twin");
+        assert!(err.to_string().contains("frag-die-community"));
+        assert!(err
+            .to_string()
+            .contains(&FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string()));
     }
 
     fn serverguide_model() -> GuildModel {
         let mut model = onboarding_model();
-        model.overwrites.retain(|key, _| key.channel_id != 6007);
+        model
+            .overwrites
+            .retain(|key, _| key.channel_id != DEADLOCK_RANG_CHANNEL_ID);
         model.channels.insert(
             RULES_CHANNEL_ID,
             onboarding_channel(RULES_CHANNEL_ID, "regelwerk"),
@@ -10553,7 +10533,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "enabled": false,
             "mode": 1,
             // 9 gueltige Modell-IDs + eine stale ID (Kanal existiert nicht mehr)
-            "default_channel_ids": ["6001","6002","6003","6004","6005","6006","6007","6008","6009","1"],
+            "default_channel_ids": DEFAULT_ONBOARDING_CHANNELS
+                .iter()
+                .map(|(_, id)| id.to_string())
+                .chain(std::iter::once("1".to_string()))
+                .collect::<Vec<_>>(),
             "prompts": [
                 {
                     "id": "starthilfe",
@@ -10586,7 +10570,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                         "id": "account-link-steam",
                         "title": "Steam",
                         "role_ids": [],
-                        "channel_ids": ["6007", "1"]
+                        "channel_ids": [DEADLOCK_RANG_CHANNEL_ID.to_string(), "1"]
                     }],
                     "single_select": false,
                     "required": false,
@@ -10605,7 +10589,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             },
             "new_member_actions": [
                 {
-                    "channel_id": "6002",
+                    "channel_id": FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string(),
                     "action_type": action_type,
                     "title": "Alt",
                     "description": ""
@@ -10633,7 +10617,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert_eq!(config.new_member_actions.len(), 3);
         assert_eq!(config.new_member_actions[0].title, "Sag Hallo");
-        assert_eq!(config.new_member_actions[0].channel_id, "6002");
+        assert_eq!(
+            config.new_member_actions[0].channel_id,
+            FRAG_DIE_COMMUNITY_CHANNEL_ID.to_string()
+        );
         assert_eq!(
             config.new_member_actions[0].action_type,
             SERVER_GUIDE_ACTION_TYPE_CHAT
@@ -10642,9 +10629,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             config.new_member_actions[1].title,
             "Steam verknüpfen & Rang eintragen"
         );
-        assert_eq!(config.new_member_actions[1].channel_id, "6007");
+        assert_eq!(
+            config.new_member_actions[1].channel_id,
+            DEADLOCK_RANG_CHANNEL_ID.to_string()
+        );
         assert_eq!(config.new_member_actions[2].title, "Such dir Mitspieler");
-        assert_eq!(config.new_member_actions[2].channel_id, "6003");
+        assert_eq!(
+            config.new_member_actions[2].channel_id,
+            MITSPIELER_SUCHE_CHANNEL_ID.to_string()
+        );
         assert_eq!(
             config.new_member_actions[2].action_type,
             SERVER_GUIDE_ACTION_TYPE_VIEW
@@ -10674,12 +10667,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             without_live_actions.blockers
         );
 
-        // deadlock-rang (6007) ist eine VIEW-Action: read-only darf NICHT blocken.
         let mut rang_read_only = serverguide_model();
         let rang_overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6007,
+                channel_id: DEADLOCK_RANG_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -10695,17 +10687,16 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
 
-        // mitspieler-suche (6003) ist eine VIEW-Action: Forum mit Post-Deny darf NICHT blocken.
         let mut lfg_forum_read_only = serverguide_model();
         lfg_forum_read_only
             .channels
-            .get_mut(&6003)
+            .get_mut(&MITSPIELER_SUCHE_CHANNEL_ID)
             .expect("lfg channel")
             .kind = ChannelKind::Forum;
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6003,
+                channel_id: MITSPIELER_SUCHE_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -10725,12 +10716,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             lfg_view_ok.blockers
         );
 
-        // Eine CHAT-Action auf einem read-only-Kanal blockt weiter.
         let mut read_only_chat = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6002,
+                channel_id: FRAG_DIE_COMMUNITY_CHANNEL_ID,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -11063,10 +11053,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
-        // Live-Uebernahme: 9 gueltige Owner-IDs bleiben, die stale ID faellt raus.
         assert_eq!(
             built.config.default_channel_ids,
-            (6001..=6009).map(|id| id.to_string()).collect::<Vec<_>>()
+            DEFAULT_ONBOARDING_CHANNELS
+                .iter()
+                .map(|(_, id)| id.to_string())
+                .collect::<Vec<_>>()
         );
         assert!(built
             .warnings
@@ -11131,7 +11123,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .expect("owner prompt carried over");
         assert_eq!(account.id.as_deref(), Some("account-link"));
         assert!(!account.in_onboarding);
-        assert_eq!(account.options[0].channel_ids, vec!["6007".to_string()]);
+        assert_eq!(
+            account.options[0].channel_ids,
+            vec![DEADLOCK_RANG_CHANNEL_ID.to_string()]
+        );
     }
 
     #[test]
@@ -11176,6 +11171,34 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .prompts
             .iter()
             .any(|prompt| prompt.title == "Alte Ping-Frage"));
+    }
+
+    #[test]
+    fn server_as_code_rollen_ids_stimmen_mit_onboarding_ueberein() {
+        use dl_server_as_code::rules;
+        assert_eq!(
+            rules::ROLE_INVITE_GAST_ID,
+            dl_community::onboarding::ROLE_INVITE_GAST_ID
+        );
+        assert_eq!(
+            rules::ROLE_FRISCHLING_ID,
+            dl_community::concierge::FRESHLING_ROLE_ID
+        );
+        assert_eq!(
+            rules::ROLE_STREAMS_ID,
+            dl_community::onboarding::ROLE_STREAMS_PING_ID
+        );
+        assert_eq!(
+            [rules::ROLE_RANG_VERKNUEPFUNG_ID, rules::ROLE_SERVER_TOUR_ID],
+            dl_community::onboarding::RETIRED_STARTHILFE_ROLE_IDS
+        );
+        assert_eq!(
+            rules::CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS,
+            [
+                dl_community::onboarding::ROLE_FUNNY_CUSTOM_PING_ID,
+                dl_community::onboarding::ROLE_CUSTOM_GAMES_ID,
+            ]
+        );
     }
 
     #[test]
@@ -11583,19 +11606,25 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built
             .warnings
             .iter()
-            .any(|warning| warning.contains("stale Live-IDs") && warning.contains("6009")));
+            .any(|warning| warning.contains("stale Live-IDs")
+                && warning.contains(&support_publish::SUPPORT_CHANNEL_ID.to_string())));
     }
 
     #[test]
     fn onboarding_default_channel_validation_prueft_sieben_und_fuenf_sendefaehige() {
         let mut model = onboarding_model();
-        let defaults = ["6001", "6002", "6003", "6004", "6005", "6006", "6007"]
-            .into_iter()
-            .map(str::to_string)
+        let defaults = DEFAULT_ONBOARDING_CHANNELS
+            .iter()
+            .take(7)
+            .map(|(_, id)| id.to_string())
             .collect::<Vec<_>>();
         validate_default_channels_7_5(&model, &defaults).expect("five writable defaults");
 
-        for channel_id in [6001, 6002, 6003] {
+        for channel_id in [
+            ALLGEMEIN_CHANNEL_ID,
+            FRAG_DIE_COMMUNITY_CHANNEL_ID,
+            MITSPIELER_SUCHE_CHANNEL_ID,
+        ] {
             let overwrite = PermissionOverwriteSpec {
                 guild_id: GUILD_ID,
                 key: OverwriteKey {
