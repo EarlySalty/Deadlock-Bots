@@ -4163,7 +4163,7 @@ const DISCORD_RANK_ROLES: [(u64, &str, i64); 12] = [
     (1331458087349129296, "Eternus", 11),
     (1397687886580547745, "Unbekannt", 0),
 ];
-const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
+pub(crate) const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
     (1492959003700101180, "Eternus", 11),
     (1491935935414276198, "Ascendant", 10),
     (1492959474468655134, "Phantom", 9),

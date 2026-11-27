@@ -200,6 +200,11 @@ const CATEGORY_MATCH_ALIASES: &[(&str, &str)] = &[
     ("archiv", CATEGORY_ARCHIV),
 ];
 
+const CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS: &[DiscordId] =
+    &[1_407_085_699_374_649_364, 1_407_086_020_331_311_144];
+const CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS: &[DiscordId] =
+    &[1_512_624_055_814_062_090, 1_412_411_665_713_987_635];
+
 const FUNCTIONAL_EXCEPTION_USER_IDS: &[DiscordId] = &[
     271_549_384_787_755_008,
     702_594_328_328_929_331,
@@ -2265,7 +2270,7 @@ fn is_documented_exception_overwrite(
     ctx: &RuleContext<'_>,
     overwrite: &PermissionOverwriteSpec,
 ) -> bool {
-    if is_sammelpunkt_custom_ping_overwrite(ctx.actual, overwrite) {
+    if is_custom_game_ping_overwrite(overwrite) {
         return true;
     }
     if overwrite.key.target_kind != TargetKind::Member {
@@ -2287,28 +2292,10 @@ fn is_documented_exception_overwrite(
     false
 }
 
-fn is_sammelpunkt_custom_ping_overwrite(
-    actual: &GuildModel,
-    overwrite: &PermissionOverwriteSpec,
-) -> bool {
-    if overwrite.key.target_kind != TargetKind::Role {
-        return false;
-    }
-    if !actual
-        .channel_name(overwrite.key.channel_id)
-        .is_some_and(|name| channel_matches(name, &["Sammelpunkt"]))
-    {
-        return false;
-    }
-    actual
-        .roles
-        .get(&overwrite.key.target_id)
-        .is_some_and(|role| {
-            let key = matching_key(&role.name);
-            (key.contains("funny") || key.contains("grind"))
-                && key.contains("custom")
-                && key.contains("ping")
-        })
+fn is_custom_game_ping_overwrite(overwrite: &PermissionOverwriteSpec) -> bool {
+    overwrite.key.target_kind == TargetKind::Role
+        && CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS.contains(&overwrite.key.target_id)
+        && CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS.contains(&overwrite.key.channel_id)
 }
 
 fn build_documented_exceptions(
@@ -2672,7 +2659,6 @@ mod tests {
     const DL_RANG_ROLE: u64 = 303;
     const OLD_ARCHIVE_ROLE: u64 = 304;
     const FUNNY_CUSTOM_PING_ROLE: u64 = 305;
-    const GRIND_CUSTOM_PING_ROLE: u64 = 306;
     const COMMUNITY_MOD_ROLE: u64 = 307;
     const BOT_ROLE: u64 = 308;
     const PLUS_VIP_ROLE: u64 = 320;
@@ -4480,45 +4466,87 @@ mod tests {
     }
 
     #[test]
-    fn sammelpunkt_funny_grind_custom_ping_overwrites_bleiben_im_soll() -> anyhow::Result<()> {
+    fn custom_game_ping_overwrites_bleiben_nur_fuer_exakte_ids_im_soll() -> anyhow::Result<()> {
+        let sammelpunkt = CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS[0];
+        let custom_games_chat = CUSTOM_GAME_PING_EXCEPTION_CHANNEL_IDS[1];
+        let funny_role = CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS[0];
+        let custom_games_role = CUSTOM_GAME_PING_EXCEPTION_ROLE_IDS[1];
         let mut actual = actual_model();
         actual.categories.insert(
             CUSTOM_GAME_CATEGORY,
             category(CUSTOM_GAME_CATEGORY, "Custom Game"),
         );
         actual.channels.insert(
+            sammelpunkt,
+            channel(sammelpunkt, "🏳️Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual.channels.insert(
+            custom_games_chat,
+            channel(
+                custom_games_chat,
+                "🧩custom-games-chat",
+                Some(CUSTOM_GAME_CATEGORY),
+            ),
+        );
+        actual.channels.insert(
             SAMMELPUNKT,
-            channel(SAMMELPUNKT, "Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+            channel(SAMMELPUNKT, "Team 1", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual
+            .roles
+            .insert(funny_role, role(funny_role, "Umbenannter Funny Ping", 0));
+        actual.roles.insert(
+            custom_games_role,
+            role(custom_games_role, "Custom Games", 0),
         );
         actual.roles.insert(
             FUNNY_CUSTOM_PING_ROLE,
             role(FUNNY_CUSTOM_PING_ROLE, "Funny Custom Ping", 0),
         );
-        actual.roles.insert(
-            GRIND_CUSTOM_PING_ROLE,
-            role(GRIND_CUSTOM_PING_ROLE, "Grind Custom Ping", 0),
-        );
-        let funny = overwrite(
-            SAMMELPUNKT,
-            TargetKind::Role,
-            FUNNY_CUSTOM_PING_ROLE,
-            Permissions::CONNECT.bits(),
-            0,
-        );
-        let grind = overwrite(
-            SAMMELPUNKT,
-            TargetKind::Role,
-            GRIND_CUSTOM_PING_ROLE,
-            Permissions::CONNECT.bits(),
-            0,
-        );
-        actual.overwrites.insert(funny.key.clone(), funny.clone());
-        actual.overwrites.insert(grind.key.clone(), grind.clone());
+        let kept = [
+            overwrite(
+                sammelpunkt,
+                TargetKind::Role,
+                funny_role,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+            overwrite(
+                custom_games_chat,
+                TargetKind::Role,
+                custom_games_role,
+                Permissions::VIEW_CHANNEL.bits(),
+                0,
+            ),
+        ];
+        let dropped = [
+            overwrite(
+                sammelpunkt,
+                TargetKind::Role,
+                FUNNY_CUSTOM_PING_ROLE,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+            overwrite(
+                SAMMELPUNKT,
+                TargetKind::Role,
+                funny_role,
+                Permissions::CONNECT.bits(),
+                0,
+            ),
+        ];
+        for item in kept.iter().chain(dropped.iter()) {
+            actual.overwrites.insert(item.key.clone(), item.clone());
+        }
 
         let derived = derive_desired_model(&actual)?;
 
-        assert_eq!(derived.desired.overwrites.get(&funny.key), Some(&funny));
-        assert_eq!(derived.desired.overwrites.get(&grind.key), Some(&grind));
+        for item in &kept {
+            assert_eq!(derived.desired.overwrites.get(&item.key), Some(item));
+        }
+        for item in &dropped {
+            assert_eq!(derived.desired.overwrites.get(&item.key), None);
+        }
         Ok(())
     }
 
