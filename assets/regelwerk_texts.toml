@@ -3,25 +3,25 @@
 
 [texts]
 title = "**📜 Regelwerk · Deutsche Deadlock Community**"
-body = """Die Kurzfassung: **Sei kein Arschloch** 😄 — Respekt gegenüber allen, keine Hassrede, kein Spam, keine Fremdwerbung.
+body = """Die Kurzfassung: **Sei kein Arschloch** 😄 Respekt gegenüber allen, keine Hassrede, kein Spam, keine Fremdwerbung.
 
-Für die Details tipp unten auf einen Button — die Antwort siehst nur du."""
+Für die Details tipp unten auf einen Button. Die Antwort siehst nur du."""
 verhalten = """**🤝 Verhalten**
-- Respekt gegenüber allen — keine Beleidigungen, Diskriminierung oder persönlichen Angriffe
+- Respekt gegenüber allen: keine Beleidigungen, Diskriminierung oder persönlichen Angriffe
 - Keine Hassrede. Kein NSFW außerhalb der dafür markierten Kanäle. Kein Spam, keine Fremdwerbung
-- Privatsphäre respektieren — keine fremden Daten posten
+- Privatsphäre respektieren: keine fremden Daten posten
 - Schädliche Inhalte (Viren, IP-Grabber, Scam-Links) = sofortiger permanenter Bann"""
 spielkontext = """**🎮 Im Spielkontext erlaubt**
-Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay — solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein" — dann ist gut."""
+Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay, solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein", dann ist gut."""
 moderation = """**🛡️ Moderation & Konsequenzen**
-Probleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#1459628609705738539> auf, wenn's diskreter sein soll.
+Probleme oder Streit? Ping @Moderator oder @Owner oder mach ein Ticket in <#1459628609705738539> auf, wenn's diskreter sein soll.
 Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann."""
 wegweiser = """**🧭 Schnell zurechtfinden**
-- <#1398021105339334666> — Steam verknüpfen, Rang eintragen
-- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)
-- <#1491953161747955853> — Fragen über Server, Bots und Concierge
-- <#1426220702054355077> — Community-Fragen und Deadlock-Invite
-- <#1522769149208821881> — Mitspieler finden"""
+- <#1398021105339334666>: Steam verknüpfen, Rang eintragen
+- <#1459628609705738539>: wenn irgendwas nicht funktioniert (Ticket aufmachen)
+- <#1491953161747955853>: Fragen über Server, Bots und Concierge
+- <#1426220702054355077>: Community-Fragen und Deadlock-Invite
+- <#1522769149208821881>: Mitspieler finden"""
 datenschutz = """**🔒 Datenschutz & KI-Moderation**
 
 **Moderation & KI**

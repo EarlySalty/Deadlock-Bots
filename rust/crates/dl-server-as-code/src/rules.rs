@@ -73,9 +73,9 @@ const TOPIC_WILLKOMMEN: &str =
     "Dein Startpunkt: Was es hier gibt, wer dahinter steckt und wie du loslegst.";
 const TOPIC_KREATIV_ECKE: &str =
     "Alles Selbstgemachte rund um Deadlock: Art, Edits, Mods, Movement-Clips.";
-const TOPIC_SCRIM_PLANUNG: &str = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread.";
+const TOPIC_SCRIM_PLANUNG: &str = "Scrim-Termine und Team-Aufstellungen, pro Scrim ein Thread.";
 const TOPIC_TEAM_WERDEN: &str =
-    "Hier kannst du dich für das Community-Team bewerben — die Formulare öffnen sich über die Buttons.";
+    "Hier kannst du dich für das Community-Team bewerben. Die Formulare öffnen sich über die Buttons.";
 const TOPIC_PLUS_LOUNGE: &str =
     "Der Raum für alle mit Plus. Fragen, Vorschläge, Vorabblicke auf das, was gerade gebaut wird.";
 const TOPIC_PLUS_ABSTIMMUNGEN: &str = "Hier entscheidet ihr mit, was als Nächstes gebaut wird. \

@@ -38,9 +38,9 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         socials: "Links & Socials",
         quickstart: "Schnellstart",
     },
-    hero_intro: "Willkommen bei der Deutschen Deadlock Community — Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist.",
-    empty_navigation: "Die Navigation wird gerade neu aufgebaut — schau gleich nochmal rein.",
-    navigation_intro: "Alle Bereiche des Servers im Überblick — ein Klick auf den Kanal bringt dich direkt hin.",
+    hero_intro: "Willkommen bei der Deutschen Deadlock Community, Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist.",
+    empty_navigation: "Die Navigation wird gerade neu aufgebaut. Schau gleich nochmal rein.",
+    navigation_intro: "Alle Bereiche des Servers im Überblick. Ein Klick auf den Kanal bringt dich direkt hin.",
     default_channel_description: "Beschreibung folgt.",
     channel_descriptions: &[
         WelcomeChannelDescription {
@@ -141,7 +141,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         },
         WelcomeChannelDescription {
             channel_key: "scrim-planung",
-            description: "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread.",
+            description: "Scrim-Termine und Team-Aufstellungen, pro Scrim ein Thread.",
         },
         WelcomeChannelDescription {
             channel_key: "code-of-conduct",
@@ -173,15 +173,15 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         },
         WelcomeChannelDescription {
             channel_key: "lane-eröffnen",
-            description: "Beitreten — und deine eigene Lane öffnet sich automatisch.",
+            description: "Beitreten, und deine eigene Lane öffnet sich automatisch.",
         },
         WelcomeChannelDescription {
             channel_key: "ranked-competitiv-lane-öffnen",
-            description: "Beitreten — und deine Ranked-Lane öffnet sich automatisch.",
+            description: "Beitreten, und deine Ranked-Lane öffnet sich automatisch.",
         },
         WelcomeChannelDescription {
             channel_key: "street-brawl-lanes",
-            description: "Beitreten — und deine Street-Brawl-Lane öffnet sich automatisch.",
+            description: "Beitreten, und deine Street-Brawl-Lane öffnet sich automatisch.",
         },
         WelcomeChannelDescription {
             channel_key: "deadlock-router",
@@ -1187,7 +1187,7 @@ fn team_message(
     }
     if let Some(bot_team) = bot_team {
         role_blocks.push(format!(
-            "### {}\n{} — {}",
+            "### {}\n{}, {}",
             bot_team.group_title, bot_team.mention, bot_team.description
         ));
     }
@@ -2098,6 +2098,49 @@ mod tests {
     }
 
     #[test]
+    fn ausgelieferte_textassets_ohne_gedankenstrich() {
+        for (name, content) in [
+            (
+                "faq_texts.toml",
+                include_str!("../../../../../assets/faq_texts.toml"),
+            ),
+            (
+                "paten_leitfaden.toml",
+                include_str!("../../../../../assets/paten_leitfaden.toml"),
+            ),
+            (
+                "paten_panel.toml",
+                include_str!("../../../../../assets/paten_panel.toml"),
+            ),
+            (
+                "rang_guide_texts.toml",
+                include_str!("../../../../../assets/rang_guide_texts.toml"),
+            ),
+            (
+                "regelwerk_texts.toml",
+                include_str!("../../../../../assets/regelwerk_texts.toml"),
+            ),
+            (
+                "support_texts.toml",
+                include_str!("../../../../../assets/support_texts.toml"),
+            ),
+            (
+                "team_application_texts.toml",
+                include_str!("../../../../../assets/team_application_texts.toml"),
+            ),
+            (
+                "welcome_texts.toml",
+                include_str!("../../../../../assets/welcome_texts.toml"),
+            ),
+        ] {
+            assert!(
+                !content.contains('\u{2014}'),
+                "{name} enthält einen Gedankenstrich"
+            );
+        }
+    }
+
+    #[test]
     fn welcome_texts_seed_toml_parst_zu_compile_defaults() {
         let root = tempfile::tempdir().expect("Isolierte Welcome-Seeddatei");
         let raw = include_str!("../../../../../assets/welcome_texts.toml");
@@ -2562,7 +2605,7 @@ description = "Custom allgemein"
         // Gruppen ohne existierende Live-Rolle werden nicht gerendert
         assert!(!text.contains("### Moderator"));
         assert!(text.contains("### 🤖 Server-Management"));
-        assert!(text.contains("<@999> — unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub."));
+        assert!(text.contains("<@999>, unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub."));
 
         let without_bot = build_welcome_publish_output(
             &model,

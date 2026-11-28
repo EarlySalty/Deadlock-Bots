@@ -13,9 +13,9 @@ paten = "Paten"
 
 # Fliesstexte und Fallback-Texte in den Welcome-Nachrichten.
 [texts]
-hero_intro = "Willkommen bei der Deutschen Deadlock Community — Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist."
-empty_navigation = "Die Navigation wird gerade neu aufgebaut — schau gleich nochmal rein."
-navigation_intro = "Alle Bereiche des Servers im Überblick — ein Klick auf den Kanal bringt dich direkt hin."
+hero_intro = "Willkommen bei der Deutschen Deadlock Community, Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist."
+empty_navigation = "Die Navigation wird gerade neu aufgebaut. Schau gleich nochmal rein."
+navigation_intro = "Alle Bereiche des Servers im Überblick. Ein Klick auf den Kanal bringt dich direkt hin."
 default_channel_description = "Beschreibung folgt."
 empty_team_role_members = "aktuell unbesetzt"
 socials_intro = "Die Community gibt es auch außerhalb von Discord:"
@@ -142,7 +142,7 @@ description = "Automatische Glückwünsche bei Rang-Aufstiegen."
 
 [[channel]]
 key = "scrim-planung"
-description = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread."
+description = "Scrim-Termine und Team-Aufstellungen, pro Scrim ein Thread."
 
 [[channel]]
 key = "code-of-conduct"
@@ -174,15 +174,15 @@ description = "Kurzanleitung für die Ranked-Lanes."
 
 [[channel]]
 key = "lane-eröffnen"
-description = "Beitreten — und deine eigene Lane öffnet sich automatisch."
+description = "Beitreten, und deine eigene Lane öffnet sich automatisch."
 
 [[channel]]
 key = "ranked-competitiv-lane-öffnen"
-description = "Beitreten — und deine Ranked-Lane öffnet sich automatisch."
+description = "Beitreten, und deine Ranked-Lane öffnet sich automatisch."
 
 [[channel]]
 key = "street-brawl-lanes"
-description = "Beitreten — und deine Street-Brawl-Lane öffnet sich automatisch."
+description = "Beitreten, und deine Street-Brawl-Lane öffnet sich automatisch."
 
 [[channel]]
 key = "deadlock-router"

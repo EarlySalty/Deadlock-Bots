@@ -721,7 +721,7 @@ fn lfg_link_container(forum_thread_id: Option<u64>) -> Value {
         vec![text_display(
             VOICE_UX_COMPONENT_ID_LFG_TEXT,
             format!(
-                "**Mitspieler finden**\nGesuch aufgeben oder 🔔 Benachrichtigungen einschalten — beides direkt im Post [**{VOICE_UX_LFG_FORUM_TITLE}**]({url}).\nDein Gesuch zeigt live, wie viele Plätze frei sind, und mit **Beitreten** landest du direkt im Voice."
+                "**Mitspieler finden**\nGesuch aufgeben oder 🔔 Benachrichtigungen einschalten, beides direkt im Post [**{VOICE_UX_LFG_FORUM_TITLE}**]({url}).\nDein Gesuch zeigt live, wie viele Plätze frei sind, und mit **Beitreten** landest du direkt im Voice."
             ),
         )],
     )
