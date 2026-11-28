@@ -11,6 +11,7 @@ Units are user units of the host user (`systemctl --user`, unit files under `~/.
 | `deadlock-bot-rust.service` | `dl-bot` | Discord bot, started through the `dl-infisical-env` launcher from `/opt/deadlock/bots/current` |
 | `deadlock-web-rust.service` | `dl-web` | Web services (dashboard, public stats, tierlist, changelog, master broker) |
 | `dl-ai-gateway.service` | `dl-ai-gateway` | Central AI provider gateway for the bots |
+| `dl-ai-provider-check.timer` | `dl-ai-gateway --check-providers` | Fails, and so alerts through `unit-failure-notify@`, when a provider had no success in 24 hours; install and enable it in `~/.config/systemd/user` by hand |
 | `dl-community-points-sync.timer` | `dl-community-points-sync` | Community points sync |
 | `dl-insights-sync.timer` | `dl-insights-sync` | Discord insights sync |
 | `dl-repostats.timer` | `dl-repostats` | Repository statistics |

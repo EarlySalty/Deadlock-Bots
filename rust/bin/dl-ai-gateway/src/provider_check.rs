@@ -1,5 +1,9 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 const DOWN_SQL: &str = "SELECT provider, count(*)::bigint AS failures, \
      string_agg(DISTINCT coalesce(error_code, 'unknown'), ',' ORDER BY coalesce(error_code, 'unknown')) AS codes \
@@ -20,11 +24,13 @@ pub struct ProviderDown {
 }
 
 pub async fn failing_providers(pool: &PgPool, service: &str) -> Result<Vec<ProviderDown>> {
-    let rows: Vec<(Option<String>, i64, Option<String>)> = sqlx::query_as(DOWN_SQL)
-        .bind(service)
-        .fetch_all(pool)
-        .await
-        .context("reading provider outcomes from llm_usage")?;
+    let rows: Vec<(Option<String>, i64, Option<String>)> = tokio::time::timeout(
+        QUERY_TIMEOUT,
+        sqlx::query_as(DOWN_SQL).bind(service).fetch_all(pool),
+    )
+    .await
+    .context("reading provider outcomes from llm_usage timed out")?
+    .context("reading provider outcomes from llm_usage")?;
     Ok(rows
         .into_iter()
         .map(|(provider, failures, codes)| ProviderDown {

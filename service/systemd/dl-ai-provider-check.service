@@ -4,6 +4,7 @@ OnFailure=unit-failure-notify@%n.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=300
 WorkingDirectory=/opt/deadlock/bots/current
 ExecStart=/usr/bin/sudo -n /opt/deadlock/bots/current/dl-infisical-env --token-pipe --child-no-new-privileges --config /etc/deadlock-turniere/infisical-launcher.json --uid 1000 --gid 1000 -- /usr/bin/env HOME=/home/nathanael USER=nathanael LANG=C.UTF-8 XDG_RUNTIME_DIR=/run/user/1000 PATH=/home/nathanael/.local/bin:/usr/local/bin:/usr/bin:/bin /opt/deadlock/bots/current/dl-ai-gateway --config /home/nathanael/.config/deadlock-bots/dl-ai-gateway.toml --check-providers
 UMask=0077
