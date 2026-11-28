@@ -352,10 +352,7 @@ async fn connect_brain_pool() -> Result<PgPool> {
         .database(BRAIN_DATABASE)
         .username(BRAIN_READ_USER)
         .password(&password);
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
+    let pool = dl_central_db::connect_pool_with(options)
         .await
         .context("Brain database unreachable")?;
     verify_brain_target(&pool).await?;

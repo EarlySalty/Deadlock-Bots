@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use crate::CentralDbError;
 
@@ -8,14 +8,18 @@ const CENTRAL_DSN_ENV: &str = "DEADLOCK_CENTRAL_DSN";
 const MAX_CONNECTIONS: u32 = 8;
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn connect_pool(dsn: &str) -> Result<sqlx::PgPool, CentralDbError> {
-    let pool = PgPoolOptions::new()
+fn pool_options() -> PgPoolOptions {
+    PgPoolOptions::new()
         .max_connections(MAX_CONNECTIONS)
         .acquire_timeout(ACQUIRE_TIMEOUT)
-        .connect(dsn)
-        .await?;
+}
 
-    Ok(pool)
+pub async fn connect_pool(dsn: &str) -> Result<sqlx::PgPool, CentralDbError> {
+    Ok(pool_options().connect(dsn).await?)
+}
+
+pub async fn connect_pool_with(options: PgConnectOptions) -> Result<sqlx::PgPool, CentralDbError> {
+    Ok(pool_options().connect_with(options).await?)
 }
 
 pub fn dsn_from_env() -> Result<String, CentralDbError> {

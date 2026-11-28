@@ -21,7 +21,7 @@ pub use platform_connections::{
     discord_ids_for_twitch_ids, list_twitch_links, twitch_link_for_discord,
     upsert_twitch_connection, TwitchConnection, TwitchLink, TwitchUpsertOutcome,
 };
-pub use pool::{connect_pool, dsn_from_env};
+pub use pool::{connect_pool, connect_pool_with, dsn_from_env};
 pub use proactive_dm::{is_proactive_dm_allowed, ProactiveDmDenialReason, ProactiveDmEligibility};
 #[cfg(any(test, feature = "testing"))]
 pub use testing::{test_pool, TestDb};
