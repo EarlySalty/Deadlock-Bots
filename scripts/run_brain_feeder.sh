@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Wöchentlicher Lauf des Phase-2-Feeders (dl-brain-feeder): liest read-only
-# Aggregate aus der zentralen PG (+ optional Twitch-Analytics-PG), rendert den
-# Wochen-Digest und schreibt ihn ins Second-Brain-Wiki. Kein LLM.
-# Secrets wie beim Hauptbot aus Infisical; gebraucht wird DEADLOCK_CENTRAL_DSN
+# Aggregate aus der zentralen PG, Patchdaten aus der Brain-PG (Socket
+# /run/deadlock-brain-postgresql, Gruppe deadlock-brain-db), optional
+# Twitch-Analytics-PG; rendert den Wochen-Digest ins Second-Brain-Wiki. Kein LLM.
+# Secrets aus Infisical: DEADLOCK_CENTRAL_DSN und BRAIN_PG_READONLY_PASSWORD
 # (optional TWITCH_ANALYTICS_DSN, DL_BRAIN_WIKI_ROOT). Läuft als systemd-Oneshot.
 set -euo pipefail
 
@@ -51,7 +52,7 @@ FEEDER_BIN="$ROOT_DIR/dl-brain-feeder"
 [[ -x "$FEEDER_BIN" ]] || FEEDER_BIN="$ROOT_DIR/rust/target/release/dl-brain-feeder"
 
 BRAIN_DB_GROUP=deadlock-brain-db
-BRAIN_DB_GID="$(getent group "$BRAIN_DB_GROUP" | cut -d: -f3)"
+BRAIN_DB_GID="$(getent group "$BRAIN_DB_GROUP" | cut -d: -f3 || true)"
 if [[ -n "$BRAIN_DB_GID" ]] && ! id -G | tr ' ' '\n' | grep -qx "$BRAIN_DB_GID"; then
   exec sg "$BRAIN_DB_GROUP" -c "exec $(printf '%q' "$FEEDER_BIN")"
 fi

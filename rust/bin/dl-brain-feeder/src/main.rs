@@ -23,7 +23,7 @@ use dl_brain_feeder::{
     LedgerAgg, PatchSummary, PulseRow, ReasonAgg, SteamAgg, SurveyRow, TwitchSection,
     TwitchVerdict,
 };
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::PgConnectOptions;
 use sqlx::PgPool;
 
 const DEFAULT_WIKI_ROOT: &str = "/home/naniadm/Documents/Deadlock-2nd-Brain";
@@ -668,12 +668,7 @@ async fn load_twitch(start: DateTime<Utc>, end: DateTime<Utc>) -> TwitchSection 
         _ => return TwitchSection::Unavailable(format!("{TWITCH_DSN_ENV} nicht gesetzt")),
     };
 
-    let pool = match PgPoolOptions::new()
-        .max_connections(2)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect(&dsn)
-        .await
-    {
+    let pool = match dl_central_db::connect_pool(&dsn).await {
         Ok(pool) => pool,
         Err(error) => return TwitchSection::Unavailable(format!("Verbindung: {error}")),
     };
@@ -1080,12 +1075,7 @@ async fn load_tournaments(start: DateTime<Utc>, end: DateTime<Utc>) -> Tournamen
         Ok(value) if !value.trim().is_empty() => value,
         _ => return TournamentSection::Unavailable(format!("{TURNIER_DSN_ENV} nicht gesetzt")),
     };
-    let pool = match PgPoolOptions::new()
-        .max_connections(2)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect(&dsn)
-        .await
-    {
+    let pool = match dl_central_db::connect_pool(&dsn).await {
         Ok(pool) => pool,
         Err(_) => return TournamentSection::Unavailable("Verbindung fehlgeschlagen".to_string()),
     };
