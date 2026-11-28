@@ -1127,6 +1127,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         .unwrap_or(dl_brain::DEFAULT_DISCORD_DAILY_USER_LIMIT),
                 )),
                 answerer,
+                followup_classifier: chat_text_generator(
+                    dl_ai::LlmUseCase::BrainFollowupAddressee,
+                    true,
+                ),
                 channel_allowlist: None,
                 all_guild_channels: false,
                 emoji_index: Arc::new(modglue::BrainEmojiIndex::default()),

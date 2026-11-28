@@ -17,6 +17,9 @@ use serenity::http::HttpError;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 
+#[path = "brain_followup.rs"]
+mod brain_followup;
+
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
@@ -242,6 +245,7 @@ pub struct BrainHandler {
     pub config: Arc<dl_brain::BrainConfig>,
     pub cooldowns: Arc<dl_brain::BrainCooldowns>,
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
+    pub followup_classifier: Option<Arc<dyn dl_ai::TextGenerator>>,
     pub channel_allowlist: Option<HashSet<u64>>,
     pub all_guild_channels: bool,
     pub emoji_index: Arc<BrainEmojiIndex>,
@@ -278,7 +282,16 @@ pub struct BrainConversations {
 struct BrainConversation {
     turns: Vec<(u64, String)>,
     last_reply: Instant,
-    implicit_closed_at: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ConversationQuestion {
+    Directed(String),
+    Unaddressed {
+        text: String,
+        previous_question: String,
+        previous_reply_id: u64,
+    },
 }
 
 impl BrainConversations {
@@ -292,11 +305,7 @@ impl BrainConversations {
         self.prune(now);
         self.pending.retain(|_, work| work.strong_count() > 0);
         let pending = self.pending.get(&key).and_then(Weak::upgrade);
-        let implicit_open = self
-            .entries
-            .get(&key)
-            .is_some_and(|entry| entry.implicit_closed_at.is_none());
-        if empty && (pending.is_some() || implicit_open) {
+        if empty && (pending.is_some() || self.entries.contains_key(&key)) {
             return None;
         }
         // Each answer task holds the token until it ends, including on cancellation.
@@ -338,35 +347,44 @@ impl BrainConversations {
         )
     }
 
-    fn question(&mut self, event: &dl_discord::MessageEvent, now: Instant) -> Option<String> {
+    fn question(
+        &mut self,
+        event: &dl_discord::MessageEvent,
+        now: Instant,
+    ) -> Option<ConversationQuestion> {
         self.prune(now);
         let key = (event.guild_id?, event.channel_id, event.author_id);
-        let conversation = self.entries.get_mut(&key)?;
+        let conversation = self.entries.get(&key)?;
         let text = event.content.trim();
-        let has_image = !event.image_attachment_urls.is_empty();
-        if text.is_empty() && !has_image {
-            return None;
-        }
-        let addressed = event.reply_message_id.is_some_and(|reply| {
-            event
-                .reply_channel_id
-                .is_none_or(|channel| channel == event.channel_id)
-                && conversation.turns.iter().any(|(id, _)| *id == reply)
-        });
         let is_reply =
             event.is_reply || event.reply_message_id.is_some() || event.reply_channel_id.is_some();
-        if addressed && !brain_followup_acknowledgment(text) {
-            return dl_brain::question_or_image_default(text, has_image);
+        if text.contains("<@") || brain_followup_acknowledgment(text) {
+            return None;
         }
-        let is_question = !is_reply && implicit_brain_question(text);
-        if is_question && conversation.implicit_closed_at.is_none() {
-            return Some(text.to_owned());
+        if is_reply {
+            let reply = event.reply_message_id?;
+            if event
+                .reply_channel_id
+                .is_some_and(|id| id != event.channel_id)
+                || !conversation.turns.iter().any(|(id, _)| *id == reply)
+            {
+                return None;
+            }
+            return dl_brain::question_or_image_default(
+                text,
+                !event.image_attachment_urls.is_empty(),
+            )
+            .map(ConversationQuestion::Directed);
         }
-        if !is_question {
-            let previous = conversation.implicit_closed_at.unwrap_or_default();
-            conversation.implicit_closed_at = Some(previous.max(event.message_id));
+        if text.is_empty() {
+            return None;
         }
-        None
+        let (previous_reply_id, previous_question) = conversation.turns.last()?;
+        Some(ConversationQuestion::Unaddressed {
+            text: text.to_owned(),
+            previous_question: previous_question.clone(),
+            previous_reply_id: *previous_reply_id,
+        })
     }
 
     fn record(
@@ -386,14 +404,7 @@ impl BrainConversations {
             let mut conversation = self.entries.remove(&key).unwrap_or(BrainConversation {
                 turns: Vec::new(),
                 last_reply: now,
-                implicit_closed_at: None,
             });
-            if conversation
-                .implicit_closed_at
-                .is_some_and(|closed| event.message_id > closed)
-            {
-                conversation.implicit_closed_at = None;
-            }
             if let Some(history) = history {
                 conversation.turns.truncate(history.len());
             } else {
@@ -436,69 +447,6 @@ fn brain_followup_acknowledgment(text: &str) -> bool {
     )
 }
 
-fn implicit_brain_question(text: &str) -> bool {
-    if text.is_empty()
-        || text.starts_with(['>', '*', '`'])
-        || text.contains("<@")
-        || brain_followup_acknowledgment(text)
-    {
-        return false;
-    }
-    if text.ends_with('?') {
-        return true;
-    }
-    let lower = text.to_lowercase();
-    let question = lower.trim_start_matches("okay,").trim_start();
-    let question = question
-        .strip_prefix("und ")
-        .or_else(|| question.strip_prefix("and "));
-    if let Some(continuation) = question {
-        return continuation == "danach"
-            || ["ab minute ", "bei minute ", "at minute ", "für ", "mit "]
-                .iter()
-                .any(|prefix| continuation.starts_with(prefix))
-            || question_prefix(continuation);
-    }
-    question_prefix(lower.trim_start_matches("okay,").trim_start())
-}
-
-fn question_prefix(text: &str) -> bool {
-    [
-        "wie viele ",
-        "wieviel ",
-        "wie viel ",
-        "wie kann ",
-        "wie mache ",
-        "wie geht ",
-        "wie ist ",
-        "wie lange ",
-        "was ",
-        "warum ",
-        "wo ",
-        "wann ",
-        "wer ",
-        "welche ",
-        "welcher ",
-        "welches ",
-        "kann ich ",
-        "kannst du ",
-        "kann man ",
-        "hast du ",
-        "gibt es ",
-        "ab minute ",
-        "how ",
-        "what ",
-        "why ",
-        "when ",
-        "where ",
-        "which ",
-        "can i ",
-        "can you ",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
-}
-
 #[async_trait::async_trait]
 trait BrainDirectReplyPort: Send + Sync {
     async fn is_human(&self, event: &dl_discord::MessageEvent) -> bool;
@@ -520,6 +468,11 @@ trait BrainDirectReplyPort: Send + Sync {
     ) -> Option<ReferencedMessage> {
         None
     }
+    async fn followup_context(
+        &self,
+        event: &dl_discord::MessageEvent,
+        previous_reply_id: u64,
+    ) -> Option<Vec<brain_followup::Line>>;
     async fn reaction(
         &self,
         event: &dl_discord::MessageEvent,
@@ -638,6 +591,14 @@ impl BrainDirectReplyPort for DiscordAdapter {
                 .map(|attachment| attachment.url.clone())
                 .collect(),
         })
+    }
+
+    async fn followup_context(
+        &self,
+        event: &dl_discord::MessageEvent,
+        previous_reply_id: u64,
+    ) -> Option<Vec<brain_followup::Line>> {
+        brain_followup::recent_lines(&self.http, event, previous_reply_id).await
     }
 
     fn is_public(&self, event: &dl_discord::MessageEvent) -> bool {
@@ -956,9 +917,9 @@ impl BrainHandler {
         &self,
         event: &dl_discord::MessageEvent,
         bot_id: u64,
-    ) -> Option<String> {
+    ) -> Option<ConversationQuestion> {
         if let Some(question) = direct_brain_question(event, bot_id) {
-            return Some(question);
+            return Some(ConversationQuestion::Directed(question));
         }
         if bot_id == 0
             || event.author_id == 0
@@ -1230,12 +1191,55 @@ impl BrainHandler {
         let Some(question) = self.conversation_question(event, bot_id).await else {
             return false;
         };
-        let (question, images) = self
-            .with_referenced_message(event, bot_id, replies, question)
-            .await;
+        let (question, images) = match question {
+            ConversationQuestion::Directed(question) => {
+                self.with_referenced_message(event, bot_id, replies, question)
+                    .await
+            }
+            ConversationQuestion::Unaddressed {
+                text,
+                previous_question,
+                previous_reply_id,
+            } => {
+                if !self
+                    .followup_is_for_brain(
+                        event,
+                        replies,
+                        &text,
+                        &previous_question,
+                        previous_reply_id,
+                    )
+                    .await
+                {
+                    return true;
+                }
+                (text, event_images(event))
+            }
+        };
         self.answer_discord_event(event, replies, &question, images, false)
             .await;
         true
+    }
+
+    async fn followup_is_for_brain(
+        &self,
+        event: &dl_discord::MessageEvent,
+        replies: &dyn BrainDirectReplyPort,
+        text: &str,
+        previous_question: &str,
+        previous_reply_id: u64,
+    ) -> bool {
+        let Some(classifier) = self.followup_classifier.as_deref() else {
+            return false;
+        };
+        if !replies.is_public(event) || !replies.can_reply(event).await {
+            return false;
+        }
+        let Some(recent_chat) = replies.followup_context(event, previous_reply_id).await else {
+            return false;
+        };
+        brain_followup::is_addressed_to_brain(classifier, text, previous_question, &recent_chat)
+            .await
     }
 
     async fn with_referenced_message(
@@ -5268,6 +5272,7 @@ mod tests {
                 calls: answerer_calls,
                 retrieval_calls: retriever_calls,
             }),
+            followup_classifier: None,
             channel_allowlist,
             all_guild_channels: false,
             emoji_index: Arc::new(BrainEmojiIndex::default()),
@@ -5324,7 +5329,10 @@ mod tests {
         v2_blocks(&body)
     }
 
-    fn test_message_event(guild_id: Option<u64>, content: &str) -> dl_discord::MessageEvent {
+    pub(super) fn test_message_event(
+        guild_id: Option<u64>,
+        content: &str,
+    ) -> dl_discord::MessageEvent {
         dl_discord::MessageEvent {
             guild_id,
             channel_id: 1,
@@ -5420,6 +5428,7 @@ mod tests {
         fail_reactions: bool,
         delivered: tokio::sync::Notify,
         referenced: Option<ReferencedMessage>,
+        recent_chat: Vec<brain_followup::Line>,
     }
 
     #[async_trait::async_trait]
@@ -5446,6 +5455,14 @@ mod tests {
             _bot_id: u64,
         ) -> Option<ReferencedMessage> {
             self.referenced.clone()
+        }
+
+        async fn followup_context(
+            &self,
+            _event: &dl_discord::MessageEvent,
+            _previous_reply_id: u64,
+        ) -> Option<Vec<brain_followup::Line>> {
+            Some(self.recent_chat.clone())
         }
 
         async fn reaction(
@@ -5484,6 +5501,28 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TestFollowupClassifier {
+        responses: Mutex<std::collections::VecDeque<Option<&'static str>>>,
+        seen: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_ai::TextGenerator for TestFollowupClassifier {
+        async fn generate_text(&self, request: dl_ai::GenerateRequest) -> Option<String> {
+            self.seen
+                .lock()
+                .await
+                .push(serde_json::from_str(&request.prompt).expect("Structured follow-up prompt"));
+            self.responses
+                .lock()
+                .await
+                .pop_front()
+                .unwrap_or(Some(r#"{"for_brain":true}"#))
+                .map(str::to_owned)
+        }
+    }
+
     fn direct_test_handler() -> (BrainHandler, Arc<RecordingDiscordAnswerer>) {
         let answerer = Arc::new(RecordingDiscordAnswerer::default());
         let mut handler = test_brain_handler(
@@ -5492,6 +5531,7 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         );
         handler.answerer = answerer.clone();
+        handler.followup_classifier = Some(Arc::new(TestFollowupClassifier::default()));
         (handler, answerer)
     }
 
@@ -5894,6 +5934,12 @@ mod tests {
                 handler
                     .handle_message_event_with_replies(&event, 42, &replies)
                     .await;
+                if private && !reply {
+                    assert!(replies.reactions.lock().await.is_empty());
+                    assert!(replies.sent.lock().await.is_empty());
+                    assert!(answerer.calls.lock().await.is_empty());
+                    continue;
+                }
                 let expected = if private {
                     vec![
                         (event.channel_id, event.message_id, "👀".into(), true),
@@ -6066,9 +6112,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_brain_chat_stops_after_a_handoff_and_reopens_on_bot_reply() {
-        let (handler, answerer) = direct_test_handler();
-        let replies = RecordingBrainReplies::default();
+    async fn followup_addressee_is_decided_per_message_and_chatter_uses_no_quota() {
+        use brain_followup::{Line, Speaker};
+
+        let (mut handler, answerer) = direct_test_handler();
+        handler.cooldowns = Arc::new(dl_brain::BrainCooldowns::new(4));
+        let classifier = Arc::new(TestFollowupClassifier {
+            responses: Mutex::new(
+                [
+                    Some(r#"{"for_brain":true}"#),
+                    Some(r#"{"for_brain":false}"#),
+                    None,
+                    Some(r#"{"for_brain":false}"#),
+                    Some(r#"{"for_brain":"true"}"#),
+                    Some(r#"{"for_brain":true}"#),
+                ]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        handler.followup_classifier = Some(classifier.clone());
+        let mut replies = RecordingBrainReplies::default();
         let first = test_message_event(Some(1), "<@42> Wie viele Seelen gibt eine Welle?");
         handler
             .handle_message_event_with_replies(&first, 42, &replies)
@@ -6086,6 +6150,11 @@ mod tests {
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
         event.reply_message_id = None;
+        replies.recent_chat = vec![Line {
+            speaker: Speaker::OtherMember,
+            reply_to: Some(Speaker::Requester),
+            text: "Game ID? Also Steam Name oder wie? https://tracklock.gg/players/123".into(),
+        }];
         for (id, text) in [
             (5, "Dann kann ich dir das zeigen"),
             (6, "Ne warte"),
@@ -6109,14 +6178,13 @@ mod tests {
         assert_eq!(replies.sent.lock().await.len(), 2);
 
         event.message_id = 11;
-        event.reply_message_id = Some(1002);
-        event.content = "Und pro Trooper?".into();
+        event.content = "Und bei Minute 20".into();
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
         event.message_id = 12;
-        event.reply_message_id = None;
-        event.content = "Und bei Minute 20".into();
+        event.reply_message_id = Some(1003);
+        event.content = "Und pro Trooper?".into();
         handler
             .handle_message_event_with_replies(&event, 42, &replies)
             .await;
@@ -6131,9 +6199,40 @@ mod tests {
             [
                 "Wie viele Seelen gibt eine Welle?",
                 "Und ab Minute 10",
-                "Und pro Trooper?",
-                "Und bei Minute 20"
+                "Und bei Minute 20",
+                "Und pro Trooper?"
             ]
+        );
+        assert_eq!(
+            answerer.histories.lock().await[2],
+            ["Wie viele Seelen gibt eine Welle?", "Und ab Minute 10"]
+        );
+        assert_eq!(replies.sent.lock().await.len(), 4);
+        assert!(replies.reactions.lock().await.is_empty());
+        let seen = classifier.seen.lock().await;
+        assert_eq!(
+            seen.iter()
+                .map(|request| {
+                    request["current_message_from_requester"]
+                        .as_str()
+                        .expect("Requester message in classifier prompt")
+                })
+                .collect::<Vec<_>>(),
+            [
+                "Und ab Minute 10",
+                "Dann kann ich dir das zeigen",
+                "Da oben rechts hast du so ne ID",
+                "*wir reden nicht über meine Yamato-Performance*",
+                "Wo finde ich die Match-ID?",
+                "Und bei Minute 20",
+            ]
+        );
+        assert_eq!(seen[5]["previous_question_to_brain"], "Und ab Minute 10");
+        assert_eq!(seen[5]["recent_chat"][0]["speaker"], "other_member");
+        assert_eq!(seen[5]["recent_chat"][0]["reply_to"], "requester");
+        assert_eq!(
+            seen[5]["recent_chat"][0]["text"],
+            "Game ID? Also Steam Name oder wie? [entfernt]"
         );
     }
 
@@ -6282,7 +6381,11 @@ mod tests {
         conversations.record(&event, 1001, &event.content, now);
         assert_eq!(
             conversations.question(&event, now + Duration::from_secs(599)),
-            Some("Und wie geht das?".into())
+            Some(ConversationQuestion::Unaddressed {
+                text: event.content.clone(),
+                previous_question: event.content.clone(),
+                previous_reply_id: 1001,
+            })
         );
         conversations.record(&event, 1002, &event.content, now + Duration::from_secs(599));
         assert!(conversations
@@ -7255,8 +7358,11 @@ mod tests {
             .handle_message_event_with_replies(&event, 42, &private)
             .await;
         event.content = "Und für neue Spieler?".into();
+        event.is_reply = true;
+        event.reply_channel_id = Some(event.channel_id);
         for message_id in 3..=51 {
             event.message_id = message_id;
+            event.reply_message_id = Some(1000 + message_id - 2);
             handler
                 .handle_message_event_with_replies(&event, 42, &private)
                 .await;
