@@ -241,7 +241,26 @@ pub fn router_modes() -> &'static [RouterMode] {
 }
 
 pub fn router_repo_root() -> PathBuf {
+    asset_root()
+}
+
+#[cfg(not(test))]
+fn asset_root() -> PathBuf {
+    std::env::current_exe()
+        .map(|exe| release_root_of(&exe))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn asset_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
+fn release_root_of(executable: &std::path::Path) -> PathBuf {
+    executable
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default()
 }
 
 pub fn router_panel_attachments() -> Vec<RouterPanelAttachment> {
@@ -2981,6 +3000,15 @@ mod tests {
 
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         assert_eq!(port.edits.lock().expect("edits").len(), 0);
+    }
+
+    #[test]
+    fn release_root_ist_verzeichnis_des_laufenden_binarys() {
+        let root = release_root_of(std::path::Path::new(
+            "/opt/deadlock/bots/releases/abc/dl-bot",
+        ));
+        assert_eq!(root, PathBuf::from("/opt/deadlock/bots/releases/abc"));
+        assert_eq!(release_root_of(std::path::Path::new("/")), PathBuf::new());
     }
 
     #[test]
