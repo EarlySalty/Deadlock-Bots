@@ -319,6 +319,7 @@ pub fn use_case_label(use_case: LlmUseCase) -> &'static str {
         LlmUseCase::VerbinderKritik => "Verbinder-Kritik",
         LlmUseCase::AiOnboarding => "Onboarding",
         LlmUseCase::BrainAntwort => "Brain-Antwort",
+        LlmUseCase::BrainFollowupAddressee => "Adressat einer Brain-Folgenachricht",
         LlmUseCase::CoachingAnfrage => "Coaching-Anfrage",
         LlmUseCase::ModerationText => "Moderation (Text)",
         LlmUseCase::ModerationVerify => "Moderation (Prüfung)",

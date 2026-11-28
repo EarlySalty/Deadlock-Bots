@@ -215,6 +215,7 @@ pub enum LlmUseCase {
     VerbinderKritik,
     AiOnboarding,
     BrainAntwort,
+    BrainFollowupAddressee,
     CoachingAnfrage,
     ModerationText,
     ModerationVerify,
@@ -234,6 +235,7 @@ impl LlmUseCase {
             Self::VerbinderKritik,
             Self::AiOnboarding,
             Self::BrainAntwort,
+            Self::BrainFollowupAddressee,
             Self::CoachingAnfrage,
             Self::ModerationText,
             Self::ModerationVerify,
@@ -253,6 +255,7 @@ impl LlmUseCase {
             Self::VerbinderKritik => "VERBINDER_KRITIK",
             Self::AiOnboarding => "AI_ONBOARDING",
             Self::BrainAntwort => "BRAIN_ANTWORT",
+            Self::BrainFollowupAddressee => "BRAIN_FOLLOWUP_ADDRESSEE",
             Self::CoachingAnfrage => "COACHING_ANFRAGE",
             Self::ModerationText => "MODERATION_TEXT",
             Self::ModerationVerify => "MODERATION_VERIFY",
@@ -272,6 +275,7 @@ impl LlmUseCase {
             Self::VerbinderKritik => "verbinder_kritik",
             Self::AiOnboarding => "ai_onboarding",
             Self::BrainAntwort => "brain_antwort",
+            Self::BrainFollowupAddressee => "brain_followup_addressee",
             Self::CoachingAnfrage => "coaching_anfrage",
             Self::ModerationText => "moderation_text",
             Self::ModerationVerify => "moderation_verify",
@@ -476,13 +480,12 @@ impl LlmProviderConfig {
         }?;
         let built =
             Arc::new(crate::selected_chat::SelectedChat::new(built)) as Arc<dyn ChatProvider>;
-        // Die einzige Fabrik ist auch die einzige Stelle, an der das
-        // Transparenz-Log haengt: damit ist jeder der vierzehn
-        // Anwendungsfaelle erfasst, ohne dass eine Aufrufstelle etwas tun
-        // muss. Ohne registrierte Senke reicht der Wrapper unveraendert durch.
+        let tracked = crate::usage::wrap(overrides.wrap(built), format!("{use_case:?}"));
+        if use_case == LlmUseCase::BrainFollowupAddressee {
+            return Ok(tracked);
+        }
         Ok(crate::transparency::wrap_with_transparency(
-            crate::usage::wrap(overrides.wrap(built), format!("{use_case:?}")),
-            use_case,
+            tracked, use_case,
         ))
     }
 
