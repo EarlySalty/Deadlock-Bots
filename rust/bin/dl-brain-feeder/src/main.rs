@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use clap::Parser;
 use dl_ai::{FireworksClient, GenerateRequest, TextGenerator};
@@ -23,12 +23,17 @@ use dl_brain_feeder::{
     LedgerAgg, PatchSummary, PulseRow, ReasonAgg, SteamAgg, SurveyRow, TwitchSection,
     TwitchVerdict,
 };
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
 
 const DEFAULT_WIKI_ROOT: &str = "/home/naniadm/Documents/Deadlock-2nd-Brain";
 const TWITCH_DSN_ENV: &str = "TWITCH_ANALYTICS_DSN";
 const TURNIER_DSN_ENV: &str = "DEADLOCK_CENTRAL_DSN";
+const BRAIN_SOCKET_DIR: &str = "/run/deadlock-brain-postgresql";
+const BRAIN_PORT: u16 = 5446;
+const BRAIN_DATABASE: &str = "brain";
+const BRAIN_READ_USER: &str = "brain_readonly";
+const BRAIN_PASSWORD_ENV: &str = "BRAIN_PG_READONLY_PASSWORD";
 
 const PLAN_BASE_PG_TABLES: [&str; 7] = [
     "activity.weekly_pulse",
@@ -256,7 +261,8 @@ async fn run(
     // (17:00–18:00 UTC), also nie über Mitternacht — UTC-Datum == Berlin-Datum.
     let run_date = now.date_naive();
 
-    let data = collect_data(pool, run_date, period_start, period_end).await?;
+    let brain = connect_brain_pool().await?;
+    let data = collect_data(pool, &brain, run_date, period_start, period_end).await?;
     let rendered = render_digest(&data);
 
     let wiki = wiki_root();
@@ -337,8 +343,45 @@ fn twitch_note(twitch: &TwitchSection) -> String {
 // Datenerhebung
 // ---------------------------------------------------------------------------
 
+async fn connect_brain_pool() -> Result<PgPool> {
+    let password = std::env::var(BRAIN_PASSWORD_ENV)
+        .with_context(|| format!("{BRAIN_PASSWORD_ENV} is not set"))?;
+    let options = PgConnectOptions::new()
+        .socket(BRAIN_SOCKET_DIR)
+        .port(BRAIN_PORT)
+        .database(BRAIN_DATABASE)
+        .username(BRAIN_READ_USER)
+        .password(&password);
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(options)
+        .await
+        .context("Brain database unreachable")?;
+    verify_brain_target(&pool).await?;
+    Ok(pool)
+}
+
+async fn verify_brain_target(pool: &PgPool) -> Result<()> {
+    let (database, port): (String, String) =
+        sqlx::query_as("SELECT current_database()::text, current_setting('port')")
+            .fetch_one(pool)
+            .await
+            .context("Brain target check")?;
+    ensure!(
+        brain_target_matches(&database, &port),
+        "patch data source is {database}:{port}, expected {BRAIN_DATABASE}:{BRAIN_PORT}"
+    );
+    Ok(())
+}
+
+fn brain_target_matches(database: &str, port: &str) -> bool {
+    database == BRAIN_DATABASE && port == BRAIN_PORT.to_string()
+}
+
 async fn collect_data(
     pool: &PgPool,
+    brain: &PgPool,
     run_date: NaiveDate,
     period_start: DateTime<Utc>,
     period_end: DateTime<Utc>,
@@ -361,7 +404,7 @@ async fn collect_data(
     let steam = load_steam(pool, period_start, period_end)
         .await
         .context("steam.bot_event_log aggregieren")?;
-    let patch = load_patch(pool, period_start, period_end)
+    let patch = load_patch(brain, period_start, period_end)
         .await
         .context("brain.patch_events aggregieren")?;
     let surveys = load_surveys(pool, period_start, period_end)
@@ -1571,6 +1614,14 @@ mod plan_tests {
         assert_eq!(digest.digest_path.as_deref(), Some("raw/2026-07/test.md"));
         assert!(digest.committed);
         assert!(!digest.pushed);
+    }
+
+    #[test]
+    fn patch_source_accepts_only_the_live_brain_database() {
+        assert!(brain_target_matches("brain", "5446"));
+        assert!(!brain_target_matches("deadlock", "5432"));
+        assert!(!brain_target_matches("deadlock", "5446"));
+        assert!(!brain_target_matches("brain", "5432"));
     }
 
     #[tokio::test]

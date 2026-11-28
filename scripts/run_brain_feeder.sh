@@ -47,4 +47,12 @@ unset INFISICAL_SERVICE_TOKEN
 # Wiki-Pull/-Push). Der Feeder braucht keine GitHub-API-Tokens — weg damit.
 unset GITHUB_TOKEN GH_TOKEN
 
-exec "$ROOT_DIR/rust/target/release/dl-brain-feeder"
+FEEDER_BIN="$ROOT_DIR/dl-brain-feeder"
+[[ -x "$FEEDER_BIN" ]] || FEEDER_BIN="$ROOT_DIR/rust/target/release/dl-brain-feeder"
+
+BRAIN_DB_GROUP=deadlock-brain-db
+BRAIN_DB_GID="$(getent group "$BRAIN_DB_GROUP" | cut -d: -f3)"
+if [[ -n "$BRAIN_DB_GID" ]] && ! id -G | tr ' ' '\n' | grep -qx "$BRAIN_DB_GID"; then
+  exec sg "$BRAIN_DB_GROUP" -c "exec $(printf '%q' "$FEEDER_BIN")"
+fi
+exec "$FEEDER_BIN"
