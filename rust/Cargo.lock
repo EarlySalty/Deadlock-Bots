@@ -1337,6 +1337,7 @@ dependencies = [
  "dl-core",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower",
  "tracing",
