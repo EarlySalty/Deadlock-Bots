@@ -58,7 +58,7 @@ value = 'f8'
 label = 'Was passiert bei der Verifizierung mit meinen Daten?'
 emoji = '🛡️'
 answer = '''**🛡️ Was passiert bei der Verifizierung mit meinen Daten?**
-Was du davon hast: deine echte Rang-Rolle (hält sich ab dann von selbst aktuell), Zugang zu den Ranked-Funktionen (Ranked-Lanes öffnen und Ranked-Gesuchen beitreten) und du kannst Freunde per Invite reinholen. Zur Technik: Die Verknüpfung läuft über den offiziellen Steam-Login (OpenID), wir sehen nie dein Passwort und haben keinerlei Zugriff auf deinen Account, wir bekommen nur deine Steam-ID. Deine Daten kannst du jederzeit exportieren oder löschen lassen.'''
+Was du davon hast: deine echte Rang-Rolle (hält sich ab dann von selbst aktuell), Zugang zu den Ranked-Funktionen (Ranked-Lanes öffnen und Ranked-Gesuchen beitreten) und du kannst Freunde per Invite reinholen. Zur Technik: Die Verknüpfung läuft über den offiziellen Steam-Login (OpenID). Wir sehen nie dein Passwort und haben keinerlei Zugriff auf deinen Account, wir bekommen nur deine Steam-ID. Deine Daten kannst du jederzeit exportieren oder löschen lassen.'''
 
 [[options]]
 value = 'f9'
@@ -69,9 +69,9 @@ Zwei Stufen: Beim Onboarding gibst du deinen Rang selbst an und bekommst die pas
 
 [[options]]
 value = 'f10'
-label = 'Ich bin ganz neu: hilft mir jemand?'
+label = 'Ich bin ganz neu. Hilft mir jemand?'
 emoji = '🌱'
-answer = '''**🌱 Ich bin ganz neu: hilft mir jemand?**
+answer = '''**🌱 Ich bin ganz neu. Hilft mir jemand?**
 Ja, genau dafür sind wir da: In der Neue-Spieler-Lane erwartet niemand, dass du schon irgendwas kannst. Spring einfach rein. Dazu gibt's unser komplett kostenloses Coaching (siehe die Frage dazu), und in <#1426220702054355077> ist keine Frage zu einfach. Sag dazu, dass du neu bist, dann holen dich alle da ab, wo du stehst.'''
 
 [[options]]
@@ -93,7 +93,7 @@ value = 'f13'
 label = 'Wie funktionieren die Voice-Lanes?'
 emoji = '🎙️'
 answer = '''**🎙️ Wie funktionieren die Voice-Lanes?**
-Du darfst in jede rein. Unsere Lanes haben keine Türsteher. Wer eine Lane öffnet, wählt den Modus; bei Ranked ist der Rang-Bereich eine Ansage, kein Schloss. Die Regel dahinter ist einfach: Der Lane-Ersteller entscheidet, wer bleibt, bei Streit entscheiden die Mods. Die Chill-Lanes sind unser rang-egales Wohnzimmer, die Neue-Spieler-Lane ist für alle, die gerade erst anfangen. Nur zuhören ist übrigens auch völlig okay.'''
+Du darfst in jede rein. Unsere Lanes haben keine Türsteher. Wer eine Lane öffnet, wählt den Modus; bei Ranked ist der Rang-Bereich eine Ansage, kein Schloss. Die Regel dahinter ist einfach: Der Lane-Ersteller entscheidet, wer bleibt. Bei Streit entscheiden die Mods. Die Chill-Lanes sind unser rang-egales Wohnzimmer, die Neue-Spieler-Lane ist für alle, die gerade erst anfangen. Nur zuhören ist übrigens auch völlig okay.'''
 
 [[options]]
 value = 'f14'
@@ -107,4 +107,4 @@ value = 'f15'
 label = 'Wo fange ich an, und wo kann ich fragen?'
 emoji = '🧭'
 answer = '''**🧭 Wo fange ich an, und wo kann ich fragen?**
-Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler, in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen oder einen Deadlock-Invite passt <#1426220702054355077>.'''
+Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler. Am besten in dieser Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen oder einen Deadlock-Invite passt <#1426220702054355077>.'''

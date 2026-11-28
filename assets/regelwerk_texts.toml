@@ -3,7 +3,7 @@
 
 [texts]
 title = "**📜 Regelwerk · Deutsche Deadlock Community**"
-body = """Die Kurzfassung: **Sei kein Arschloch** 😄 Respekt gegenüber allen, keine Hassrede, kein Spam, keine Fremdwerbung.
+body = """Die Kurzfassung: **Sei kein Arschloch** 😄 Heißt: Respekt gegenüber allen, keine Hassrede, kein Spam, keine Fremdwerbung.
 
 Für die Details tipp unten auf einen Button. Die Antwort siehst nur du."""
 verhalten = """**🤝 Verhalten**
@@ -14,7 +14,7 @@ verhalten = """**🤝 Verhalten**
 spielkontext = """**🎮 Im Spielkontext erlaubt**
 Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay, solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein", dann ist gut."""
 moderation = """**🛡️ Moderation & Konsequenzen**
-Probleme oder Streit? Ping @Moderator oder @Owner oder mach ein Ticket in <#1459628609705738539> auf, wenn's diskreter sein soll.
+Probleme oder Streit? Ping @Moderator oder @Owner, oder mach ein Ticket in <#1459628609705738539> auf, wenn's diskreter sein soll.
 Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann."""
 wegweiser = """**🧭 Schnell zurechtfinden**
 - <#1398021105339334666>: Steam verknüpfen, Rang eintragen

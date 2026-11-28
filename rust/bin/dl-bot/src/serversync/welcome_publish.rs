@@ -2134,7 +2134,7 @@ mod tests {
             ),
         ] {
             assert!(
-                !content.contains('\u{2014}'),
+                !content.contains('\u{2014}') && !content.contains('\u{2013}'),
                 "{name} enthält einen Gedankenstrich"
             );
         }
