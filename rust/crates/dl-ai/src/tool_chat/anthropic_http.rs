@@ -138,7 +138,7 @@ fn status_error(status: reqwest::StatusCode, body: &[u8]) -> BackendError {
         429 => BackendError::new(FailureKind::Limit, "http_429"),
         529 => BackendError::new(FailureKind::Unavailable, "http_529"),
         400 | 402 | 403 if is_billing_error(body) => {
-            BackendError::new(FailureKind::Limit, "billing")
+            BackendError::new(FailureKind::Billing, "billing")
         }
         400 | 404 | 413 | 422 => BackendError::new(FailureKind::InvalidRequest, "http_4xx"),
         _ => BackendError::new(FailureKind::Unavailable, "http_status"),
@@ -257,6 +257,22 @@ mod tests {
             status_error(reqwest::StatusCode::BAD_REQUEST, invalid).kind,
             FailureKind::InvalidRequest
         );
+        for (status, body, code) in [
+            (400, &billing[..], "billing"),
+            (
+                402,
+                br#"{"error":{"type":"billing_error","message":"x"}}"#,
+                "billing",
+            ),
+            (429, b"", "rate_limited"),
+        ] {
+            let status = reqwest::StatusCode::from_u16(status).expect("status");
+            assert_eq!(
+                status_error(status, body).kind.ledger_code(),
+                code,
+                "{status}"
+            );
+        }
     }
 
     fn plain_request(output_schema: Option<Value>) -> ToolChatRequest {

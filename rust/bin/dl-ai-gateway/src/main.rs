@@ -1,4 +1,5 @@
 mod http;
+mod provider_check;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +15,8 @@ struct Cli {
     config: PathBuf,
     #[arg(long)]
     check_config: bool,
+    #[arg(long)]
+    check_providers: bool,
 }
 
 #[tokio::main]
@@ -37,6 +40,11 @@ async fn main() -> Result<()> {
     let pool = dl_central_db::connect_pool(dsn)
         .await
         .context("connecting central database")?;
+    if cli.check_providers {
+        return provider_check::report(
+            &provider_check::failing_providers(&pool, "dl-ai-gateway").await?,
+        );
+    }
     dl_ai::usage::initialize(pool, "dl-ai-gateway").map_err(anyhow::Error::msg)?;
     let router = build_router(
         &config,

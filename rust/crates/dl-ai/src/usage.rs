@@ -367,6 +367,7 @@ pub async fn recover(completion: &Completion) -> Result<(), sqlx::Error> {
                     | "response_body"
                     | "invalid_output"
                     | "rate_limited"
+                    | "billing"
                     | "busy"
                     | "invalid_request"
             )

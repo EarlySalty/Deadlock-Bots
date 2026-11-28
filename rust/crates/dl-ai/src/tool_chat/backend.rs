@@ -5,6 +5,7 @@ use super::types::{ToolChatRequest, ToolChatResponse};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     Limit,
+    Billing,
     Unavailable,
     Busy,
     Overloaded,
@@ -17,6 +18,7 @@ impl FailureKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Limit => "limit",
+            Self::Billing => "billing",
             Self::Unavailable => "unavailable",
             Self::Busy => "busy",
             Self::Overloaded => "overloaded",
@@ -37,6 +39,7 @@ impl FailureKind {
     pub fn ledger_code(self) -> &'static str {
         match self {
             Self::Limit => "rate_limited",
+            Self::Billing => "billing",
             Self::Unavailable => "transport",
             Self::Busy | Self::Overloaded => "busy",
             Self::Timeout => "timeout",

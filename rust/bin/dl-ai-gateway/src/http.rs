@@ -130,7 +130,9 @@ fn failure_response(failure: RouteError) -> Response {
         RouteError::UnknownSlot => invalid("unknown slot"),
         RouteError::Failed { last, .. } => {
             let (status, kind) = match last.kind {
-                FailureKind::Limit => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error"),
+                FailureKind::Limit | FailureKind::Billing => {
+                    (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+                }
                 FailureKind::Busy | FailureKind::Overloaded => (
                     StatusCode::from_u16(529).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
                     "overloaded_error",

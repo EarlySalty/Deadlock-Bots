@@ -1,0 +1,9 @@
+[Unit]
+Description=Deadlock KI-Gateway: Anbieterprüfung alle 6 Stunden
+
+[Timer]
+OnCalendar=*-*-* 00/6:20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
